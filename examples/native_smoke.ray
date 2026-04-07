@@ -1,0 +1,8 @@
+(do
+  (set db (datoms))
+  (set db (assert-fact db 1 'edge 2))
+  (set db (assert-fact db 2 'edge 3))
+  (set db (assert-fact db 3 'edge 4))
+  (rule (path ?x ?y) (?x :edge ?y))
+  (rule (path ?x ?z) (?x :edge ?y) (path ?y ?z))
+  (query db (find ?x ?y) (where (path ?x ?y))))

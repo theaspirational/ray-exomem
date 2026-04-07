@@ -1,0 +1,25 @@
+;; alice.ray — Assertions, retraction, and derived colleagues.
+;;
+;; Entities: alice=1 bob=2 carol=3
+;; Workplaces: google=10 lynx=11
+;;
+;; Demonstrates: asserting facts, retracting outdated ones, deriving
+;; colleague relationships via a rule, and querying the result.
+;; After retraction alice is only at lynx, so she and bob are colleagues
+;; while carol is alone at google.
+(do
+  (set db (datoms))
+  ;; alice at google (outdated) and lynx (current)
+  (set db (assert-fact db 1 'works_at 10))
+  (set db (assert-fact db 1 'works_at 11))
+  ;; bob at lynx
+  (set db (assert-fact db 2 'works_at 11))
+  ;; carol at google
+  (set db (assert-fact db 3 'works_at 10))
+  ;; Retract: alice no longer at google
+  (set db (retract-fact db 1 'works_at 10))
+  ;; Rule: colleagues share a workplace
+  (rule (colleague ?a ?b) (?a :works_at ?p) (?b :works_at ?p))
+  ;; Query: all colleague pairs (includes self-pairs)
+  ;; Expected: (1,1) (1,2) (2,1) (2,2) at lynx + (3,3) at google = 5 rows
+  (query db (find ?a ?b) (where (colleague ?a ?b))))

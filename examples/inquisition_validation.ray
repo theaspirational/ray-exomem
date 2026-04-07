@@ -1,0 +1,23 @@
+;; Inquisition-style validation: direct assertions plus a visible review queue.
+(do
+  (set db (datoms))
+
+  ;; Direct assertions that the UI/query output should expose.
+  (set db (assert-fact db 10 'claim 1))
+  (set db (assert-fact db 10 'source 501))
+  (set db (assert-fact db 10 'confidence 99))
+
+  (set db (assert-fact db 11 'claim 2))
+  (set db (assert-fact db 11 'source 502))
+  (set db (assert-fact db 11 'confidence 40))
+  (set db (assert-fact db 11 'needs_review 1))
+
+  (set db (assert-fact db 12 'claim 3))
+  (set db (assert-fact db 12 'source 503))
+  (set db (assert-fact db 12 'confidence 85))
+
+  ;; Rule-driven verification of the suspicious fact.
+  (rule (review_queue ?fact) (?fact :needs_review 1))
+
+  ;; Show the actual assertions in the UI output.
+  (query db (find ?fact ?score) (where (?fact :confidence ?score))))

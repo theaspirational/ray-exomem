@@ -1,0 +1,13 @@
+;; Multiple relations: edges and labels, joined in a rule.
+(do
+  (set db (datoms))
+  ;; edges
+  (set db (assert-fact db 1 'edge 2))
+  (set db (assert-fact db 2 'edge 3))
+  ;; labels (entity -> label-id mapping)
+  (set db (assert-fact db 1 'label 10))
+  (set db (assert-fact db 2 'label 20))
+  (set db (assert-fact db 3 'label 30))
+  ;; rule: connected_labels pairs labels of directly connected nodes
+  (rule (connected_labels ?la ?lb) (?a :edge ?b) (?a :label ?la) (?b :label ?lb))
+  (query db (find ?la ?lb) (where (connected_labels ?la ?lb))))

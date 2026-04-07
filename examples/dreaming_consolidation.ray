@@ -1,0 +1,18 @@
+;; Dreaming-style consolidation: visible assertions plus shared-observation clusters.
+(do
+  (set db (datoms))
+
+  ;; Base observations.
+  (set db (assert-fact db 100 'works_at 200))
+  (set db (assert-fact db 101 'works_at 200))
+  (set db (assert-fact db 102 'works_at 300))
+  (set db (assert-fact db 103 'knows 100))
+  (set db (assert-fact db 104 'knows 100))
+  (set db (assert-fact db 105 'knows 102))
+
+  ;; Consolidation rules based on shared target or shared source.
+  (rule (shared_company ?a ?b) (?a :works_at ?company) (?b :works_at ?company))
+  (rule (shared_contact ?a ?b) (?a :knows ?x) (?b :knows ?x))
+
+  ;; Show the actual assertions in the UI output.
+  (query db (find ?obs ?company) (where (?obs :works_at ?company))))

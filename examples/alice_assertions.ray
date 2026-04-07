@@ -1,0 +1,17 @@
+;; Alice-style assertions: show surviving facts directly, then derived colleagues.
+(do
+  (set db (datoms))
+
+  ;; Direct assertions that should show up in the query output.
+  (set db (assert-fact db 1 'works_at 100))
+  (set db (assert-fact db 1 'confidence 95))
+  (set db (assert-fact db 2 'works_at 100))
+  (set db (assert-fact db 2 'confidence 90))
+  (set db (assert-fact db 3 'works_at 200))
+  (set db (assert-fact db 3 'confidence 60))
+
+  ;; Retract Alice's old employer claim so the surviving assertion is visible.
+  (set db (retract-fact db 1 'works_at 100))
+
+  ;; Show the actual asserted rows in the UI output.
+  (query db (find ?e ?company) (where (?e :works_at ?company))))

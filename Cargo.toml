@@ -1,0 +1,21 @@
+[package]
+name = "ray-exomem"
+version = "0.1.0"
+edition = "2021"
+description = "Native rayforce2 knowledge-base front-end — Rayfall list-style syntax only"
+build = "build.rs"
+license = "MIT"
+
+[features]
+default = []
+daemon = []
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]

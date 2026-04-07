@@ -1,0 +1,9 @@
+;; Assert and retract facts, then query the surviving rows.
+(do
+  (set db (datoms))
+  (set db (assert-fact db 1 'color 100))
+  (set db (assert-fact db 2 'color 200))
+  (set db (assert-fact db 3 'color 300))
+  ;; Retract entity 2's color
+  (set db (retract-fact db 2 'color 200))
+  (query db (find ?e ?c) (where (?e :color ?c))))

@@ -1,0 +1,10 @@
+;; Transitive closure over a longer chain: 1->2->3->4->5
+(do
+  (set db (datoms))
+  (set db (assert-fact db 1 'edge 2))
+  (set db (assert-fact db 2 'edge 3))
+  (set db (assert-fact db 3 'edge 4))
+  (set db (assert-fact db 4 'edge 5))
+  (rule (reach ?x ?y) (?x :edge ?y))
+  (rule (reach ?x ?z) (?x :edge ?y) (reach ?y ?z))
+  (query db (find ?x ?y) (where (reach ?x ?y))))
