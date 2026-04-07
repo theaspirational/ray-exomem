@@ -5,6 +5,8 @@
 //! Persistence uses rayforce2 splayed columnar tables.
 
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::context::MutationContext;
@@ -16,7 +18,7 @@ use crate::context::MutationContext;
 pub type TxId = u64;
 pub type EntityId = String;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
     pub obs_id: EntityId,
     pub source_type: String,
@@ -32,7 +34,7 @@ pub struct Observation {
     pub valid_to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
     pub fact_id: EntityId,
     pub predicate: String,
@@ -49,7 +51,7 @@ pub struct Fact {
     pub valid_to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Belief {
     pub belief_id: EntityId,
     pub claim_text: String,
@@ -65,7 +67,7 @@ pub struct Belief {
     pub rationale: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BeliefStatus {
     Active,
     Superseded,
@@ -82,7 +84,7 @@ impl std::fmt::Display for BeliefStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tx {
     pub tx_id: TxId,
     pub tx_time: String,
@@ -95,13 +97,14 @@ pub struct Tx {
     pub session: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TxAction {
     AssertObservation,
     AssertFact,
     RetractFact,
     ReviseBelief,
     CreateBranch,
+    Merge,
 }
 
 impl std::fmt::Display for TxAction {
@@ -112,16 +115,43 @@ impl std::fmt::Display for TxAction {
             TxAction::RetractFact => write!(f, "retract-fact"),
             TxAction::ReviseBelief => write!(f, "revise-belief"),
             TxAction::CreateBranch => write!(f, "create-branch"),
+            TxAction::Merge => write!(f, "merge"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Branch {
     pub branch_id: String,
     pub name: String,
     pub parent_branch_id: Option<String>,
     pub created_tx_id: TxId,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergeConflict {
+    pub fact_id: String,
+    pub predicate: String,
+    pub source_value: String,
+    pub target_value: String,
+}
+
+#[derive(Debug)]
+pub struct MergeResult {
+    pub added: Vec<String>,
+    pub conflicts: Vec<MergeConflict>,
+    pub tx_id: TxId,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MergePolicy {
+    /// Source overrides target on conflict.
+    LastWriterWins,
+    /// Target keeps its version on conflict.
+    KeepTarget,
+    /// Return conflicts without resolving.
+    Manual,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +159,7 @@ pub struct Branch {
 // ---------------------------------------------------------------------------
 
 /// Which table was affected by a mutation.
+#[derive(Clone, Copy)]
 enum DirtyTable {
     Tx,
     Fact,
@@ -146,6 +177,8 @@ pub struct Brain {
     branches: Vec<Branch>,
     next_tx: TxId,
     current_branch: String,
+    /// Index: tx_id → branch_id (built at load time, updated on each alloc_tx).
+    tx_branch_index: HashMap<TxId, String>,
     /// If set, the exom directory for splayed table persistence.
     data_dir: Option<PathBuf>,
     /// Path to the shared symbol table file.
@@ -166,6 +199,7 @@ impl Brain {
             name: "main".into(),
             parent_branch_id: None,
             created_tx_id: 0,
+            archived: false,
         };
         Brain {
             observations: Vec::new(),
@@ -175,6 +209,7 @@ impl Brain {
             branches: vec![main_branch],
             next_tx: 1,
             current_branch: "main".into(),
+            tx_branch_index: HashMap::new(),
             data_dir: None,
             sym_path: None,
         }
@@ -202,6 +237,11 @@ impl Brain {
             if let Some(last) = brain.transactions.last() {
                 brain.next_tx = last.tx_id + 1;
             }
+            brain.tx_branch_index = brain
+                .transactions
+                .iter()
+                .map(|tx| (tx.tx_id, tx.branch_id.clone()))
+                .collect();
         }
         if let Some(tbl) = load("fact") {
             brain.facts = storage::load_facts(&tbl)?;
@@ -221,11 +261,137 @@ impl Brain {
                     name: "main".into(),
                     parent_branch_id: None,
                     created_tx_id: 0,
+                    archived: false,
                 });
             }
         }
 
         Ok(brain)
+    }
+
+    /// Recover a brain from JSONL sidecar files (used when the sym/splay
+    /// tables are corrupt after a binary upgrade). Rebuilds splay tables
+    /// and the sym file from the recovered data.
+    pub fn open_exom_from_jsonl(exom_dir: &Path, sym_path: &Path) -> Result<Self> {
+        use crate::storage;
+
+        let mut brain = Brain::new();
+        brain.data_dir = Some(exom_dir.to_path_buf());
+        brain.sym_path = Some(sym_path.to_path_buf());
+
+        brain.transactions = storage::load_jsonl(&exom_dir.join("tx.jsonl"))?;
+        if let Some(last) = brain.transactions.last() {
+            brain.next_tx = last.tx_id + 1;
+        }
+        brain.tx_branch_index = brain
+            .transactions
+            .iter()
+            .map(|tx| (tx.tx_id, tx.branch_id.clone()))
+            .collect();
+
+        brain.facts = storage::load_jsonl(&exom_dir.join("fact.jsonl"))?;
+        brain.observations = storage::load_jsonl(&exom_dir.join("observation.jsonl"))?;
+        brain.beliefs = storage::load_jsonl(&exom_dir.join("belief.jsonl"))?;
+        brain.branches = storage::load_jsonl(&exom_dir.join("branch.jsonl"))?;
+
+        // Ensure "main" branch exists
+        if !brain.branches.iter().any(|b| b.branch_id == "main") {
+            brain.branches.insert(
+                0,
+                Branch {
+                    branch_id: "main".into(),
+                    name: "main".into(),
+                    parent_branch_id: None,
+                    created_tx_id: 0,
+                    archived: false,
+                },
+            );
+        }
+
+        // Rebuild splay tables + sym from the recovered data
+        brain.save()?;
+
+        let n_facts = brain.facts.len();
+        let n_txs = brain.transactions.len();
+        eprintln!(
+            "[ray-exomem] recovered {} facts, {} transactions from JSONL",
+            n_facts, n_txs
+        );
+
+        Ok(brain)
+    }
+
+    /// Replace all brain state wholesale (used by lossless JSON import).
+    pub fn replace_state(
+        &mut self,
+        facts: Vec<Fact>,
+        transactions: Vec<Tx>,
+        observations: Vec<Observation>,
+        beliefs: Vec<Belief>,
+        branches: Vec<Branch>,
+    ) -> Result<()> {
+        self.facts = facts;
+        self.transactions = transactions;
+        self.observations = observations;
+        self.beliefs = beliefs;
+        self.branches = branches;
+
+        // Rebuild derived state
+        self.next_tx = self
+            .transactions
+            .last()
+            .map(|t| t.tx_id + 1)
+            .unwrap_or(1);
+        self.tx_branch_index = self
+            .transactions
+            .iter()
+            .map(|tx| (tx.tx_id, tx.branch_id.clone()))
+            .collect();
+
+        // Ensure "main" branch exists
+        if !self.branches.iter().any(|b| b.branch_id == "main") {
+            self.branches.insert(
+                0,
+                Branch {
+                    branch_id: "main".into(),
+                    name: "main".into(),
+                    parent_branch_id: None,
+                    created_tx_id: 0,
+                    archived: false,
+                },
+            );
+        }
+
+        // Persist everything
+        self.save()?;
+        Ok(())
+    }
+
+    /// Write JSONL sidecars for any tables that don't have them yet.
+    /// Called on normal startup to backfill after the first upgrade that
+    /// introduces JSONL persistence.
+    pub fn ensure_jsonl_sidecars(&self) -> Result<()> {
+        use crate::storage;
+
+        let Some(data_dir) = &self.data_dir else {
+            return Ok(());
+        };
+
+        let tables: &[(&str, Box<dyn Fn(&Path) -> Result<()> + '_>)] = &[
+            ("tx", Box::new(|p| storage::save_jsonl(&self.transactions, p))),
+            ("fact", Box::new(|p| storage::save_jsonl(&self.facts, p))),
+            ("observation", Box::new(|p| storage::save_jsonl(&self.observations, p))),
+            ("belief", Box::new(|p| storage::save_jsonl(&self.beliefs, p))),
+            ("branch", Box::new(|p| storage::save_jsonl(&self.branches, p))),
+        ];
+
+        for (name, save_fn) in tables {
+            let jsonl_path = data_dir.join(format!("{}.jsonl", name));
+            if !jsonl_path.exists() {
+                save_fn(&jsonl_path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Persist all tables to disk. No-op if no data_dir is set.
@@ -246,7 +412,7 @@ impl Brain {
             _ => return Ok(()), // in-memory mode
         };
 
-        let (name, ray_table) = match table {
+        let (name, ray_table) = match &table {
             DirtyTable::Tx => ("tx", storage::build_tx_table(&self.transactions)),
             DirtyTable::Fact => ("fact", storage::build_fact_table(&self.facts)),
             DirtyTable::Observation => ("observation", storage::build_observation_table(&self.observations)),
@@ -254,6 +420,17 @@ impl Brain {
             DirtyTable::Branch => ("branch", storage::build_branch_table(&self.branches)),
         };
 
+        // Write JSONL sidecar first (atomic rename — always consistent)
+        let jsonl_path = data_dir.join(format!("{}.jsonl", name));
+        match &table {
+            DirtyTable::Tx => storage::save_jsonl(&self.transactions, &jsonl_path)?,
+            DirtyTable::Fact => storage::save_jsonl(&self.facts, &jsonl_path)?,
+            DirtyTable::Observation => storage::save_jsonl(&self.observations, &jsonl_path)?,
+            DirtyTable::Belief => storage::save_jsonl(&self.beliefs, &jsonl_path)?,
+            DirtyTable::Branch => storage::save_jsonl(&self.branches, &jsonl_path)?,
+        };
+
+        // Then write splay table (binary cache)
         let dir = data_dir.join(name);
         storage::save_table(&ray_table, &dir, sym_path)?;
         storage::sym_save(sym_path)?;
@@ -283,6 +460,8 @@ impl Brain {
             session: ctx.session.clone(),
         };
         self.transactions.push(tx);
+        self.tx_branch_index
+            .insert(tx_id, self.current_branch.clone());
         self.persist_table(DirtyTable::Tx)?;
         Ok((tx_id, tx_time))
     }
@@ -481,6 +660,13 @@ impl Brain {
     }
 
     pub fn create_branch(&mut self, branch_id: &str, name: &str, ctx: &MutationContext) -> Result<TxId> {
+        if self
+            .branches
+            .iter()
+            .any(|b| b.branch_id == branch_id && !b.archived)
+        {
+            bail!("branch '{}' already exists", branch_id);
+        }
         let (tx_id, _tx_time) = self.alloc_tx(
             TxAction::CreateBranch,
             vec![branch_id.into()],
@@ -492,6 +678,7 @@ impl Brain {
             name: name.into(),
             parent_branch_id: Some(self.current_branch.clone()),
             created_tx_id: tx_id,
+            archived: false,
         };
         self.branches.push(branch);
         self.persist_table(DirtyTable::Branch)?;
@@ -499,11 +686,250 @@ impl Brain {
     }
 
     pub fn switch_branch(&mut self, branch_id: &str) -> Result<()> {
-        if !self.branches.iter().any(|b| b.branch_id == branch_id) {
+        let Some(b) = self.branches.iter().find(|b| b.branch_id == branch_id) else {
             bail!("unknown branch '{}'", branch_id);
+        };
+        if b.archived {
+            bail!("branch '{}' is archived", branch_id);
         }
         self.current_branch = branch_id.into();
         Ok(())
+    }
+
+    /// Mark a branch as archived (soft-delete). Cannot archive `main`.
+    pub fn archive_branch(&mut self, branch_id: &str) -> Result<()> {
+        if branch_id == "main" {
+            bail!("cannot archive branch 'main'");
+        }
+        let Some(branch) = self.branches.iter_mut().find(|b| b.branch_id == branch_id) else {
+            bail!("unknown branch '{}'", branch_id);
+        };
+        branch.archived = true;
+        if self.current_branch == branch_id {
+            self.current_branch = "main".into();
+        }
+        self.persist_table(DirtyTable::Branch)?;
+        Ok(())
+    }
+
+    /// Returns the ancestor chain from `branch_id` up to root (non-archived branches only).
+    /// Result: `[branch_id, parent, grandparent, ...]`.
+    pub fn branch_ancestors(&self, branch_id: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut cur = Some(branch_id.to_string());
+        let mut guard = 0u32;
+        while let Some(id) = cur.take() {
+            if guard > 256 {
+                break;
+            }
+            guard += 1;
+            let Some(b) = self.branches.iter().find(|x| x.branch_id == id) else {
+                break;
+            };
+            if b.archived {
+                break;
+            }
+            chain.push(b.branch_id.clone());
+            cur = b.parent_branch_id.clone();
+        }
+        if chain.is_empty() {
+            chain.push(branch_id.to_string());
+        }
+        chain
+    }
+
+    /// Look up which branch a tx was created on (O(1) via index).
+    pub fn tx_branch(&self, tx_id: TxId) -> Option<&str> {
+        self.tx_branch_index.get(&tx_id).map(|s| s.as_str())
+    }
+
+    fn tx_on_branches(&self, tx_id: TxId, branch_set: &HashSet<&str>) -> bool {
+        self.tx_branch(tx_id)
+            .map(|b| branch_set.contains(b))
+            .unwrap_or(false)
+    }
+
+    /// Depth of a tx's branch in the ancestor chain (0 = closest to the viewing branch).
+    pub fn branch_depth_of_tx(&self, tx_id: TxId, ancestors: &[String]) -> usize {
+        match self.tx_branch(tx_id) {
+            Some(b) => ancestors
+                .iter()
+                .position(|a| a == b)
+                .unwrap_or(usize::MAX),
+            None => usize::MAX,
+        }
+    }
+
+    /// Whether `f` is visible on `branch_id` (branch-scoped retractions and creation branch).
+    fn fact_visible_on_branch(&self, f: &Fact, branch_id: &str) -> bool {
+        let ancestors = self.branch_ancestors(branch_id);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        if !self.tx_on_branches(f.created_by_tx, &branch_set) {
+            return false;
+        }
+        if let Some(rev) = f.revoked_by_tx {
+            if self.tx_on_branches(rev, &branch_set) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Active facts visible on a specific branch (ancestor inheritance + shadowing by `fact_id`).
+    pub fn facts_on_branch(&self, branch_id: &str) -> Vec<&Fact> {
+        let ancestors = self.branch_ancestors(branch_id);
+        let mut visible: Vec<&Fact> = self
+            .facts
+            .iter()
+            .filter(|f| self.fact_visible_on_branch(f, branch_id))
+            .collect();
+        visible.sort_by_key(|f| self.branch_depth_of_tx(f.created_by_tx, &ancestors));
+        visible.dedup_by(|a, b| a.fact_id == b.fact_id);
+        visible
+    }
+
+    /// `"local"` | `"inherited"` | `"override"` for UI badges on the current branch view.
+    pub fn fact_branch_role(&self, f: &Fact, view_branch: &str) -> &'static str {
+        let ancestors = self.branch_ancestors(view_branch);
+        let d = self.branch_depth_of_tx(f.created_by_tx, &ancestors);
+        if d == usize::MAX {
+            return "local";
+        }
+        if d > 0 {
+            return "inherited";
+        }
+        for other in &self.facts {
+            if other.fact_id != f.fact_id || other.created_by_tx == f.created_by_tx {
+                continue;
+            }
+            let od = self.branch_depth_of_tx(other.created_by_tx, &ancestors);
+            if od != usize::MAX && od > d {
+                return "override";
+            }
+        }
+        "local"
+    }
+
+    pub fn branches(&self) -> &[Branch] {
+        &self.branches
+    }
+
+    pub fn current_branch_id(&self) -> &str {
+        &self.current_branch
+    }
+
+    /// Merge `source` into `target` using `policy`. Assertions run on `target`.
+    pub fn merge_branch(
+        &mut self,
+        source: &str,
+        target: &str,
+        policy: MergePolicy,
+        ctx: &MutationContext,
+    ) -> Result<MergeResult> {
+        if !self
+            .branches
+            .iter()
+            .any(|b| b.branch_id == source && !b.archived)
+        {
+            bail!("source branch '{}' not found", source);
+        }
+        if !self
+            .branches
+            .iter()
+            .any(|b| b.branch_id == target && !b.archived)
+        {
+            bail!("target branch '{}' not found", target);
+        }
+
+        let target_ancestors: HashSet<String> =
+            self.branch_ancestors(target).into_iter().collect();
+        let target_ancestors_ref: HashSet<&str> =
+            target_ancestors.iter().map(|s| s.as_str()).collect();
+
+        let source_facts: Vec<Fact> = self
+            .facts_on_branch(source)
+            .into_iter()
+            .cloned()
+            .collect();
+        let target_facts: Vec<Fact> = self
+            .facts_on_branch(target)
+            .into_iter()
+            .cloned()
+            .collect();
+        let target_map: HashMap<&str, &Fact> = target_facts
+            .iter()
+            .map(|f| (f.fact_id.as_str(), f))
+            .collect();
+
+        let mut added = Vec::new();
+        let mut conflicts = Vec::new();
+
+        let saved_branch = self.current_branch.clone();
+        self.current_branch = target.to_string();
+
+        for fact in &source_facts {
+            if self.tx_on_branches(fact.created_by_tx, &target_ancestors_ref) {
+                continue;
+            }
+
+            match target_map.get(fact.fact_id.as_str()) {
+                None => {
+                    self.assert_fact(
+                        &fact.fact_id,
+                        &fact.predicate,
+                        &fact.value,
+                        fact.confidence,
+                        &format!("merged-from:{}", source),
+                        Some(&fact.valid_from),
+                        fact.valid_to.as_deref(),
+                        ctx,
+                    )?;
+                    added.push(fact.fact_id.clone());
+                }
+                Some(target_fact) if target_fact.value != fact.value => {
+                    match policy {
+                        MergePolicy::LastWriterWins => {
+                            self.retract_fact(&fact.fact_id, ctx)?;
+                            self.assert_fact(
+                                &fact.fact_id,
+                                &fact.predicate,
+                                &fact.value,
+                                fact.confidence,
+                                &format!("merged-from:{}", source),
+                                Some(&fact.valid_from),
+                                fact.valid_to.as_deref(),
+                                ctx,
+                            )?;
+                            added.push(fact.fact_id.clone());
+                        }
+                        MergePolicy::KeepTarget => {}
+                        MergePolicy::Manual => {
+                            conflicts.push(MergeConflict {
+                                fact_id: fact.fact_id.clone(),
+                                predicate: fact.predicate.clone(),
+                                source_value: fact.value.clone(),
+                                target_value: target_fact.value.clone(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (tx_id, _) = self.alloc_tx(
+            TxAction::Merge,
+            vec![source.into(), target.into()],
+            &format!("merge {} → {}", source, target),
+            ctx,
+        )?;
+        self.current_branch = saved_branch;
+
+        Ok(MergeResult {
+            added,
+            conflicts,
+            tx_id,
+        })
     }
 
     /// Return all observations.
@@ -511,54 +937,108 @@ impl Brain {
         &self.observations
     }
 
+    /// All facts (including revoked/superseded) — used for lossless export.
+    pub fn all_facts(&self) -> &[Fact] {
+        &self.facts
+    }
+
+    /// All beliefs (including superseded/revoked) — used for lossless export.
+    pub fn all_beliefs(&self) -> &[Belief] {
+        &self.beliefs
+    }
+
     /// Total number of facts (including revoked).
     pub fn fact_count(&self) -> usize {
         self.facts.len()
     }
 
-    /// Return all currently-active facts (not revoked).
+    /// Return all currently-active facts (not revoked) on the current branch.
     pub fn current_facts(&self) -> Vec<&Fact> {
-        self.facts
-            .iter()
-            .filter(|f| f.revoked_by_tx.is_none())
-            .collect()
+        self.facts_on_branch(&self.current_branch)
     }
 
-    /// Return all currently-active beliefs.
+    /// Return active beliefs on the current branch (closest version wins per `claim_text`).
     pub fn current_beliefs(&self) -> Vec<&Belief> {
-        self.beliefs
-            .iter()
-            .filter(|b| b.status == BeliefStatus::Active)
-            .collect()
+        self.beliefs_on_branch(&self.current_branch)
     }
 
-    /// Return facts as they were at a specific transaction.
+    fn fact_active_as_of_on_branch(&self, f: &Fact, tx_id: TxId, branch_id: &str) -> bool {
+        let ancestors = self.branch_ancestors(branch_id);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        if f.created_by_tx > tx_id {
+            return false;
+        }
+        if !self.tx_on_branches(f.created_by_tx, &branch_set) {
+            return false;
+        }
+        if let Some(rev) = f.revoked_by_tx {
+            if rev <= tx_id && self.tx_on_branches(rev, &branch_set) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Return facts as they were at a specific transaction (branch = that tx's branch).
     pub fn facts_as_of(&self, tx_id: TxId) -> Vec<&Fact> {
-        self.facts
+        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
+        let ancestors = self.branch_ancestors(view_branch);
+        let mut visible: Vec<&Fact> = self
+            .facts
             .iter()
-            .filter(|f| f.created_by_tx <= tx_id && f.revoked_by_tx.is_none_or(|rev| rev > tx_id))
-            .collect()
+            .filter(|f| self.fact_active_as_of_on_branch(f, tx_id, view_branch))
+            .collect();
+        visible.sort_by_key(|f| self.branch_depth_of_tx(f.created_by_tx, &ancestors));
+        visible.dedup_by(|a, b| a.fact_id == b.fact_id);
+        visible
+    }
+
+    /// Active beliefs on a branch (closest branch wins per `claim_text`).
+    pub fn beliefs_on_branch(&self, branch_id: &str) -> Vec<&Belief> {
+        let ancestors = self.branch_ancestors(branch_id);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        let mut visible: Vec<&Belief> = self
+            .beliefs
+            .iter()
+            .filter(|b| {
+                b.status == BeliefStatus::Active && self.tx_on_branches(b.created_by_tx, &branch_set)
+            })
+            .collect();
+        visible.sort_by_key(|b| self.branch_depth_of_tx(b.created_by_tx, &ancestors));
+        visible.dedup_by(|a, b| a.claim_text == b.claim_text);
+        visible
     }
 
     /// Return beliefs as they were known at a specific transaction (transaction-time travel).
     pub fn beliefs_as_of(&self, tx_id: TxId) -> Vec<&Belief> {
-        // Pre-compute the latest tx per claim_text within the tx window
-        let mut latest_tx_by_claim: std::collections::HashMap<&str, TxId> = std::collections::HashMap::new();
+        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
+        let ancestors = self.branch_ancestors(view_branch);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        let mut latest_tx_by_claim: HashMap<&str, TxId> = HashMap::new();
         for b in &self.beliefs {
-            if b.created_by_tx <= tx_id {
-                let entry = latest_tx_by_claim.entry(&b.claim_text).or_insert(0);
-                if b.created_by_tx > *entry {
-                    *entry = b.created_by_tx;
-                }
+            if b.created_by_tx > tx_id {
+                continue;
+            }
+            if !self.tx_on_branches(b.created_by_tx, &branch_set) {
+                continue;
+            }
+            let entry = latest_tx_by_claim.entry(b.claim_text.as_str()).or_insert(0);
+            if b.created_by_tx > *entry {
+                *entry = b.created_by_tx;
             }
         }
-        self.beliefs
+        let mut out: Vec<&Belief> = self
+            .beliefs
             .iter()
             .filter(|b| {
                 b.created_by_tx <= tx_id
+                    && self.tx_on_branches(b.created_by_tx, &branch_set)
                     && latest_tx_by_claim.get(b.claim_text.as_str()) == Some(&b.created_by_tx)
             })
-            .collect()
+            .collect();
+        out.sort_by_key(|b| self.branch_depth_of_tx(b.created_by_tx, &ancestors));
+        out.dedup_by(|a, b| a.claim_text == b.claim_text);
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -567,41 +1047,72 @@ impl Brain {
 
     /// Return facts that were valid at a given real-world timestamp (current knowledge).
     pub fn facts_valid_at(&self, timestamp: &str) -> Vec<&Fact> {
-        self.facts
-            .iter()
-            .filter(|f| f.revoked_by_tx.is_none() && is_valid_at(&f.valid_from, f.valid_to.as_deref(), timestamp))
+        let view = self.current_branch.as_str();
+        self.facts_on_branch(view)
+            .into_iter()
+            .filter(|f| is_valid_at(&f.valid_from, f.valid_to.as_deref(), timestamp))
             .collect()
     }
 
     /// Bitemporal: facts as known at tx_id that were valid at the given real-world timestamp.
     pub fn facts_bitemporal(&self, tx_id: TxId, timestamp: &str) -> Vec<&Fact> {
-        self.facts
+        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
+        let ancestors = self.branch_ancestors(view_branch);
+        let mut visible: Vec<&Fact> = self
+            .facts
             .iter()
             .filter(|f| {
-                f.created_by_tx <= tx_id
-                    && f.revoked_by_tx.is_none_or(|rev| rev > tx_id)
+                self.fact_active_as_of_on_branch(f, tx_id, view_branch)
                     && is_valid_at(&f.valid_from, f.valid_to.as_deref(), timestamp)
             })
-            .collect()
+            .collect();
+        visible.sort_by_key(|f| self.branch_depth_of_tx(f.created_by_tx, &ancestors));
+        visible.dedup_by(|a, b| a.fact_id == b.fact_id);
+        visible
     }
 
     /// Return beliefs that were valid at a given real-world timestamp (current knowledge).
     pub fn beliefs_valid_at(&self, timestamp: &str) -> Vec<&Belief> {
-        self.beliefs
-            .iter()
-            .filter(|b| b.status == BeliefStatus::Active && is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp))
+        self.beliefs_on_branch(&self.current_branch)
+            .into_iter()
+            .filter(|b| is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp))
             .collect()
     }
 
     /// Bitemporal: beliefs as known at tx_id that were valid at the given real-world timestamp.
     pub fn beliefs_bitemporal(&self, tx_id: TxId, timestamp: &str) -> Vec<&Belief> {
-        self.beliefs
+        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
+        let ancestors = self.branch_ancestors(view_branch);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        let mut latest_tx_by_claim: HashMap<&str, TxId> = HashMap::new();
+        for b in &self.beliefs {
+            if b.created_by_tx > tx_id {
+                continue;
+            }
+            if !self.tx_on_branches(b.created_by_tx, &branch_set) {
+                continue;
+            }
+            if !is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp) {
+                continue;
+            }
+            let entry = latest_tx_by_claim.entry(b.claim_text.as_str()).or_insert(0);
+            if b.created_by_tx > *entry {
+                *entry = b.created_by_tx;
+            }
+        }
+        let mut out: Vec<&Belief> = self
+            .beliefs
             .iter()
             .filter(|b| {
                 b.created_by_tx <= tx_id
+                    && self.tx_on_branches(b.created_by_tx, &branch_set)
+                    && latest_tx_by_claim.get(b.claim_text.as_str()) == Some(&b.created_by_tx)
                     && is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp)
             })
-            .collect()
+            .collect();
+        out.sort_by_key(|b| self.branch_depth_of_tx(b.created_by_tx, &ancestors));
+        out.dedup_by(|a, b| a.claim_text == b.claim_text);
+        out
     }
 
     /// Return all historical versions of a fact (including revoked).
@@ -998,6 +1509,27 @@ mod tests {
 
         let err = brain.switch_branch("nonexistent").unwrap_err();
         assert!(err.to_string().contains("unknown branch"));
+    }
+
+    #[test]
+    fn facts_on_branch_shadows_ancestor() {
+        let mut brain = Brain::new();
+        brain
+            .assert_fact("f1", "sky-color", "blue", 1.0, "t", None, None, &MutationContext::default())
+            .unwrap();
+        brain.create_branch("exp", "e", &MutationContext::default()).unwrap();
+        brain.switch_branch("exp").unwrap();
+        brain
+            .assert_fact("f1", "sky-color", "red", 1.0, "t", None, None, &MutationContext::default())
+            .unwrap();
+
+        let on_main = brain.facts_on_branch("main");
+        assert_eq!(on_main.len(), 1);
+        assert_eq!(on_main[0].value, "blue");
+
+        let on_exp = brain.facts_on_branch("exp");
+        assert_eq!(on_exp.len(), 1);
+        assert_eq!(on_exp[0].value, "red");
     }
 
     #[test]

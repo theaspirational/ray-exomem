@@ -80,7 +80,7 @@ ray-exomem eval '(query main (find ?p ?v) (where (trusted ?p ?v)))'
 ```bash
 ray-exomem observe "humidity is 65%" --source-type sensor --source-ref "sensor-7" \
                                      --confidence 0.95 --tags "env,climate"
-ray-exomem export > snapshot.ray
+ray-exomem export > backup.json
 ```
 
 **7. Full agent workflow in one eval call**
@@ -91,6 +91,11 @@ ray-exomem eval '
   (rule main (connected ?x ?z) (?x :knows ?y) (?y :knows ?z))
   (query main (find ?x ?z) (where (connected ?x ?z)))
 '
+```
+
+**8. Evaluate from a file**
+```bash
+ray-exomem eval --file examples/native_smoke.ray
 ```
 
 **Offline (no daemon)**
@@ -175,27 +180,26 @@ ray-exomem [OPTIONS] <COMMAND>
 
 | Command | Description |
 |---|---|
-| `serve` | Start daemon in foreground (`--port`, `--no-persist`) |
 | `daemon` | Start daemon in background |
+| `serve` | Start daemon in foreground (`--port`, `--no-persist`) |
 | `stop` | Stop a running daemon |
 | `status` | Show daemon health and exom stats |
-| `eval <expr>` | Evaluate Rayfall source via the daemon |
-| `assert <entity> <attr> <value>` | Assert a fact (`--confidence`, `--valid-from`, `--valid-to`, `--source`) |
+| `eval <expr>` | Evaluate Rayfall source (inline or `--file`) |
+| `assert <predicate> <value>` | Assert a fact (`--confidence`, `--valid-from`, `--valid-to`, `--source`) |
 | `retract <predicate>` | Soft-retract a fact (closes valid-time interval) |
 | `facts` | List current facts in an exom |
 | `observe <content>` | Record an observation (`--source-type`, `--source-ref`, `--confidence`, `--tags`) |
-| `import [file]` | Import a `.ray` file (or stdin) into an exom |
-| `export` | Export all facts as Rayfall source |
+| `export` | Export all data as lossless JSON (`--format rayfall` for human-readable) |
+| `import <file>` | Import a JSON backup (replaces all data in the exom) |
 | `exoms` | List all exoms |
 | `log` | Show recent transaction log |
 | `branch <sub>` | Manage branches: `list`, `create`, `switch`, `diff`, `merge`, `delete` |
 | `run <file>` | Evaluate a `.ray` file offline (no daemon) |
-| `load <file>` | Alias for `run` |
 | `version` | Print version and rayforce2 engine info |
 | `guide [topic]` | Print operator reference (`overview`, `cli`, `http`, `env`, `limitations`) |
 
 All commands that talk to the daemon accept `--exom <name>` (default: `main`)
-and `--url <base>` (default: `http://127.0.0.1:9780`).
+and `--addr <host:port>` (default: `127.0.0.1:9780`).
 
 Attribution for the transaction log:
 ```bash
@@ -204,10 +208,38 @@ ray-exomem assert alice :role engineer --actor "ops-bot" --session "s-42" --mode
 
 ---
 
+## Export and import
+
+ray-exomem uses **lossless JSON** as its default export/import format. Every
+entity type (facts, transactions, observations, beliefs, branches, rules) is
+included with full metadata — confidence, provenance, valid-time intervals,
+transaction IDs, actor/session info.
+
+```bash
+# Lossless backup (default)
+ray-exomem export > backup.json
+
+# Restore from backup (replaces all data in the exom)
+ray-exomem import backup.json
+
+# Human-readable Rayfall (facts + rules only, lossy)
+ray-exomem export --format rayfall > snapshot.ray
+```
+
+The JSON format is also available via the HTTP API:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/actions/export-json` | Lossless JSON export |
+| `POST` | `/api/actions/import-json` | Lossless JSON import (replaces exom data) |
+| `GET` | `/api/actions/export` | Human-readable Rayfall export |
+
+---
+
 ## HTTP API
 
-Base URL: `http://127.0.0.1:9780`  
-Exom selection: `?exom=<name>` query parameter (default: `main`)  
+Base URL: `http://127.0.0.1:9780`
+Exom selection: `?exom=<name>` query parameter (default: `main`)
 Attribution: `X-Actor`, `X-Session`, `X-Model` request headers
 
 ### Status and discovery
@@ -226,10 +258,11 @@ Attribution: `X-Actor`, `X-Session`, `X-Model` request headers
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/actions/eval` | Evaluate a Rayfall expression |
-| `POST` | `/api/actions/import` | Import a Rayfall source body |
 | `POST` | `/api/actions/assert-fact` | Assert a structured fact with interval metadata |
 | `POST` | `/api/actions/retract` | Soft-retract a fact |
-| `GET` | `/api/actions/export` | Export all facts as Rayfall |
+| `GET` | `/api/actions/export` | Export facts as Rayfall |
+| `GET` | `/api/actions/export-json` | Lossless JSON export (all entities) |
+| `POST` | `/api/actions/import-json` | Lossless JSON import (replaces exom data) |
 | `GET` | `/api/facts/<id>` | Detail for a specific fact |
 | `GET` | `/api/facts/valid-at` | Facts valid at a point in time (`?t=<iso8601>`) |
 | `GET` | `/api/facts/bitemporal` | Bitemporal query (valid-time + transaction-time) |
@@ -284,24 +317,57 @@ The Svelte UI is served at `http://127.0.0.1:9780` when the daemon is running.
 
 ```
 ~/.ray-exomem/
-  sym                   ← shared symbol table (rayforce2 intern table)
+  sym                     ← shared symbol table (rayforce2 intern table)
   exoms/
     main/
-      datoms/           ← EAV triples (rayforce2 splayed columnar table)
-      facts/            ← Fact rows
-      observations/     ← Observation rows
-      beliefs/          ← Belief rows
-      transactions/     ← Tx log
-      branches/         ← Branch metadata
-      rules.ray         ← Datalog rule text
+      fact.jsonl          ← JSONL sidecar (source of truth)
+      tx.jsonl            ← transaction log
+      observation.jsonl   ← observations
+      belief.jsonl        ← beliefs
+      branch.jsonl        ← branch metadata
+      rules.ray           ← Datalog rule text
+      datoms/             ← EAV triples (rayforce2 splayed columnar table)
+      fact/               ← Fact columns (binary cache)
+      tx/                 ← Tx columns (binary cache)
+      observation/        ← Observation columns (binary cache)
+      belief/             ← Belief columns (binary cache)
+      branch/             ← Branch columns (binary cache)
 ```
 
-All tables use rayforce2's splayed format — one file per column, typed binary
-vectors, no external dependencies. The shared symbol table maps interned strings
-to integer IDs across all exoms.
+### Dual persistence: JSONL + splay tables
 
-Writes are write-through for interactive commands and snapshot-based (temp →
-fsync → atomic rename) on daemon shutdown.
+Every mutation writes two representations:
+
+1. **JSONL sidecars** (`.jsonl` files) — one JSON object per line, one file per
+   entity type. Written first via atomic rename (`tmp` → final). These are the
+   **source of truth** and are human-readable, portable, and format-stable.
+
+2. **Splay tables** (rayforce2 columnar binary) — written second as a performance
+   cache. These enable fast Datalog queries via the C engine.
+
+### Upgrade resilience
+
+The rayforce2 symbol table (`sym`) is a binary blob whose format may change
+between engine versions. If the symbol table becomes unreadable after a binary
+upgrade:
+
+1. The daemon detects the incompatible `sym` file on startup
+2. All exoms are **automatically recovered from JSONL sidecars** (zero data loss)
+3. Splay tables and the symbol table are rebuilt from the recovered data
+4. The daemon starts normally with a warning in the log
+
+This means **binary upgrades never lose data** — the JSONL files are always
+consistent and independent of the rayforce2 binary format.
+
+### Manual backup and restore
+
+```bash
+# Full lossless backup
+ray-exomem export > backup.json
+
+# Restore (replaces all data in the target exom)
+ray-exomem import backup.json
+```
 
 ---
 
@@ -313,7 +379,7 @@ CLI / HTTP client
       ▼
   ray-exomem daemon
   ┌─────────────────────────────────────────┐
-  │  web.rs  (HTTP API, SSE, actix-web)     │
+  │  web.rs  (HTTP API, SSE)               │
   │  main.rs (CLI, clap)                    │
   │                                         │
   │  brain.rs  (Fact / Observation /        │
@@ -321,7 +387,7 @@ CLI / HTTP client
   │  exom.rs   (exom registry, disk I/O)    │
   │  rules.rs  (rule parsing, head/arity)   │
   │  context.rs (actor / session / model)   │
-  │  storage.rs (splay I/O, datom codec)    │
+  │  storage.rs (splay I/O, JSONL, datom)   │
   │  backend.rs (RayforceEngine wrapper)    │
   │  ffi.rs    (C FFI declarations)         │
   └──────────────┬──────────────────────────┘
@@ -339,7 +405,7 @@ CLI / HTTP client
 
 **ray-exomem** owns: daemon lifecycle, CLI/HTTP transport, exom registry,
 bitemporal fact model, transaction log, branch management, persistence
-coordination, and the datom encoding scheme.
+coordination, JSONL sidecar writes, and the datom encoding scheme.
 
 **rayforce2** owns: Rayfall parsing and evaluation, Datalog fixpoint computation,
 relation storage, query planning, column I/O, and the symbol intern table.

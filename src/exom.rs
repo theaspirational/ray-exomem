@@ -23,20 +23,52 @@ fn is_rayfall_symbol_name(name: &str) -> bool {
 /// Manages the `~/.ray-exomem/` directory structure.
 pub struct ExomDir {
     root: PathBuf,
+    /// True when the sym file was corrupt/incompatible and we must recover
+    /// exom state from JSONL sidecars instead of splay tables.
+    recovery_mode: bool,
 }
 
 impl ExomDir {
     /// Open (or create) the data directory. Loads the global symbol table.
+    /// If the symbol table is corrupt or incompatible (e.g. after a binary
+    /// upgrade), enters recovery mode — exoms will be loaded from JSONL
+    /// sidecars and splay tables rebuilt.
     pub fn open(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(root.join("exoms"))
             .with_context(|| format!("failed to create {}/exoms", root.display()))?;
 
-        let dir = Self { root };
+        let mut dir = Self { root, recovery_mode: false };
 
-        // Load global symbol table if it exists
-        storage::sym_load(&dir.sym_path())?;
+        if !storage::sym_load(&dir.sym_path())? {
+            eprintln!(
+                "[ray-exomem] WARNING: symbol table incompatible (binary upgrade?). \
+                 Recovering from JSONL sidecars: {}",
+                dir.root.display()
+            );
+            dir.wipe_sym()?;
+            dir.recovery_mode = true;
+        }
 
         Ok(dir)
+    }
+
+    /// Whether we're in recovery mode (sym was corrupt, load from JSONL).
+    pub fn is_recovery_mode(&self) -> bool {
+        self.recovery_mode
+    }
+
+    /// Remove only the sym files so they can be regenerated from fresh data.
+    fn wipe_sym(&self) -> Result<()> {
+        let sym = self.sym_path();
+        if sym.exists() {
+            std::fs::remove_file(&sym)
+                .with_context(|| format!("failed to remove {}", sym.display()))?;
+        }
+        let sym_lk = self.root.join("sym.lk");
+        if sym_lk.exists() {
+            let _ = std::fs::remove_file(&sym_lk);
+        }
+        Ok(())
     }
 
     /// Path to the global symbol table file.

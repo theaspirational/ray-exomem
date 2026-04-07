@@ -641,6 +641,7 @@
 						<th class="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Predicate</th>
 						<th class="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Terms</th>
 						<th class="w-24 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Kind</th>
+						<th class="w-28 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Branch</th>
 						<th class="w-44 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Validity</th>
 						<th class="w-12 px-3 py-2"></th>
 					</tr>
@@ -671,6 +672,18 @@
 									variant={fact.kind === 'derived' ? 'secondary' : 'outline'}
 									class="text-[0.6rem] px-1.5 h-4"
 								>{fact.kind}</Badge>
+							</td>
+							<td class="px-3 py-1.5">
+								{#if fact.branchRole && fact.branchRole !== 'local'}
+									<Badge
+										variant="outline"
+										class="h-3.5 px-1 text-[0.55rem] capitalize text-muted-foreground"
+									>
+										{fact.branchRole}
+									</Badge>
+								{:else}
+									<span class="text-muted-foreground/40">&mdash;</span>
+								{/if}
 							</td>
 							<td class="px-3 py-1.5 font-mono text-xs text-muted-foreground">
 								{#if fact.validFrom}

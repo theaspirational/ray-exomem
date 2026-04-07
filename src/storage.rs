@@ -4,9 +4,11 @@
 //! plus RAII wrappers and symbol table helpers.
 
 use std::ffi::CString;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::brain::{Belief, BeliefStatus, Branch, Fact, Observation, Tx, TxAction};
 use crate::datom;
@@ -94,16 +96,65 @@ pub fn sym_save(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn sym_load(path: &Path) -> Result<()> {
+/// Load the global symbol table. Returns `Ok(true)` on success or empty,
+/// `Ok(false)` if the file is corrupt/incompatible (caller should wipe and
+/// start fresh), or `Err` for genuine I/O failures.
+pub fn sym_load(path: &Path) -> Result<bool> {
     if !path.exists() {
-        return Ok(()); // nothing to load yet
+        return Ok(true);
     }
     let c_path = path_to_cstring(path)?;
     let err = unsafe { ffi::ray_sym_load(c_path.as_ptr()) };
-    if err != ffi::RAY_OK {
-        bail!("ray_sym_load failed (error code {})", err);
+    if err == ffi::RAY_OK {
+        return Ok(true);
     }
+    if err == ffi::RAY_ERR_CORRUPT {
+        return Ok(false);
+    }
+    bail!("ray_sym_load failed (error code {})", err)
+}
+
+// ---------------------------------------------------------------------------
+// JSONL sidecar persistence
+// ---------------------------------------------------------------------------
+
+/// Write items as one-JSON-object-per-line. Uses atomic rename so readers
+/// never see a partial file.
+pub fn save_jsonl<T: Serialize>(items: &[T], path: &Path) -> Result<()> {
+    let tmp = path.with_extension("jsonl.tmp");
+    let mut f = std::fs::File::create(&tmp)
+        .with_context(|| format!("failed to create {}", tmp.display()))?;
+    for item in items {
+        serde_json::to_writer(&mut f, item)
+            .with_context(|| format!("failed to serialize to {}", tmp.display()))?;
+        f.write_all(b"\n")?;
+    }
+    f.flush()?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// Load items from a JSONL file. Returns an empty vec if the file doesn't exist.
+pub fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let f = std::fs::File::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = std::io::BufReader::new(f);
+    let mut items = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| format!("failed to read line {} of {}", i + 1, path.display()))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item: T = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse line {} of {}", i + 1, path.display()))?;
+        items.push(item);
+    }
+    Ok(items)
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +669,7 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
         TxAction::RetractFact => "retract-fact",
         TxAction::ReviseBelief => "revise-belief",
         TxAction::CreateBranch => "create-branch",
+        TxAction::Merge => "merge",
     }).collect();
     let refs: Vec<String> = txs.iter().map(|t| encode_string_vec(&t.refs)).collect();
     let refs_strs: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
@@ -667,6 +719,7 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
             "retract-fact" => TxAction::RetractFact,
             "revise-belief" => TxAction::ReviseBelief,
             "create-branch" => TxAction::CreateBranch,
+            "merge" => TxAction::Merge,
             other => bail!("unknown tx action: {}", other),
         };
         txs.push(Tx {
@@ -689,7 +742,7 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
 // ---------------------------------------------------------------------------
 
 pub fn build_branch_table(branches: &[Branch]) -> RayObj {
-    let mut b = TableBuilder::new(4);
+    let mut b = TableBuilder::new(5);
 
     let ids: Vec<&str> = branches.iter().map(|b| b.branch_id.as_str()).collect();
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
@@ -697,11 +750,13 @@ pub fn build_branch_table(branches: &[Branch]) -> RayObj {
         .map(|b| b.parent_branch_id.as_deref())
         .collect();
     let created: Vec<i64> = branches.iter().map(|b| b.created_tx_id as i64).collect();
+    let archived: Vec<i64> = branches.iter().map(|b| if b.archived { 1 } else { 0 }).collect();
 
     b.add_sym_col("branch_id", &ids);
     b.add_sym_col("name", &names);
     b.add_sym_col_nullable("parent_branch_id", &parents);
     b.add_i64_col("created_tx_id", &created, None);
+    b.add_i64_col("archived", &archived, None);
 
     b.finish()
 }
@@ -709,11 +764,17 @@ pub fn build_branch_table(branches: &[Branch]) -> RayObj {
 pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
     let tbl = table.as_ptr();
     let nrows = unsafe { ffi::ray_table_nrows(tbl) };
+    let ncols = unsafe { ffi::ray_table_ncols(tbl) };
 
     let ids = read_sym_col(tbl, 0, nrows)?;
     let names = read_sym_col(tbl, 1, nrows)?;
     let parents = read_sym_nullable_col(tbl, 2, nrows)?;
     let created = read_i64_col(tbl, 3, nrows);
+    let archived_col = if ncols >= 5 {
+        read_i64_col(tbl, 4, nrows)
+    } else {
+        vec![0i64; nrows as usize]
+    };
 
     let mut branches = Vec::with_capacity(nrows as usize);
     for i in 0..nrows as usize {
@@ -722,6 +783,7 @@ pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
             name: names[i].clone(),
             parent_branch_id: parents[i].clone(),
             created_tx_id: created[i] as u64,
+            archived: archived_col[i] != 0,
         });
     }
     Ok(branches)

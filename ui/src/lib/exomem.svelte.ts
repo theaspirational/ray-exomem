@@ -562,10 +562,22 @@ export function schemaToFacts(schema: ExomemSchemaResponse): FactEntry[] {
 				let validFrom: string | null = null;
 				let validTo: string | null = null;
 				let terms: string[];
+				let branchRole: FactEntry['branchRole'];
+				let branchOrigin: string | null = null;
 				if (last && typeof last === 'object' && 'valid_from' in (last as Record<string, unknown>)) {
-					const validity = last as { valid_from?: string; valid_to?: string | null };
+					const validity = last as {
+						valid_from?: string;
+						valid_to?: string | null;
+						branch_role?: string;
+						branch_origin?: string;
+					};
 					validFrom = validity.valid_from ?? null;
 					validTo = validity.valid_to ?? null;
+					branchOrigin = validity.branch_origin ?? null;
+					const br = validity.branch_role;
+					if (br === 'local' || br === 'inherited' || br === 'override') {
+						branchRole = br;
+					}
 					terms = tuple.slice(0, -1).map(String);
 				} else {
 					terms = tuple.map(String);
@@ -577,7 +589,9 @@ export function schemaToFacts(schema: ExomemSchemaResponse): FactEntry[] {
 					confidence: null,
 					source: null,
 					validFrom,
-					validTo
+					validTo,
+					branchRole,
+					branchOrigin
 				});
 			}
 		}
@@ -663,4 +677,96 @@ export function parseFactsFromExport(text: string): FactEntry[] {
 		}
 	}
 	return facts;
+}
+
+// ---------------------------------------------------------------------------
+// Branches
+// ---------------------------------------------------------------------------
+
+export interface BranchRow {
+	branch_id: string;
+	name: string;
+	parent_branch_id: string | null;
+	created_tx_id: number;
+	archived: boolean;
+	is_current: boolean;
+	fact_count: number;
+}
+
+export interface BranchDiffResult {
+	added: Record<string, unknown>[];
+	removed: Record<string, unknown>[];
+	changed: Record<string, unknown>[];
+}
+
+export interface MergeBranchResult {
+	added: string[];
+	conflicts: Array<{
+		fact_id: string;
+		predicate: string;
+		source_value: string;
+		target_value: string;
+	}>;
+	tx_id: number;
+}
+
+async function deleteRequest(path: string): Promise<void> {
+	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
+	let res: Response;
+	try {
+		res = await fetch(endpoint(path), { method: 'DELETE', signal });
+		clear();
+	} catch (e) {
+		clear();
+		if (signal.aborted) throw new Error(fetchTimedOutMessage());
+		throw e instanceof Error ? e : new Error(String(e));
+	}
+	if (!res.ok) throw new Error(`Delete failed: ${res.status} ${res.statusText}`);
+}
+
+export async function fetchBranches(exom = DEFAULT_EXOM): Promise<BranchRow[]> {
+	const r = await readJson<{ branches: BranchRow[] }>(
+		`api/branches?exom=${encodeURIComponent(exom)}`
+	);
+	return r.branches;
+}
+
+export async function createBranch(
+	branchId: string,
+	name: string,
+	exom = DEFAULT_EXOM
+): Promise<{ branch_id: string; tx_id: number }> {
+	return postAction(`api/branches?exom=${encodeURIComponent(exom)}`, {
+		branch_id: branchId,
+		name
+	});
+}
+
+export async function switchBranch(branchId: string, exom = DEFAULT_EXOM): Promise<void> {
+	await postText(`api/branches/${encodeURIComponent(branchId)}/switch?exom=${encodeURIComponent(exom)}`, '');
+}
+
+export async function fetchBranchDiff(
+	branchId: string,
+	base: string,
+	exom = DEFAULT_EXOM
+): Promise<BranchDiffResult> {
+	return readJson(
+		`api/branches/${encodeURIComponent(branchId)}/diff?exom=${encodeURIComponent(exom)}&base=${encodeURIComponent(base)}`
+	);
+}
+
+export async function mergeBranch(
+	source: string,
+	policy: string,
+	exom = DEFAULT_EXOM
+): Promise<MergeBranchResult> {
+	return postAction(
+		`api/branches/${encodeURIComponent(source)}/merge?exom=${encodeURIComponent(exom)}`,
+		{ policy }
+	);
+}
+
+export async function deleteBranch(branchId: string, exom = DEFAULT_EXOM): Promise<void> {
+	await deleteRequest(`api/branches/${encodeURIComponent(branchId)}?exom=${encodeURIComponent(exom)}`);
 }

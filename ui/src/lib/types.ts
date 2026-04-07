@@ -10,6 +10,8 @@ export interface ExomEntry {
 export interface ExomemStatus {
 	ok: boolean;
 	exom: string;
+	/** Active branch id for this exom (from server brain). */
+	current_branch?: string;
 	server: {
 		name: string;
 		version: string;
@@ -170,6 +172,10 @@ export interface FactEntry {
 	validFrom?: string | null;
 	/** When this fact ceased being true (ISO 8601). Null = still valid. */
 	validTo?: string | null;
+	/** Branch where the fact was asserted (`local` / `inherited` / `override`). */
+	branchRole?: 'local' | 'inherited' | 'override' | null;
+	/** Branch id that created this version of the fact. */
+	branchOrigin?: string | null;
 }
 
 // ---------------------------------------------------------------------------

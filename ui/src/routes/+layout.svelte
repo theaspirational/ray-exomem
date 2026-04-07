@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import type { Snippet } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
@@ -12,6 +13,7 @@
 		ChevronDown,
 		Database,
 		GitBranch,
+		GitBranchPlus,
 		Layers,
 		Menu,
 		Network,
@@ -24,17 +26,39 @@
 	} from '@lucide/svelte';
 
 	import { Badge } from '$lib/components/ui/badge';
+	import { fetchBranches, switchBranch, type BranchRow } from '$lib/exomem.svelte';
 	import { app } from '$lib/stores.svelte';
 
 	let { children }: { children: Snippet } = $props();
 
 	let collapsed = $state(false);
 	let exomDropdownOpen = $state(false);
+	let branchDropdownOpen = $state(false);
+	let branches = $state<BranchRow[]>([]);
 	let mobileSidebarOpen = $state(false);
+
+	async function refreshBranches() {
+		try {
+			branches = await fetchBranches(app.selectedExom);
+		} catch {
+			branches = [];
+		}
+	}
+
+	async function selectBranch(branchId: string) {
+		try {
+			await switchBranch(branchId, app.selectedExom);
+			branchDropdownOpen = false;
+			await invalidateAll();
+		} catch {
+			branchDropdownOpen = false;
+		}
+	}
 
 	const navItems = [
 		{ href: '/', label: 'Dashboard', icon: BookOpen },
 		{ href: '/facts', label: 'Facts', icon: Database },
+		{ href: '/branches', label: 'Branches', icon: GitBranchPlus },
 		{ href: '/rules', label: 'Rules', icon: GitBranch },
 		{ href: '/provenance', label: 'Provenance', icon: TreePine },
 		{ href: '/graph', label: 'Graph View', icon: Share2 },
@@ -63,6 +87,7 @@
 
 	onMount(() => {
 		void app.refreshExoms();
+		void refreshBranches();
 		// Defer SSE so the first batch of JSON API calls (Memory Overview Promise.all) is not
 		// competing for browser per-host connection slots with EventSource.
 		const connectTimer = window.setTimeout(() => app.live.connect(), 75);
@@ -77,6 +102,7 @@
 	$effect(() => {
 		app.selectedExom;
 		void app.refreshServerUptime();
+		void refreshBranches();
 	});
 </script>
 
@@ -165,6 +191,47 @@
 									<span class="flex-1 truncate">{exom.name}</span>
 									{#if app.selectedExom === exom.name}
 										<span class="size-1.5 rounded-full bg-primary"></span>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</div>
+		{/if}
+
+		<!-- Branch selector -->
+		{#if !collapsed}
+			<div class="border-b border-sidebar-border px-3 py-2.5">
+				<div class="relative">
+					<button
+						type="button"
+						class="flex w-full items-center gap-2 rounded-md border border-sidebar-border bg-sidebar-accent/50 px-2.5 py-1.5 text-left text-sm transition-colors hover:bg-sidebar-accent"
+						onclick={() => (branchDropdownOpen = !branchDropdownOpen)}
+					>
+						<GitBranch class="size-3.5 shrink-0 text-muted-foreground" />
+						<span class="flex-1 truncate font-mono text-xs font-medium">
+							{branches.find((b) => b.is_current)?.branch_id ?? 'main'}
+						</span>
+						<ChevronDown class="size-3 shrink-0 text-muted-foreground" />
+					</button>
+					{#if branchDropdownOpen}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div
+							class="absolute left-0 top-full z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-border bg-popover shadow-lg"
+							onmouseleave={() => (branchDropdownOpen = false)}
+						>
+							{#each branches.filter((b) => !b.archived) as br (br.branch_id)}
+								<button
+									type="button"
+									class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60 {br.is_current
+										? 'bg-muted/40 font-medium'
+										: ''}"
+									onclick={() => void selectBranch(br.branch_id)}
+								>
+									<span class="flex-1 truncate font-mono text-xs">{br.branch_id}</span>
+									{#if br.is_current}
+										<span class="size-1.5 shrink-0 rounded-full bg-primary"></span>
 									{/if}
 								</button>
 							{/each}

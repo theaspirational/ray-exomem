@@ -10,9 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::Deserialize;
+
 use crate::{
     backend::RayforceEngine,
-    brain::{self, Brain},
+    brain::{self, Brain, MergePolicy},
     context::MutationContext,
     exom::ExomDir,
     rayfall_parser::{self, FormKind},
@@ -172,7 +174,15 @@ fn reconcile_runtime_after_failed_restore(daemon: &DaemonState) -> Result<()> {
 
 fn load_exom_state(ed: Option<&ExomDir>, name: &str) -> Result<ExomState> {
     let brain = if let Some(ed) = ed {
-        Brain::open_exom(&ed.exom_path(name), &ed.sym_path())?
+        if ed.is_recovery_mode() {
+            eprintln!("[ray-exomem] recovering exom '{}' from JSONL sidecars", name);
+            Brain::open_exom_from_jsonl(&ed.exom_path(name), &ed.sym_path())?
+        } else {
+            let b = Brain::open_exom(&ed.exom_path(name), &ed.sym_path())?;
+            // Backfill JSONL sidecars if missing (first run after upgrade)
+            b.ensure_jsonl_sidecars()?;
+            b
+        }
     } else {
         Brain::new()
     };
@@ -447,6 +457,8 @@ fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &Ser
         ("GET", "/api/relation-graph") => api_relation_graph(state, exom),
         ("GET", "/api/explain") => api_explain(state, &req.query),
         ("GET", "/api/actions/export") => api_export(state, exom),
+        ("GET", "/api/actions/export-json") => api_export_json(state, exom),
+        ("POST", "/api/actions/import-json") => api_import_json(state, exom, &req.body, &ctx),
         ("POST", "/api/actions/clear") => api_clear(state, exom, &ctx),
         ("POST", "/api/actions/retract") => api_retract(state, exom, &req.body, &ctx),
         ("POST", "/api/actions/evaluate") => api_evaluate(state),
@@ -457,7 +469,13 @@ fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &Ser
         ("GET", "/api/facts/bitemporal") => api_facts_bitemporal(state, exom, &req.query),
         ("POST", "/api/exoms") => api_exom_create(state, &req.body),
         _ => {
-            if api_path.starts_with("/api/derived/") {
+            if (req.method.as_str(), api_path) == ("GET", "/api/branches") {
+                api_list_branches(state, exom)
+            } else if (req.method.as_str(), api_path) == ("POST", "/api/branches") {
+                api_create_branch(state, exom, &req.body, &ctx)
+            } else if api_path.starts_with("/api/branches/") {
+                api_branches_subpath(state, exom, api_path, req.method.as_str(), &req.body, &req.query, &ctx)
+            } else if api_path.starts_with("/api/derived/") {
                 let pred = api_path.strip_prefix("/api/derived/").unwrap_or("").trim_end_matches('/');
                 api_derived(state, exom, pred)
             } else if api_path.starts_with("/api/facts/") {
@@ -484,7 +502,7 @@ fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &Ser
     write_json_response(stream, status, &body)
 }
 
-type ApiResult = Result<(u16, String)>;
+type ApiResult = anyhow::Result<(u16, String)>;
 
 fn json_response(status: u16, body: &str) -> (u16, String) {
     (status, body.to_string())
@@ -561,6 +579,233 @@ fn extract_exom_from_rule_source(source: &str) -> String {
     s[..end].to_string()
 }
 
+#[derive(Deserialize)]
+struct CreateBranchReq {
+    branch_id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct MergeBranchReq {
+    #[serde(default)]
+    policy: Option<String>,
+}
+
+fn api_list_branches(state: &ServerState, exom: &str) -> ApiResult {
+    let daemon = get_daemon(state);
+    let es = get_exom_state(&daemon, exom)?;
+    let branches: Vec<_> = es
+        .brain
+        .branches()
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "branch_id": b.branch_id,
+                "name": b.name,
+                "parent_branch_id": b.parent_branch_id,
+                "created_tx_id": b.created_tx_id,
+                "archived": b.archived,
+                "is_current": b.branch_id == es.brain.current_branch_id(),
+                "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
+            })
+        })
+        .collect();
+    json_ok(&serde_json::json!({ "branches": branches }))
+}
+
+fn api_create_branch(state: &ServerState, exom: &str, body: &[u8], ctx: &MutationContext) -> ApiResult {
+    let req: CreateBranchReq =
+        serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON: {}", e))?;
+    let name = req.name.unwrap_or_else(|| req.branch_id.clone());
+    let mut daemon = get_daemon(state);
+    let tx_id = {
+        let ex = daemon
+            .exoms
+            .get_mut(exom)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+        ex.brain.create_branch(&req.branch_id, &name, ctx)?
+    };
+    json_ok(&serde_json::json!({
+        "branch_id": req.branch_id,
+        "tx_id": tx_id
+    }))
+}
+
+fn api_switch_branch(state: &ServerState, exom: &str, branch_id: &str, _ctx: &MutationContext) -> ApiResult {
+    let mut daemon = get_daemon(state);
+    {
+        let ex = daemon
+            .exoms
+            .get_mut(exom)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+        ex.brain.switch_branch(branch_id)?;
+    }
+    refresh_exom_binding(&mut daemon, state.exom_dir.as_ref(), exom)?;
+    if let Err(err) = restore_runtime(&daemon) {
+        if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+            eprintln!(
+                "[ray-exomem] branch switch restore failed: {} / {}",
+                err, e2
+            );
+        }
+    }
+    json_ok(&serde_json::json!({ "switched_to": branch_id }))
+}
+
+fn api_branch_diff(
+    state: &ServerState,
+    exom: &str,
+    branch_id: &str,
+    query: &HashMap<String, String>,
+) -> ApiResult {
+    let base = query.get("base").map(|s| s.as_str()).unwrap_or("main");
+    let daemon = get_daemon(state);
+    let es = get_exom_state(&daemon, exom)?;
+    let branch_facts = es.brain.facts_on_branch(branch_id);
+    let base_facts = es.brain.facts_on_branch(base);
+
+    let base_map: HashMap<&str, &brain::Fact> = base_facts
+        .iter()
+        .map(|f| (f.fact_id.as_str(), *f))
+        .collect();
+    let branch_map: HashMap<&str, &brain::Fact> = branch_facts
+        .iter()
+        .map(|f| (f.fact_id.as_str(), *f))
+        .collect();
+
+    let added: Vec<_> = branch_facts
+        .iter()
+        .filter(|f| !base_map.contains_key(f.fact_id.as_str()))
+        .map(|f| fact_to_json(f))
+        .collect();
+    let removed: Vec<_> = base_facts
+        .iter()
+        .filter(|f| !branch_map.contains_key(f.fact_id.as_str()))
+        .map(|f| fact_to_json(f))
+        .collect();
+    let changed: Vec<_> = branch_facts
+        .iter()
+        .filter_map(|f| {
+            base_map
+                .get(f.fact_id.as_str())
+                .filter(|base_f| base_f.value != f.value)
+                .map(|base_f| {
+                    serde_json::json!({
+                        "fact_id": f.fact_id,
+                        "predicate": f.predicate,
+                        "base_value": base_f.value,
+                        "branch_value": f.value,
+                    })
+                })
+        })
+        .collect();
+
+    json_ok(&serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    }))
+}
+
+fn api_merge_branch(
+    state: &ServerState,
+    exom: &str,
+    source: &str,
+    body: &[u8],
+    ctx: &MutationContext,
+) -> ApiResult {
+    let payload: MergeBranchReq = serde_json::from_slice(body).unwrap_or_default();
+    let policy = match payload.policy.as_deref().unwrap_or("last-writer-wins") {
+        "last-writer-wins" => MergePolicy::LastWriterWins,
+        "keep-target" => MergePolicy::KeepTarget,
+        "manual" => MergePolicy::Manual,
+        _ => bail!("unknown merge policy"),
+    };
+    let mut daemon = get_daemon(state);
+    let target = get_exom_state(&daemon, exom)?
+        .brain
+        .current_branch_id()
+        .to_string();
+    let result = {
+        let es = daemon
+            .exoms
+            .get_mut(exom)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+        es.brain.merge_branch(source, &target, policy, ctx)?
+    };
+    refresh_exom_binding(&mut daemon, state.exom_dir.as_ref(), exom)?;
+    if let Err(err) = restore_runtime(&daemon) {
+        if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+            eprintln!("[ray-exomem] merge restore failed: {} / {}", err, e2);
+        }
+    }
+    json_ok(&serde_json::json!({
+        "added": result.added,
+        "conflicts": result.conflicts.iter().map(|c| serde_json::json!({
+            "fact_id": c.fact_id,
+            "predicate": c.predicate,
+            "source_value": c.source_value,
+            "target_value": c.target_value,
+        })).collect::<Vec<_>>(),
+        "tx_id": result.tx_id,
+    }))
+}
+
+fn api_delete_branch(state: &ServerState, exom: &str, branch_id: &str) -> ApiResult {
+    let mut daemon = get_daemon(state);
+    {
+        let es = daemon
+            .exoms
+            .get_mut(exom)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+        es.brain.archive_branch(branch_id)?;
+    }
+    refresh_exom_binding(&mut daemon, state.exom_dir.as_ref(), exom)?;
+    if let Err(err) = restore_runtime(&daemon) {
+        if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+            eprintln!(
+                "[ray-exomem] archive branch restore failed: {} / {}",
+                err, e2
+            );
+        }
+    }
+    json_ok(&serde_json::json!({ "archived": branch_id }))
+}
+
+fn api_branches_subpath(
+    state: &ServerState,
+    exom: &str,
+    api_path: &str,
+    method: &str,
+    body: &[u8],
+    query: &HashMap<String, String>,
+    ctx: &MutationContext,
+) -> ApiResult {
+    let rest = api_path
+        .strip_prefix("/api/branches/")
+        .unwrap_or("")
+        .trim_start_matches('/');
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Ok(json_response(404, r#"{"error":"not found"}"#));
+    }
+    let id = parts[0];
+    if parts.len() == 2 && parts[1] == "switch" && method == "POST" {
+        return api_switch_branch(state, exom, id, ctx);
+    }
+    if parts.len() == 2 && parts[1] == "diff" && method == "GET" {
+        return api_branch_diff(state, exom, id, query);
+    }
+    if parts.len() == 2 && parts[1] == "merge" && method == "POST" {
+        return api_merge_branch(state, exom, id, body, ctx);
+    }
+    if parts.len() == 1 && method == "DELETE" {
+        return api_delete_branch(state, exom, id);
+    }
+    Ok(json_response(404, r#"{"error":"not found"}"#))
+}
+
 // ---------------------------------------------------------------------------
 // API handlers
 // ---------------------------------------------------------------------------
@@ -575,6 +820,7 @@ fn api_status(state: &ServerState, exom: &str) -> ApiResult {
     json_ok(&serde_json::json!({
         "ok": true,
         "exom": exom,
+        "current_branch": brain.current_branch_id(),
         "server": {
             "name": "ray-exomem",
             "version": env!("CARGO_PKG_VERSION"),
@@ -621,6 +867,8 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
             serde_json::json!({
                 "valid_from": f.valid_from,
                 "valid_to": f.valid_to,
+                "branch_origin": brain.tx_branch(f.created_by_tx).unwrap_or(""),
+                "branch_role": brain.fact_branch_role(f, brain.current_branch_id()),
             }),
         ]);
         if f.valid_to.is_some() {
@@ -1125,6 +1373,110 @@ fn api_export(state: &ServerState, exom: &str) -> ApiResult {
     }
 
     Ok((200, out))
+}
+
+/// Lossless JSON export — all entity types with full metadata.
+fn api_export_json(state: &ServerState, exom: &str) -> ApiResult {
+    let daemon = get_daemon(state);
+    let es = get_exom_state(&daemon, exom)?;
+
+    let payload = serde_json::json!({
+        "exom": exom,
+        "version": 1,
+        "facts": es.brain.all_facts(),
+        "transactions": es.brain.transactions(),
+        "observations": es.brain.observations(),
+        "beliefs": es.brain.all_beliefs(),
+        "branches": es.brain.branches(),
+        "rules": es.rules.iter().map(|r| &r.full_text).collect::<Vec<_>>(),
+    });
+
+    Ok((200, serde_json::to_string_pretty(&payload).unwrap()))
+}
+
+/// Lossless JSON import — replaces all data in the exom.
+fn api_import_json(
+    state: &ServerState,
+    exom: &str,
+    body: &[u8],
+    _ctx: &MutationContext,
+) -> ApiResult {
+    use crate::brain::{Belief, Branch, Fact, Observation, Tx};
+
+    #[derive(Deserialize)]
+    struct ImportPayload {
+        facts: Vec<Fact>,
+        transactions: Vec<Tx>,
+        #[serde(default)]
+        observations: Vec<Observation>,
+        #[serde(default)]
+        beliefs: Vec<Belief>,
+        #[serde(default)]
+        branches: Vec<Branch>,
+        #[serde(default)]
+        rules: Vec<String>,
+    }
+
+    let payload: ImportPayload = serde_json::from_slice(body)
+        .map_err(|e| anyhow!("invalid JSON import payload: {}", e))?;
+
+    let mut daemon = get_daemon(state);
+
+    // Mutate exom state in a block so the mutable borrow is released
+    let (n_facts, n_txs) = {
+        let es = daemon
+            .exoms
+            .get_mut(exom)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+
+        // Replace brain state wholesale
+        es.brain.replace_state(
+            payload.facts,
+            payload.transactions,
+            payload.observations,
+            payload.beliefs,
+            payload.branches,
+        )?;
+
+        // Replace rules
+        let mut parsed_rules = Vec::new();
+        for line in &payload.rules {
+            let line = line.trim();
+            if !line.is_empty() {
+                parsed_rules.push(rules::parse_rule_line(
+                    line,
+                    MutationContext::default(),
+                    String::new(),
+                )?);
+            }
+        }
+        es.rules = parsed_rules;
+
+        // Rebuild datoms and persist
+        es.datoms = storage::build_datoms_table(&es.brain.current_facts())?;
+        persist_exom_state(state.exom_dir.as_ref(), exom, es)?;
+
+        (es.brain.all_facts().len(), es.brain.transactions().len())
+    };
+
+    // Re-bind runtime (needs immutable borrow)
+    if let Err(e) = restore_runtime(&daemon) {
+        if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+            eprintln!(
+                "[ray-exomem] fatal: restore after import failed (first: {}, recover: {})",
+                e, e2
+            );
+            std::process::exit(1);
+        }
+    }
+
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "imported": {
+            "facts": n_facts,
+            "transactions": n_txs,
+        }
+    }))
 }
 
 fn api_clear(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult {

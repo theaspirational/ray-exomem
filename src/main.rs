@@ -1,7 +1,52 @@
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf};
 
 use ray_exomem::agent_guide::GuideTopic;
+
+#[derive(Subcommand)]
+enum BranchCommands {
+    /// List all branches.
+    List,
+    /// Create a new branch from the current branch.
+    Create {
+        branch_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Switch the active branch.
+    Switch {
+        branch_id: String,
+    },
+    /// Show differences between branches.
+    Diff {
+        branch_id: String,
+        #[arg(long, default_value = "main")]
+        base: String,
+    },
+    /// Merge a branch into the current branch.
+    Merge {
+        source: String,
+        #[arg(long, default_value = "last-writer-wins")]
+        policy: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Delete (archive) a branch.
+    Delete {
+        branch_id: String,
+    },
+}
 
 #[derive(Parser)]
 #[command(
@@ -62,19 +107,27 @@ enum Commands {
         data_dir: Option<PathBuf>,
     },
 
-    /// Evaluate inline Rayfall source via the daemon.
+    /// Evaluate Rayfall source via the daemon (inline or from file).
     #[command(
         after_long_help = "Examples:\n  \
             ray-exomem eval '(+ 1 2)'\n  \
+            ray-exomem eval --file myscript.ray\n  \
+            echo '(+ 1 2)' | ray-exomem eval --file -\n  \
             ray-exomem eval \"(query db (find ?x) (where (?x :edge ?y)))\" --addr 127.0.0.1:9780\n\n\
             POSTs plain text to /ray-exomem/api/actions/eval. Requires `ray-exomem daemon`."
     )]
     Eval {
-        /// Rayfall list-style source expression.
-        source: String,
+        /// Rayfall list-style source expression (omit when using --file).
+        source: Option<String>,
+        /// Path to a .ray file, or "-" for stdin.
+        #[arg(long)]
+        file: Option<String>,
         /// Daemon address (host:port — HTTP, no scheme).
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
+        /// Exom used for `--branch` switch (query source still names its database).
+        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        exom: String,
         /// Attribution: sent as X-Actor (default: anonymous).
         #[arg(long)]
         actor: Option<String>,
@@ -82,6 +135,9 @@ enum Commands {
         session: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Switch to this branch before evaluating (optional).
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// Foreground server (same UI + API as `daemon`; blocks the terminal). Prefer `daemon` for daily use.
@@ -122,7 +178,7 @@ enum Commands {
         after_long_help = "Examples:\n  \
             ray-exomem assert sky-color blue --exom main\n  \
             ray-exomem assert location paris --valid-from 2024-01-01T00:00:00Z --valid-to 2024-06-01T00:00:00Z\n\n\
-            For rich Rayfall, use: ray-exomem import file.ray"
+            For rich Rayfall, use: ray-exomem eval --file script.ray"
     )]
     Assert {
         /// Predicate name (e.g. "sky-color").
@@ -153,6 +209,9 @@ enum Commands {
         session: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Switch to this branch before asserting (optional).
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// Retract a fact by predicate.
@@ -171,6 +230,9 @@ enum Commands {
         session: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Switch to this branch before retracting (optional).
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// List current facts in an exom.
@@ -211,34 +273,28 @@ enum Commands {
         session: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Switch to this branch before recording (optional).
+        #[arg(long)]
+        branch: Option<String>,
     },
 
-    /// Import Rayfall source into an exom (POST body to eval).
-    #[command(
-        after_long_help = "Examples:\n  \
-            ray-exomem import myscript.ray\n  \
-            echo '(+ 1 2)' | ray-exomem import -\n\n\
-            Same endpoint as `eval`, but reads multi-line source from a file or stdin."
-    )]
-    Import {
-        /// Path to a .ray file, or "-" for stdin.
-        file: String,
+    /// Export all data from an exom as lossless JSON (default) or human-readable Rayfall.
+    Export {
         /// Target exom.
         #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
-        #[arg(long)]
-        actor: Option<String>,
-        #[arg(long)]
-        session: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
+        /// Output format: "json" (default, lossless) or "rayfall" (human-readable, facts + rules only).
+        #[arg(long, default_value = "json")]
+        format: String,
     },
 
-    /// Export all facts from an exom as Rayfall.
-    Export {
+    /// Import a lossless JSON backup into an exom (replaces all data).
+    Import {
+        /// Path to a .json backup file, or "-" for stdin.
+        file: String,
         /// Target exom.
         #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
         exom: String,
@@ -269,6 +325,16 @@ enum Commands {
 
     /// Run the brain/memory layer demo showing time-travel queries.
     BrainDemo,
+
+    /// Manage knowledge branches for hypothetical reasoning and parallel agent work.
+    Branch {
+        #[command(subcommand)]
+        command: BranchCommands,
+        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        exom: String,
+        #[arg(long, default_value = "127.0.0.1:9780")]
+        addr: String,
+    },
 
     /// Print the agent/operator reference (CLI workflows, HTTP routes, env, limitations).
     #[command(visible_alias = "docs")]
@@ -302,6 +368,20 @@ fn ctx_headers<'a>(
         h.push(("X-Model", m.as_str()));
     }
     h
+}
+
+fn switch_branch_cli(
+    c: &ray_exomem::client::Client,
+    branch: &Option<String>,
+    exom: &str,
+) -> Result<()> {
+    if let Some(b) = branch {
+        c.post_text(
+            &format!("/api/branches/{}/switch?exom={}", b, exom),
+            "",
+        )?;
+    }
+    Ok(())
 }
 
 /// Stop a running daemon by reading its PID file and sending SIGTERM.
@@ -393,13 +473,37 @@ fn main() {
         },
         Commands::Eval {
             source,
+            file,
             addr,
+            exom,
             actor,
             session,
             model,
+            branch,
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
+            if let Err(e) = switch_branch_cli(&c, &branch, &exom) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
             let h = ctx_headers(&actor, &session, &model);
+            let source = match (source, file) {
+                (Some(s), _) => s,
+                (None, Some(f)) if f == "-" => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                        .expect("failed to read stdin");
+                    buf
+                }
+                (None, Some(f)) => {
+                    std::fs::read_to_string(&f)
+                        .unwrap_or_else(|e| { eprintln!("error reading {}: {}", f, e); std::process::exit(1); })
+                }
+                (None, None) => {
+                    eprintln!("error: provide either a source expression or --file");
+                    std::process::exit(1);
+                }
+            };
             match c.post_text_with_headers("/api/actions/eval", &source, &h) {
                 Ok(body) => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -494,8 +598,13 @@ fn main() {
             actor,
             session,
             model,
+            branch,
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
+            if let Err(e) = switch_branch_cli(&c, &branch, &exom) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
             let h = ctx_headers(&actor, &session, &model);
             if valid_from.is_some() || valid_to.is_some() {
                 // Use the direct assert-fact endpoint for bitemporal assertions
@@ -541,8 +650,13 @@ fn main() {
             actor,
             session,
             model,
+            branch,
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
+            if let Err(e) = switch_branch_cli(&c, &branch, &exom) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
             let h = ctx_headers(&actor, &session, &model);
             let body = serde_json::json!({ "predicate": predicate }).to_string();
             match c.post_json_with_headers(&format!("/api/actions/retract?exom={}", exom), &body, &h) {
@@ -592,8 +706,13 @@ fn main() {
             actor,
             session,
             model,
+            branch,
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
+            if let Err(e) = switch_branch_cli(&c, &branch, &exom) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
             let h = ctx_headers(&actor, &session, &model);
             let ray = format!(
                 "(assert-fact {} \"observation\" 'content \"{}\")",
@@ -605,16 +724,19 @@ fn main() {
                 Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
             }
         }
-        Commands::Import {
-            file,
-            exom: _,
-            addr,
-            actor,
-            session,
-            model,
-        } => {
+        Commands::Export { exom, addr, format } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
-            let h = ctx_headers(&actor, &session, &model);
+            let endpoint = match format.as_str() {
+                "rayfall" => format!("/api/actions/export?exom={}", exom),
+                _ => format!("/api/actions/export-json?exom={}", exom),
+            };
+            match c.get(&endpoint) {
+                Ok(body) => print!("{}", body),
+                Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+            }
+        }
+        Commands::Import { file, exom, addr } => {
+            let c = ray_exomem::client::Client::new(Some(&addr));
             let source = if file == "-" {
                 let mut buf = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
@@ -624,15 +746,12 @@ fn main() {
                 std::fs::read_to_string(&file)
                     .unwrap_or_else(|e| { eprintln!("error reading {}: {}", file, e); std::process::exit(1); })
             };
-            match c.post_text_with_headers("/api/actions/eval", &source, &h) {
+            match c.post_json_with_headers(
+                &format!("/api/actions/import-json?exom={}", exom),
+                &source,
+                &[],
+            ) {
                 Ok(body) => println!("{}", body),
-                Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
-            }
-        }
-        Commands::Export { exom, addr } => {
-            let c = ray_exomem::client::Client::new(Some(&addr));
-            match c.get(&format!("/api/actions/export?exom={}", exom)) {
-                Ok(body) => print!("{}", body),
                 Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
             }
         }
@@ -689,6 +808,102 @@ fn main() {
         }
         Commands::BrainDemo => {
             println!("{}", ray_exomem::brain::Brain::run_demo());
+        }
+        Commands::Branch {
+            command,
+            exom,
+            addr,
+        } => {
+            let c = ray_exomem::client::Client::new(Some(&addr));
+            match command {
+                BranchCommands::List => match c.get(&format!("/api/branches?exom={}", exom)) {
+                    Ok(body) => println!("{}", body),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+                BranchCommands::Create {
+                    branch_id,
+                    name,
+                    actor,
+                    session,
+                    model,
+                } => {
+                    let actor_opt = Some(actor.clone());
+                    let h = ctx_headers(&actor_opt, &session, &model);
+                    let payload = serde_json::json!({
+                        "branch_id": branch_id,
+                        "name": name.unwrap_or_else(|| branch_id.clone()),
+                    });
+                    match c.post_json_with_headers(
+                        &format!("/api/branches?exom={}", exom),
+                        &payload.to_string(),
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                BranchCommands::Switch { branch_id } => {
+                    match c.post_text(
+                        &format!("/api/branches/{}/switch?exom={}", branch_id, exom),
+                        "",
+                    ) {
+                        Ok(_) => println!("Switched to branch '{}'", branch_id),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                BranchCommands::Diff { branch_id, base } => {
+                    match c.get(&format!(
+                        "/api/branches/{}/diff?exom={}&base={}",
+                        branch_id, exom, base
+                    )) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                BranchCommands::Merge {
+                    source,
+                    policy,
+                    actor,
+                    session,
+                    model,
+                } => {
+                    let actor_opt = Some(actor.clone());
+                    let h = ctx_headers(&actor_opt, &session, &model);
+                    let payload = serde_json::json!({ "policy": policy });
+                    match c.post_json_with_headers(
+                        &format!("/api/branches/{}/merge?exom={}", source, exom),
+                        &payload.to_string(),
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                BranchCommands::Delete { branch_id } => {
+                    match c.delete(&format!("/api/branches/{}?exom={}", branch_id, exom)) {
+                        Ok(_) => println!("Archived branch '{}'", branch_id),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
         Commands::Guide { topic } => {
             println!("{}", ray_exomem::agent_guide::render(topic));

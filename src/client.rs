@@ -23,6 +23,16 @@ impl Client {
         }
     }
 
+    /// DELETE request, returns the response body.
+    pub fn delete(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", PREFIX, path);
+        let request = format!(
+            "DELETE {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            url, self.addr
+        );
+        self.send_request(&request)
+    }
+
     /// GET request, returns the response body.
     pub fn get(&self, path: &str) -> Result<String> {
         let url = format!("{}{}", PREFIX, path);

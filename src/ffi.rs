@@ -17,6 +17,7 @@ pub struct ray_runtime_t {
 #[allow(non_camel_case_types)]
 pub type ray_err_t = c_int;
 pub const RAY_OK: ray_err_t = 0;
+pub const RAY_ERR_CORRUPT: ray_err_t = 10;
 
 // ---------------------------------------------------------------------------
 // Type constants

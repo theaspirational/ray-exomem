@@ -4,7 +4,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let rayforce2_dir = env::var("RAYFORCE2_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir.join("../rayforce2-fork"));
+        .unwrap_or_else(|_| manifest_dir.join("../rayforce2"));
 
     println!("cargo:rerun-if-env-changed=RAYFORCE2_DIR");
     println!(

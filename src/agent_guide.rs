@@ -96,6 +96,9 @@ exoms                 List knowledge bases (GET /api/exoms).
 
 log                   Recent events (GET /api/logs?exom=…).
 
+branch <subcommand>   List, create, switch, diff, merge, or archive branches. --exom, --addr.
+                      eval/assert/retract/observe/import accept --branch to switch before the op.
+
 version               Binary + rayforce2 version string.
 
 brain-demo            Print the built-in Brain layer demo (time-travel sample); separate
@@ -116,6 +119,12 @@ GET  /api/graph
 GET  /api/clusters
 GET  /api/logs
 GET  /api/exoms
+GET  /api/branches
+POST /api/branches                 (JSON: branch_id, name)
+POST /api/branches/<id>/switch
+GET  /api/branches/<id>/diff?base=…
+POST /api/branches/<id>/merge     (JSON: policy)
+DELETE /api/branches/<id>          (archive)
 GET  /api/provenance
 GET  /api/relation-graph
 GET  /api/explain?…
