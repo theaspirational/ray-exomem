@@ -26,28 +26,76 @@ or runs offline for scripting.
 
 ```bash
 # Build (requires rayforce2 checked out alongside this repo)
-cargo build
-
-# Start the daemon (http://127.0.0.1:9780)
-cargo run -- serve
-
-# Assert a fact into the default exom
-cargo run -- assert alice :name "Alice" --confidence 0.9 --source "observation"
-
-# Query facts
-cargo run -- facts
-
-# Evaluate Rayfall directly
-cargo run -- eval '(query main (find ?e ?n) (where (?e :name ?n)))'
-
-# Offline: evaluate a .ray file without the daemon
-cargo run -- run examples/native_smoke.ray
+cargo build --release
+cp target/release/ray-exomem ~/.local/bin/   # or anywhere on $PATH
 ```
 
 If rayforce2 is not in the default location:
-
 ```bash
-RAYFORCE2_DIR=/path/to/rayforce2 cargo build
+RAYFORCE2_DIR=/path/to/rayforce2 cargo build --release
+```
+
+**1. Start the daemon**
+```bash
+ray-exomem daemon
+# UI at http://127.0.0.1:9780
+# Stop with: ray-exomem stop
+```
+
+**2. Explore all commands**
+```bash
+ray-exomem --help
+ray-exomem assert --help
+ray-exomem eval   --help
+```
+
+**3. Assert facts**
+```bash
+# assert <predicate> <value>  [--exom <name>] [--confidence 0-1] [--source label]
+ray-exomem assert sky-color blue
+ray-exomem assert temperature 22   --confidence 0.8 --source sensor
+ray-exomem assert location paris   --valid-from 2024-01-01T00:00:00Z \
+                                   --valid-to   2024-06-01T00:00:00Z
+```
+
+**4. List and query facts**
+```bash
+# Show all facts in the current exom
+ray-exomem facts
+
+# Rayfall query — finds all (predicate, value) pairs
+ray-exomem eval '(query main (find ?p ?v) (where (?p :value ?v)))'
+```
+
+**5. Add a Datalog rule and query derived facts**
+```bash
+# Define a rule: anything observed by a sensor is trusted
+ray-exomem eval '(rule main (trusted ?p ?v) (?p :source sensor) (?p :value ?v))'
+
+# Query the derived relation
+ray-exomem eval '(query main (find ?p ?v) (where (trusted ?p ?v)))'
+```
+
+**6. Record an observation and export**
+```bash
+ray-exomem observe "humidity is 65%" --source-type sensor --source-ref "sensor-7" \
+                                     --confidence 0.95 --tags "env,climate"
+ray-exomem export > snapshot.ray
+```
+
+**7. Full agent workflow in one eval call**
+```bash
+ray-exomem eval '
+  (assert-fact main "alice" :knows "bob")
+  (assert-fact main "bob"   :knows "carol")
+  (rule main (connected ?x ?z) (?x :knows ?y) (?y :knows ?z))
+  (query main (find ?x ?z) (where (connected ?x ?z)))
+'
+```
+
+**Offline (no daemon)**
+```bash
+ray-exomem run examples/native_smoke.ray
 ```
 
 ---
@@ -298,6 +346,33 @@ relation storage, query planning, column I/O, and the symbol intern table.
 
 ---
 
+## How commands reach the engine
+
+`assert`, `retract`, `observe`, and `rule` commands are **intercepted in Rust**
+and handled by the Brain layer — they never reach the C engine via FFI. This
+keeps the transaction log, bitemporal metadata, and provenance consistent.
+
+`eval` and `query` forms pass through to `ray_eval_str()` in rayforce2. Before
+calling into C, the server rewrites each `(query ...)` form to inject the exom's
+stored rules as an inline `(rules ...)` clause, so Datalog derivation is always
+scoped to the current exom.
+
+```
+ray-exomem assert sky-color blue
+  └─ builds: (assert-fact main "sky-color" 'sky-color "blue")
+  └─ POST /api/actions/eval
+       └─ rayfall_parser classifies form as AssertFact
+       └─ brain.assert_fact(...)   ← Rust only, no FFI
+
+ray-exomem eval '(query main (find ?p) (where (?p :sky-color ?v)))'
+  └─ POST /api/actions/eval
+       └─ rayfall_parser classifies form as Query
+       └─ rewrites to: (query main (find ?p) (where ...) (rules ...exom-rules...))
+       └─ engine.eval(rewritten)   ← ray_eval_str() FFI → rayforce2
+```
+
+---
+
 ## Building
 
 Requirements:
@@ -306,14 +381,14 @@ Requirements:
 - rayforce2 checked out at `../rayforce2` (relative to this repo), or set `RAYFORCE2_DIR`
 
 ```bash
-# Build everything (compiles rayforce2 lib then ray-exomem)
-cargo build
+# Build (compiles rayforce2 lib, then ray-exomem)
+cargo build --release
 
 # Run tests
 cargo test
 
-# Release build
-cargo build --release
+# Point at a different rayforce2 checkout
+RAYFORCE2_DIR=/path/to/rayforce2 cargo build --release
 ```
 
 The build script (`build.rs`) calls `make lib` in the rayforce2 directory to
