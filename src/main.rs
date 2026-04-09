@@ -386,6 +386,21 @@ fn switch_branch_cli(
 
 /// Stop a running daemon by reading its PID file and sending SIGTERM.
 /// Returns true if a daemon was found and stopped.
+/// Check whether the given PID belongs to a ray-exomem process.
+fn is_ray_exomem_process(pid: u32) -> bool {
+    // macOS: `ps -p <pid> -o comm=` prints just the executable name
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let name = String::from_utf8_lossy(&o.stdout);
+            name.trim().ends_with("ray-exomem")
+        }
+        _ => false,
+    }
+}
+
 fn stop_existing_daemon(data_dir: &std::path::Path) -> bool {
     let pid_file = pid_path(data_dir);
     let pid_str = match std::fs::read_to_string(&pid_file) {
@@ -400,14 +415,8 @@ fn stop_existing_daemon(data_dir: &std::path::Path) -> bool {
         }
     };
 
-    // Check if process is alive
-    let alive = std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if !alive {
+    // Verify the PID actually belongs to ray-exomem (PID could have been recycled)
+    if !is_ray_exomem_process(pid) {
         let _ = std::fs::remove_file(&pid_file);
         return false;
     }
@@ -420,23 +429,20 @@ fn stop_existing_daemon(data_dir: &std::path::Path) -> bool {
     // Wait up to 3 seconds for graceful shutdown
     for _ in 0..30 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let still_alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !still_alive {
+        if !is_ray_exomem_process(pid) {
             let _ = std::fs::remove_file(&pid_file);
             eprintln!("[ray-exomem] Previous daemon stopped.");
             return true;
         }
     }
 
-    // Force kill if still alive
-    eprintln!("[ray-exomem] Daemon did not stop gracefully, sending SIGKILL...");
-    let _ = std::process::Command::new("kill")
-        .args(["-9", &pid.to_string()])
-        .status();
+    // Force kill only if still ray-exomem
+    if is_ray_exomem_process(pid) {
+        eprintln!("[ray-exomem] Daemon did not stop gracefully, sending SIGKILL...");
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
     let _ = std::fs::remove_file(&pid_file);
     true
 }
@@ -450,14 +456,15 @@ fn remove_pid(data_dir: &std::path::Path) {
     let _ = std::fs::remove_file(pid_path(data_dir));
 }
 
-fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> PathBuf {
-    match ui_dir {
-        Some(ui_dir) if ui_dir.is_absolute() => ui_dir,
-        Some(ui_dir) => std::env::current_dir()
-            .expect("failed to read current working directory")
-            .join(ui_dir),
-        None => ray_exomem::web::default_ui_dir(),
-    }
+fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> Option<PathBuf> {
+    ui_dir.map(|d| {
+        if d.is_absolute() { d }
+        else {
+            std::env::current_dir()
+                .expect("failed to read current working directory")
+                .join(d)
+        }
+    })
 }
 
 fn main() {
@@ -537,14 +544,45 @@ fn main() {
             // Stop any existing daemon
             stop_existing_daemon(&data_dir);
 
-            // Write our PID
+            // Resolve UI dir before fork (needs cwd)
+            let root = resolve_ui_dir(ui_dir);
+
+            // Fork into background
+            unsafe {
+                let pid = libc::fork();
+                if pid < 0 {
+                    eprintln!("[ray-exomem] fork failed");
+                    std::process::exit(1);
+                }
+                if pid > 0 {
+                    // Parent: print info and exit
+                    eprintln!("[ray-exomem] Daemon started (pid {})", pid);
+                    eprintln!("[ray-exomem] Open http://{}:{}/ray-exomem/", bind.ip(), bind.port());
+                    eprintln!("[ray-exomem] Stop with: ray-exomem stop");
+                    std::process::exit(0);
+                }
+                // Child: detach from terminal
+                libc::setsid();
+
+                // Redirect stdin/stdout/stderr to /dev/null
+                let devnull = libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_RDWR);
+                if devnull >= 0 {
+                    libc::dup2(devnull, 0); // stdin
+                    libc::dup2(devnull, 1); // stdout
+                    libc::dup2(devnull, 2); // stderr
+                    if devnull > 2 {
+                        libc::close(devnull);
+                    }
+                }
+            }
+
+            // Write child PID
             write_pid(&data_dir);
 
             // Register signal handler to clean up PID file on SIGTERM/SIGINT
             {
                 let cleanup_dir = data_dir.clone();
                 std::thread::spawn(move || {
-                    // Block until SIGTERM or SIGINT
                     unsafe {
                         let mut sigset: libc::sigset_t = std::mem::zeroed();
                         libc::sigemptyset(&mut sigset);
@@ -558,10 +596,6 @@ fn main() {
                     std::process::exit(0);
                 });
             }
-
-            let root = resolve_ui_dir(ui_dir);
-            eprintln!("[ray-exomem] Daemon starting (pid {})", std::process::id());
-            eprintln!("[ray-exomem] Stop with: ray-exomem stop");
 
             if let Err(err) = ray_exomem::web::serve(root, bind, Some(data_dir.clone())) {
                 remove_pid(&data_dir);

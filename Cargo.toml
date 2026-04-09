@@ -12,6 +12,7 @@ daemon = []
 
 [dependencies]
 anyhow = "1"
+include_dir = "0.7"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 libc = "0.2"

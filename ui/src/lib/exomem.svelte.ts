@@ -286,10 +286,20 @@ export async function fetchExoms(): Promise<ExomEntry[]> {
 // Database Actions
 // ---------------------------------------------------------------------------
 
-export function clearDatabase(
+export function retractAll(
 	exom = DEFAULT_EXOM
 ): Promise<{ ok: boolean; tuples_removed: number }> {
-	return postAction(`api/actions/clear?exom=${encodeURIComponent(exom)}`);
+	return postAction(`api/actions/retract-all?exom=${encodeURIComponent(exom)}`);
+}
+
+export function wipeExom(
+	exom = DEFAULT_EXOM
+): Promise<{ ok: boolean; wiped: string }> {
+	return postAction(`api/actions/wipe?exom=${encodeURIComponent(exom)}`);
+}
+
+export function factoryReset(): Promise<{ ok: boolean; removed_exoms: string[]; state: string }> {
+	return postAction('api/actions/factory-reset');
 }
 
 export function retractFact(

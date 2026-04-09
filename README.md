@@ -22,15 +22,25 @@ or runs offline for scripting.
 
 ---
 
-## Quick start
+## Install
 
+**One-liner** (requires Rust, Node.js, C compiler, git):
 ```bash
-# Build (requires rayforce2 checked out alongside this repo)
-cargo build --release
-cp target/release/ray-exomem ~/.local/bin/   # or anywhere on $PATH
+cargo install --git https://github.com/theaspirational/ray-exomem.git
 ```
 
-If rayforce2 is not in the default location:
+This clones the repo, auto-clones rayforce2, builds the UI, compiles everything,
+and installs a self-contained binary to `~/.cargo/bin/ray-exomem`.
+
+**From a local checkout:**
+```bash
+cargo install --path .
+# or build without installing:
+cargo build --release
+ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
+```
+
+If rayforce2 is elsewhere:
 ```bash
 RAYFORCE2_DIR=/path/to/rayforce2 cargo build --release
 ```
@@ -180,7 +190,7 @@ ray-exomem [OPTIONS] <COMMAND>
 
 | Command | Description |
 |---|---|
-| `daemon` | Start daemon in background |
+| `daemon` | Start daemon in background (forks, returns immediately) |
 | `serve` | Start daemon in foreground (`--port`, `--no-persist`) |
 | `stop` | Stop a running daemon |
 | `status` | Show daemon health and exom stats |
@@ -268,7 +278,9 @@ Attribution: `X-Actor`, `X-Session`, `X-Model` request headers
 | `GET` | `/api/facts/bitemporal` | Bitemporal query (valid-time + transaction-time) |
 | `GET` | `/api/derived/<predicate>` | All tuples for a derived (rule-produced) predicate |
 | `POST` | `/api/actions/evaluate` | Trigger incremental re-evaluation |
-| `POST` | `/api/actions/clear` | Clear all facts and rules from an exom |
+| `POST` | `/api/actions/retract-all` | Retract all facts and clear rules (preserves tx history) |
+| `POST` | `/api/actions/wipe` | True wipe: reset exom to empty (no history) |
+| `POST` | `/api/actions/factory-reset` | Wipe ALL exoms + sym table, recreate empty `main` |
 
 ### Graph and provenance
 
@@ -308,7 +320,7 @@ The Svelte UI is served at `http://127.0.0.1:9780` when the daemon is running.
 | Graph | D3 force-directed entity–relation graph; zoom and filter |
 | Provenance | Derivation tree viewer: select a fact, see its proof DAG |
 | Timeline | Facts grouped by `valid_from` date |
-| Exoms | Exom registry: create, rename, archive, export |
+| Exoms | Exom registry: create, rename, archive, wipe, export, factory reset |
 | Branches | Branch manager: create, switch, diff, merge |
 
 ---
@@ -443,11 +455,12 @@ ray-exomem eval '(query main (find ?p) (where (?p :sky-color ?v)))'
 
 Requirements:
 - Rust (stable)
+- Node.js + npm (for UI build)
 - C compiler (clang or gcc)
-- rayforce2 checked out at `../rayforce2` (relative to this repo), or set `RAYFORCE2_DIR`
+- git (to auto-clone rayforce2 if not present)
 
 ```bash
-# Build (compiles rayforce2 lib, then ray-exomem)
+# Build everything (UI + rayforce2 + Rust — single command)
 cargo build --release
 
 # Run tests
@@ -457,5 +470,9 @@ cargo test
 RAYFORCE2_DIR=/path/to/rayforce2 cargo build --release
 ```
 
-The build script (`build.rs`) calls `make lib` in the rayforce2 directory to
-produce `librayforce.a`, then links it statically into the ray-exomem binary.
+The build script (`build.rs`) does three things in order:
+1. Builds the SvelteKit UI (`npm install && npm run build` in `ui/`)
+2. Builds rayforce2 (`make lib`) — auto-clones from GitHub if not at `../rayforce2`
+3. Compiles the Rust binary with UI assets embedded via `include_dir!`
+
+The resulting binary is fully self-contained (~3.5 MB).

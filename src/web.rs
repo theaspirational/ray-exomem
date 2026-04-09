@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use include_dir::{include_dir, Dir};
 use std::{
     collections::HashMap,
     fs,
@@ -22,16 +23,54 @@ use crate::{
     storage::{self, RayObj},
 };
 
+/// Embedded UI assets (built by build.rs before compilation).
+static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/build");
+
 pub const UI_MOUNT_PATH: &str = "/ray-exomem";
 pub const API_PREFIX: &str = "/ray-exomem/api/";
 pub const EVENTS_PATH: &str = "/ray-exomem/events";
-pub const DEFAULT_UI_BUILD_DIR: &str = "ui/build";
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9780";
 /// Default knowledge-base name (seeded on first run; CLI/UI omit `?exom=` use this).
 pub const DEFAULT_EXOM: &str = "main";
 
-pub fn default_ui_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_UI_BUILD_DIR)
+/// Look up an embedded UI asset by relative path. Returns (content_type, bytes).
+fn embedded_asset(rel: &str) -> Option<(&'static str, &'static [u8])> {
+    let rel = rel.trim_start_matches('/');
+    let rel = if rel.is_empty() { "index.html" } else { rel };
+
+    // Try exact path
+    if let Some(file) = EMBEDDED_UI.get_file(rel) {
+        return Some((content_type_for_ext(rel), file.contents()));
+    }
+
+    // Try index.html in subdirectory
+    let index = format!("{}/index.html", rel.trim_end_matches('/'));
+    if let Some(file) = EMBEDDED_UI.get_file(&index) {
+        return Some(("text/html; charset=utf-8", file.contents()));
+    }
+
+    // SPA fallback: serve root index.html for unknown paths
+    EMBEDDED_UI
+        .get_file("index.html")
+        .map(|f| ("text/html; charset=utf-8", f.contents()))
+}
+
+fn content_type_for_ext(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }
 
 /// URL users should open in a browser (uses `127.0.0.1` when the bind address is `0.0.0.0`).
@@ -204,7 +243,7 @@ fn refresh_exom_binding(daemon: &mut DaemonState, exom_dir: Option<&ExomDir>, ex
     Ok(())
 }
 
-pub fn serve(ui_dir: PathBuf, bind_addr: SocketAddr, data_dir: Option<PathBuf>) -> Result<()> {
+pub fn serve(ui_dir: Option<PathBuf>, bind_addr: SocketAddr, data_dir: Option<PathBuf>) -> Result<()> {
     let listener =
         TcpListener::bind(bind_addr).with_context(|| format!("failed to bind {}", bind_addr))?;
     listener
@@ -253,11 +292,18 @@ pub fn serve(ui_dir: PathBuf, bind_addr: SocketAddr, data_dir: Option<PathBuf>) 
         start_time: Instant::now(),
     });
 
-    eprintln!(
-        "[ray-exomem] Open {} in your browser — UI + JSON API (assets: {})",
-        http_public_url(bind_addr),
-        ui_dir.display()
-    );
+    if let Some(ref dir) = ui_dir {
+        eprintln!(
+            "[ray-exomem] Open {} in your browser — UI + JSON API (assets: {})",
+            http_public_url(bind_addr),
+            dir.display()
+        );
+    } else {
+        eprintln!(
+            "[ray-exomem] Open {} in your browser — UI + JSON API (embedded assets)",
+            http_public_url(bind_addr),
+        );
+    }
     if let Some(ref dd) = data_dir {
         eprintln!("[ray-exomem] data dir: {}", dd.display());
     }
@@ -268,7 +314,7 @@ pub fn serve(ui_dir: PathBuf, bind_addr: SocketAddr, data_dir: Option<PathBuf>) 
                 let ui_dir = ui_dir.clone();
                 let state = state.clone();
                 thread::spawn(move || {
-                    if let Err(err) = handle_connection(stream, &ui_dir, &state) {
+                    if let Err(err) = handle_connection(stream, ui_dir.as_deref(), &state) {
                         eprintln!("request error: {err}");
                     }
                 });
@@ -357,7 +403,7 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 // Connection handler
 // ---------------------------------------------------------------------------
 
-fn handle_connection(mut stream: TcpStream, ui_dir: &Path, state: &ServerState) -> Result<()> {
+fn handle_connection(mut stream: TcpStream, ui_dir: Option<&Path>, state: &ServerState) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut buf = vec![0_u8; 131072];
@@ -391,6 +437,31 @@ fn handle_connection(mut stream: TcpStream, ui_dir: &Path, state: &ServerState) 
         .strip_prefix(UI_MOUNT_PATH)
         .unwrap_or(&req.path)
         .trim_start_matches('/');
+
+    // If --ui-dir was provided, serve from disk (dev mode)
+    if let Some(ui_dir) = ui_dir {
+        return serve_from_disk(&mut stream, &req, ui_dir, rel);
+    }
+
+    // Otherwise serve from embedded assets
+    let head_only = req.method == "HEAD";
+    match embedded_asset(rel) {
+        Some((content_type, data)) => {
+            let body = if head_only { &[] as &[u8] } else { data };
+            write_response(
+                &mut stream, 200, "OK", content_type, body,
+                head_only, Some(("Cache-Control", "no-cache")),
+            )
+        }
+        None => write_response(
+            &mut stream, 404, "Not Found",
+            "text/plain; charset=utf-8", b"not found",
+            head_only, None,
+        ),
+    }
+}
+
+fn serve_from_disk(stream: &mut TcpStream, req: &Request, ui_dir: &Path, rel: &str) -> Result<()> {
     let file_path = resolve_asset_path(ui_dir, rel);
 
     let (status, reason, body_path) = match file_path {
@@ -406,7 +477,7 @@ fn handle_connection(mut stream: TcpStream, ui_dir: &Path, state: &ServerState) 
                 (200, "OK", index)
             } else {
                 return write_response(
-                    &mut stream, 404, "Not Found",
+                    stream, 404, "Not Found",
                     "text/plain; charset=utf-8",
                     b"ray-exomem UI not built; run npm install && npm run build in ray-exomem/ui",
                     req.method == "HEAD", None,
@@ -423,7 +494,7 @@ fn handle_connection(mut stream: TcpStream, ui_dir: &Path, state: &ServerState) 
     };
     let content_type = content_type_for_path(&body_path);
     write_response(
-        &mut stream, status, reason, content_type, &body,
+        stream, status, reason, content_type, &body,
         req.method == "HEAD", Some(("Cache-Control", "no-cache")),
     )
 }
@@ -459,7 +530,9 @@ fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &Ser
         ("GET", "/api/actions/export") => api_export(state, exom),
         ("GET", "/api/actions/export-json") => api_export_json(state, exom),
         ("POST", "/api/actions/import-json") => api_import_json(state, exom, &req.body, &ctx),
-        ("POST", "/api/actions/clear") => api_clear(state, exom, &ctx),
+        ("POST", "/api/actions/retract-all") => api_retract_all(state, exom, &ctx),
+        ("POST", "/api/actions/wipe") => api_wipe(state, exom),
+        ("POST", "/api/actions/factory-reset") => api_factory_reset(state),
         ("POST", "/api/actions/retract") => api_retract(state, exom, &req.body, &ctx),
         ("POST", "/api/actions/evaluate") => api_evaluate(state),
         ("POST", "/api/actions/eval") => api_eval(state, &req.body, &ctx),
@@ -1479,7 +1552,7 @@ fn api_import_json(
     }))
 }
 
-fn api_clear(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult {
+fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult {
     let mut daemon = get_daemon(state);
     let fact_ids: Vec<String> = {
         let es = get_exom_state(&daemon, exom)?;
@@ -1501,7 +1574,7 @@ fn api_clear(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResul
     if let Err(err) = restore_runtime(&daemon) {
         if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
             eprintln!(
-                "[ray-exomem] fatal: restore after clear failed (first: {}, recover: {})",
+                "[ray-exomem] fatal: restore after retract-all failed (first: {}, recover: {})",
                 err, e2
             );
             std::process::exit(1);
@@ -1510,6 +1583,84 @@ fn api_clear(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResul
     json_ok(&serde_json::json!({
         "ok": true,
         "tuples_removed": count
+    }))
+}
+
+/// True wipe: reset the Brain to empty (no tx history), delete and recreate on-disk state.
+fn api_wipe(state: &ServerState, exom: &str) -> ApiResult {
+    let mut daemon = get_daemon(state);
+
+    {
+        let es = daemon.exoms.get_mut(exom)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+        es.brain.reset();
+        es.rules.clear();
+        es.datoms = storage::build_datoms_table(&[])?;
+
+        // Wipe on-disk state and recreate empty dir
+        if let Some(ed) = state.exom_dir.as_ref() {
+            let path = ed.exom_path(exom);
+            if path.exists() {
+                std::fs::remove_dir_all(&path)?;
+            }
+            std::fs::create_dir_all(&path)?;
+            save_rules(Some(ed), exom, &[])?;
+            persist_exom_state(Some(ed), exom, es)?;
+        }
+    }
+
+    let es = get_exom_state(&daemon, exom)?;
+    daemon.engine.bind_named_db(storage::sym_intern(exom), &es.datoms)?;
+    json_ok(&serde_json::json!({ "ok": true, "wiped": exom }))
+}
+
+/// Factory reset: wipe ALL exoms and sym table, recreate only "main".
+fn api_factory_reset(state: &ServerState) -> ApiResult {
+    let mut daemon = get_daemon(state);
+    let old_names: Vec<String> = daemon.exoms.keys().cloned().collect();
+    daemon.exoms.clear();
+
+    // Wipe all on-disk state
+    if let Some(ed) = state.exom_dir.as_ref() {
+        for name in &old_names {
+            let path = ed.exom_path(name);
+            if path.exists() {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+        // Wipe and reload sym table
+        let sym = ed.sym_path();
+        if sym.exists() {
+            let _ = std::fs::remove_file(&sym);
+        }
+        let sym_lk = sym.with_extension("lk");
+        if sym_lk.exists() {
+            let _ = std::fs::remove_file(&sym_lk);
+        }
+        let _ = storage::sym_load(&sym);
+
+        // Recreate main
+        let main_path = ed.exom_path(DEFAULT_EXOM);
+        std::fs::create_dir_all(&main_path)?;
+        let es = load_exom_state(Some(ed), DEFAULT_EXOM)?;
+        daemon.exoms.insert(DEFAULT_EXOM.to_string(), es);
+    } else {
+        daemon.exoms.insert(DEFAULT_EXOM.to_string(), load_exom_state(None, DEFAULT_EXOM)?);
+    }
+
+    if let Err(err) = restore_runtime(&daemon) {
+        if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+            eprintln!(
+                "[ray-exomem] fatal: restore after factory-reset failed (first: {}, recover: {})",
+                err, e2
+            );
+            std::process::exit(1);
+        }
+    }
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "removed_exoms": old_names,
+        "state": "clean"
     }))
 }
 

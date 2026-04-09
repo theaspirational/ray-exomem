@@ -215,6 +215,15 @@ impl Brain {
         }
     }
 
+    /// Reset to empty state, preserving data_dir and sym_path for persistence.
+    pub fn reset(&mut self) {
+        let data_dir = self.data_dir.take();
+        let sym_path = self.sym_path.take();
+        *self = Brain::new();
+        self.data_dir = data_dir;
+        self.sym_path = sym_path;
+    }
+
     /// Open a brain from a splayed table directory. Loads all tables into memory.
     pub fn open_exom(exom_dir: &Path, sym_path: &Path) -> Result<Self> {
         use crate::storage;

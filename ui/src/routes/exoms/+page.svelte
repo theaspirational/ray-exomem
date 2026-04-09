@@ -24,7 +24,8 @@
 		manageExom,
 		mergeExoms,
 		exportBackup,
-		clearDatabase
+		wipeExom,
+		factoryReset
 	} from '$lib/exomem.svelte';
 	import { app } from '$lib/stores.svelte';
 	import type { ExomEntry } from '$lib/types';
@@ -60,12 +61,18 @@
 	let confirmDeleteExom = $state<string | null>(null);
 	let deleting = $state(false);
 
+	// Confirm clear (per-exom inline)
+	let confirmClearExom = $state<string | null>(null);
+	let clearingExom = $state(false);
+
 	// Archived section
 	let showArchived = $state(false);
 
 	// Danger zone
 	let confirmClear = $state(false);
 	let clearing = $state(false);
+	let confirmFactoryReset = $state(false);
+	let resetting = $state(false);
 
 	// Busy states for individual actions
 	let busyAction = $state<string | null>(null);
@@ -237,16 +244,46 @@
 		}
 	}
 
-	async function handleClearDatabase() {
+	async function handleWipeExom() {
 		clearing = true;
 		try {
-			const result = await clearDatabase(app.selectedExom);
-			flash(`Cleared ${result.tuples_removed} tuples from "${app.selectedExom}"`, 'success');
+			await wipeExom(app.selectedExom);
+			await app.refreshExoms();
+			flash(`Wiped "${app.selectedExom}" — all data and history removed`, 'success');
 			confirmClear = false;
 		} catch (e) {
 			flash(e instanceof Error ? e.message : String(e), 'error');
 		} finally {
 			clearing = false;
+		}
+	}
+
+	async function handleWipeExomInline(name: string) {
+		clearingExom = true;
+		try {
+			await wipeExom(name);
+			await app.refreshExoms();
+			flash(`Wiped "${name}" — all data and history removed`, 'success');
+			confirmClearExom = null;
+		} catch (e) {
+			flash(e instanceof Error ? e.message : String(e), 'error');
+		} finally {
+			clearingExom = false;
+		}
+	}
+
+	async function handleFactoryReset() {
+		resetting = true;
+		try {
+			const result = await factoryReset();
+			await app.refreshExoms();
+			app.switchExom('main');
+			flash(`Factory reset complete — removed ${result.removed_exoms.length} exom(s)`, 'success');
+			confirmFactoryReset = false;
+		} catch (e) {
+			flash(e instanceof Error ? e.message : String(e), 'error');
+		} finally {
+			resetting = false;
 		}
 	}
 
@@ -504,10 +541,20 @@
 							<Button
 								variant="ghost"
 								size="xs"
-								onclick={() => (confirmDeleteExom = exom.name)}
+								onclick={() => (confirmClearExom = exom.name)}
+								title="Clear all facts and rules"
 							>
-								<Trash2 class="size-3 text-destructive" />
+								<CircleAlert class="size-3 text-amber-500" />
 							</Button>
+							{#if exom.name !== 'main'}
+								<Button
+									variant="ghost"
+									size="xs"
+									onclick={() => (confirmDeleteExom = exom.name)}
+								>
+									<Trash2 class="size-3 text-destructive" />
+								</Button>
+							{/if}
 						{/if}
 					</div>
 				</div>
@@ -536,6 +583,26 @@
 							Delete
 						</Button>
 						<Button variant="ghost" size="xs" onclick={() => (confirmDeleteExom = null)}>
+							Cancel
+						</Button>
+					</div>
+				{/if}
+
+				{#if confirmClearExom === exom.name}
+					<div class="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
+						<span class="text-amber-500">Clear all facts and rules from "{exom.name}"?</span>
+						<Button
+							variant="destructive"
+							size="xs"
+							onclick={() => handleWipeExomInline(exom.name)}
+							disabled={clearingExom}
+						>
+							{#if clearingExom}
+								<LoaderCircle class="size-3 animate-spin" />
+							{/if}
+							Clear
+						</Button>
+						<Button variant="ghost" size="xs" onclick={() => (confirmClearExom = null)}>
 							Cancel
 						</Button>
 					</div>
@@ -628,13 +695,15 @@
 	{/if}
 
 	<!-- Danger zone -->
-	<div class="flex flex-col gap-3 rounded-lg border border-destructive/30 p-4">
+	<div class="flex flex-col gap-4 rounded-lg border border-destructive/30 p-4">
 		<h2 class="text-sm font-medium text-destructive">Danger Zone</h2>
+
+		<!-- Wipe current exom -->
 		<div class="flex items-center justify-between">
 			<div class="flex flex-col gap-0.5">
-				<span class="text-sm">Clear current exom</span>
+				<span class="text-sm">Wipe current exom</span>
 				<span class="text-xs text-muted-foreground">
-					Remove all facts and rules from "{app.selectedExom}". This cannot be undone.
+					Remove all data and history from "{app.selectedExom}". Cannot be undone.
 				</span>
 			</div>
 			{#if confirmClear}
@@ -642,13 +711,13 @@
 					<Button
 						variant="destructive"
 						size="sm"
-						onclick={handleClearDatabase}
+						onclick={handleWipeExom}
 						disabled={clearing}
 					>
 						{#if clearing}
 							<LoaderCircle class="size-4 animate-spin" />
 						{/if}
-						Confirm Clear
+						Confirm Wipe
 					</Button>
 					<Button variant="ghost" size="sm" onclick={() => (confirmClear = false)}>
 						Cancel
@@ -660,7 +729,45 @@
 					size="sm"
 					onclick={() => (confirmClear = true)}
 				>
-					Clear Database
+					Wipe Exom
+				</Button>
+			{/if}
+		</div>
+
+		<div class="border-t border-destructive/20"></div>
+
+		<!-- Factory reset -->
+		<div class="flex items-center justify-between">
+			<div class="flex flex-col gap-0.5">
+				<span class="text-sm">Factory reset</span>
+				<span class="text-xs text-muted-foreground">
+					Delete ALL exoms and start fresh with an empty "main". Cannot be undone.
+				</span>
+			</div>
+			{#if confirmFactoryReset}
+				<div class="flex flex-wrap items-center gap-2">
+					<Button
+						variant="destructive"
+						size="sm"
+						onclick={handleFactoryReset}
+						disabled={resetting}
+					>
+						{#if resetting}
+							<LoaderCircle class="size-4 animate-spin" />
+						{/if}
+						Confirm Reset
+					</Button>
+					<Button variant="ghost" size="sm" onclick={() => (confirmFactoryReset = false)}>
+						Cancel
+					</Button>
+				</div>
+			{:else}
+				<Button
+					variant="destructive"
+					size="sm"
+					onclick={() => (confirmFactoryReset = true)}
+				>
+					Factory Reset
 				</Button>
 			{/if}
 		</div>
