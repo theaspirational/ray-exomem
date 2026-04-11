@@ -604,9 +604,7 @@ enum Commands {
 }
 
 fn default_data_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("could not determine home directory")
-        .join(".ray-exomem")
+    ray_exomem::storage::data_dir()
 }
 
 fn pid_path(data_dir: &std::path::Path) -> PathBuf {
