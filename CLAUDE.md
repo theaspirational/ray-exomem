@@ -1,120 +1,90 @@
 # CLAUDE.md — ray-exomem
 
+Project Philosophy (Greenfield Bias)
+
+This project should be treated as a greenfield system, regardless of its current state. Do not assume the need for backward compatibility, legacy constraints, or incremental patching unless explicitly stated.
+
+Prioritize correctness, simplicity, and architectural integrity over stability of existing patterns. Prefer clean, well-reasoned designs even if they require refactoring or replacing existing components partially or entirely.
+
+Avoid introducing fallbacks, shims, or compatibility layers as a default strategy. These should only be considered when explicitly required. Instead, focus on identifying the most coherent and maintainable solution from first principles.
+
+
+The role of this file is to describe common mistakes and confusion points that agents might encounter as they work in this project. If you ever encounter something in the project that surprises you, please alert the developer working with you and indicate that this is the case in the CLAUDE.md file to help prevent future agents from having the same issue.
+
+When creating any artifacts during chat session, save them in archive/<date>_<session_name>/<artifact_name>.md
+
+When adding or modifying any db/rayfall interactions test them against the running ray-exomem daemon.
+
 ## What this is
 
-ray-exomem is a persistent knowledge-base daemon for LLM agents. It wraps rayforce2 (a C columnar engine) via FFI to provide bitemporal facts, Datalog rules, provenance, and branches. The daemon serves an HTTP API and a SvelteKit web UI.
+`ray-exomem` is a persistent memory daemon for LLM agents.
 
-## Build & deploy
+- Storage model: exoms, facts, observations, beliefs, transactions, branches
+- Query model: Rayfall / Datalog
+- Runtime: Rust daemon + rayforce2 via FFI + embedded Svelte UI
+
+## Build and run
 
 ```bash
-# Install from git (auto-clones rayforce2, builds UI, compiles everything)
-cargo install --git https://github.com/theaspirational/ray-exomem.git
-
-# Or build from source (requires rayforce2 alongside at ../rayforce2)
 cargo build --release
 ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
 
-# Start daemon (forks into background)
 ray-exomem daemon
-
-# Foreground (useful for debugging)
-ray-exomem serve --bind 127.0.0.1:9780
-
-# Stop
 ray-exomem stop
 ```
 
-`cargo build --release` does everything in one command: builds the SvelteKit UI (`npm run build`), compiles rayforce2 (`make lib`), then compiles and links the Rust binary with the UI assets embedded. If rayforce2 isn't found at `../rayforce2`, it auto-clones from GitHub. The resulting binary is fully self-contained.
+Use `ray-exomem serve --bind 127.0.0.1:9780` for foreground debugging.
 
-## Critical gotchas
+## Important gotchas
 
-### macOS `com.apple.provenance` blocks execution silently
-Files **copied** by sandboxed processes (Claude Code, VS Code extensions) get the `com.apple.provenance` extended attribute. macOS silently refuses to execute them — the binary appears to hang with zero output. **Use `ln -f` (hard link) instead of `cp` to deploy the binary.** Hard links share the original inode and don't acquire the provenance xattr.
+- Use `ln -f`, not `cp`, when deploying the binary on macOS. `com.apple.provenance` can make copied binaries hang silently.
+- If `rayforce2` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
+- The Svelte 5 UI is embedded in the binary at build time.
+- `ray-exomem daemon` forks. Use `serve` if you want logs in the terminal.
 
-```bash
-# Deploy (hard link — no provenance issues)
-ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
-
-# If the binary hangs with zero output, diagnose with:
-xattr ~/.local/bin/ray-exomem
-# If it shows com.apple.provenance, re-link:
-ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
-```
-
-### Rebuilding rayforce2 requires `cargo clean`
-Cargo does not detect changes to the static C library (`librayforce.a`) after `make lib`. If you rebuild rayforce2, you must `cargo clean && cargo build --release` to force relinking. Otherwise the old library stays linked.
-
-### UI is embedded in the binary
-The SvelteKit UI (`ui/build/`) is embedded at compile time via `include_dir!`. The binary is fully self-contained — no external `ui/build/` directory needed at runtime. For development, use `--ui-dir path/to/ui/build` to serve from disk instead (supports HMR workflow).
-
-### The `daemon` command forks
-`ray-exomem daemon` forks via `libc::fork()`, prints the child PID, and the parent exits immediately. The child calls `setsid()` to detach from the terminal. Use `ray-exomem serve` for foreground operation (blocks the terminal).
-
-### Signal handling
-The daemon spawns a thread that blocks on `sigwait(SIGTERM | SIGINT)`. When a signal arrives, it removes the PID file and calls `process::exit(0)`. The PID file lives at `~/.ray-exomem/daemon.pid`.
-
-## Project layout
-
-```
-src/
-  main.rs        — CLI (clap), daemon lifecycle, fork
-  web.rs         — HTTP server, all API endpoints, SSE
-  brain.rs       — Fact / Observation / Belief / Tx / Branch (Rust-only, no FFI)
-  backend.rs     — RayforceEngine wrapper (FFI calls to rayforce2)
-  ffi.rs         — C FFI declarations (ray_runtime_create, ray_eval_str, etc.)
-  storage.rs     — Splay table I/O, JSONL sidecars, datom encoding
-  exom.rs        — Exom directory manager (~/.ray-exomem/exoms/)
-  rules.rs       — Rule parsing, head/arity extraction
-  context.rs     — MutationContext (actor, session, model)
-  client.rs      — HTTP client for CLI→daemon communication
-  rayfall_parser.rs — Classifies Rayfall forms (AssertFact, Query, Rule, etc.)
-  agent_guide.rs — Built-in operator reference text
-  datom.rs       — Datom type (tagged i64 encoding for EAV columns)
-  lib.rs         — Public API surface
-ui/              — SvelteKit 5 + Tailwind 4 web UI
-  src/lib/exomem.svelte.ts  — Client API wrappers (all fetch calls)
-  src/lib/stores.svelte.ts  — Svelte 5 reactive app state
-  src/routes/               — Page components (facts, query, rules, exoms, etc.)
-examples/        — .ray files for smoke tests
-```
-
-## API endpoints (key ones)
-
-- `POST /api/actions/eval` — evaluate Rayfall source
-- `POST /api/actions/assert-fact` — assert a structured fact
-- `POST /api/actions/retract` — retract facts by predicate
-- `POST /api/actions/retract-all` — retract all facts + clear rules (keeps tx history)
-- `POST /api/actions/wipe?exom=<name>` — true wipe: reset Brain to empty, delete disk state
-- `POST /api/actions/factory-reset` — wipe ALL exoms and sym table, recreate empty `main`
-- `GET /api/status` — health check
-- `GET /api/exoms` — list exoms
-- `POST /api/exoms` — create exom
-- `POST /api/exoms/<name>/manage` — rename, archive, unarchive, delete
-
-All mutation endpoints accept `?exom=<name>` (default: `main`) and `X-Actor`, `X-Session`, `X-Model` headers.
-
-## Architecture rules
-
-- **Mutations go through Brain (Rust), not FFI.** `assert`, `retract`, `observe` are handled in `brain.rs` to keep the transaction log, bitemporal metadata, and provenance consistent. Only `eval` and `query` call into the C engine.
-- **Query rewriting.** Before calling `ray_eval_str()`, the server injects the exom's stored rules as an inline `(rules ...)` clause so Datalog derivation is scoped correctly.
-- **Dual persistence.** Every mutation writes JSONL first (atomic rename), then splay tables. JSONL is the source of truth; splay tables are a performance cache.
-- **`restore_runtime()` after state changes.** Any endpoint that modifies exom state must call `refresh_exom_binding()` or `restore_runtime()` to update the C engine's bindings.
-- **Borrow checker pattern in web.rs.** When you need mutable access to an exom (`daemon.exoms.get_mut`) followed by an immutable call to `daemon.engine`, scope the mutable borrow in a block first, then access the engine.
-
-## Testing
+## Current agent-facing workflow
 
 ```bash
-cargo test                    # Rust unit tests
-ray-exomem run examples/native_smoke.ray   # Offline smoke test
+ray-exomem doctor --exom main --json
+ray-exomem start-session --exom main --actor cli --json
+ray-exomem query --exom main --json
 ```
 
-## UI development
+- Prefer `query --json` for reads.
+- Use `expand-query` when debugging query lowering or injected rules.
+- `assert <predicate> <value>` uses the structured assert path when `--source`, `--confidence`, `--valid-from`, or `--valid-to` is provided.
+- `retract <fact-id>` resolves the current tuple for that fact id, then emits Rayfall retract.
+- `history <fact-id>` and `why <fact-id>` both support slash-delimited fact ids.
+
+## Key API surfaces
+
+- `POST /api/query` — canonical read path for one Rayfall `(query ...)`
+- `POST /api/actions/assert-fact` — structured assert / replace by `fact_id`
+- `POST /api/actions/eval` — advanced mixed Rayfall execution
+- `GET /api/facts/<id>?exom=...` — fact detail + history
+- `GET /api/explain?exom=...&predicate=...` — explain by predicate or fact id
+- `GET /api/status` — health, stats, rules, current branch, `server.build.identity`
+
+## Architecture notes
+
+- Mutations go through `brain.rs`, not directly through the C engine.
+- Queries are lowered/re-written before eval so exom-scoped rules are injected correctly.
+- JSONL sidecars are the source of truth; splay tables are the cache.
+- After state changes, runtime bindings must be refreshed.
+
+## Files worth knowing
+
+- `src/main.rs` — CLI and daemon lifecycle
+- `src/web.rs` — HTTP API, query/eval routing, SSE
+- `src/brain.rs` — core memory model and mutations
+- `src/storage.rs` — persistence and decoded query-table handling
+- `src/rayfall_ast.rs` — Rayfall parsing/lowering
+- `src/system_schema.rs` — builtin views and ontology/schema generation
+- `ui/src/lib/exomem.svelte.ts` — UI API client
+
+## Verification
 
 ```bash
-cd ui
-npm install
-npm run dev      # Dev server with HMR
-npm run build    # Production build to ui/build/
+cargo test
+cd ui && npm run check && npm run build
 ```
-
-The UI uses shadcn-svelte components, Tailwind 4, and D3 for the graph view.
