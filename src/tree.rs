@@ -95,15 +95,17 @@ fn walk_inner(
             if archived && !opts.include_archived {
                 return Ok(TreeNode::Folder { name, path: slash, children: vec![] });
             }
-            // fact_count / last_tx / branches are pulled from splay tables via callback in later tasks;
-            // stubbed to zero/None here.
+            // FIXME(nested-exoms-task-4.4): write tests/walk_stats.rs once HTTP API is path-aware
+            let stats = crate::brain::read_exom_stats(disk).unwrap_or(crate::brain::ExomStats {
+                fact_count: 0, last_tx: None, branches: vec![],
+            });
             Ok(TreeNode::Exom {
                 name, path: slash,
                 exom_kind: meta.kind,
-                fact_count: 0,
+                fact_count: stats.fact_count,
                 current_branch: meta.current_branch,
-                last_tx: None,
-                branches: if opts.include_branches { Some(vec![]) } else { None },
+                last_tx: stats.last_tx,
+                branches: if opts.include_branches { Some(stats.branches) } else { None },
                 archived, closed,
                 session: meta.session,
             })

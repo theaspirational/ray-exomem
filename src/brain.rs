@@ -1471,6 +1471,49 @@ pub fn now_iso() -> String {
 // Free functions — session / exom lifecycle
 // ---------------------------------------------------------------------------
 
+/// Summary statistics for a single exom directory read off the JSONL sidecars.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ExomStats {
+    pub fact_count: u64,
+    pub last_tx: Option<String>,
+    pub branches: Vec<String>,
+}
+
+/// Read fact count, last-transaction time, and branch list from the JSONL
+/// sidecars in `exom_disk`. Uses no FFI and has no side effects on disk.
+///
+/// Returns `Ok(ExomStats::default())` (zeros/None) when the exom has never
+/// had any transactions written.
+pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
+    use crate::storage::load_jsonl;
+
+    let facts: Vec<Fact> = load_jsonl(&exom_disk.join("fact.jsonl"))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let txs: Vec<Tx> = load_jsonl(&exom_disk.join("tx.jsonl"))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let branches_raw: Vec<Branch> = load_jsonl(&exom_disk.join("branch.jsonl"))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let fact_count = facts.len() as u64;
+    let last_tx = txs.last().map(|t| t.tx_time.clone());
+
+    let mut branch_names: Vec<String> = branches_raw
+        .iter()
+        .filter(|b| !b.archived)
+        .map(|b| b.name.clone())
+        .collect();
+
+    // Always include "main" — it is implicitly created and may not have a
+    // branch.jsonl entry in freshly-scaffolded exoms.
+    if !branch_names.contains(&"main".to_string()) {
+        branch_names.insert(0, "main".to_string());
+    }
+
+    Ok(ExomStats { fact_count, last_tx, branches: branch_names })
+}
+
 /// Rejection codes for mutation prechecks.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
