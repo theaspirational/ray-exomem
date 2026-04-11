@@ -1619,7 +1619,32 @@ pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+pub fn data_dir() -> std::path::PathBuf {
+    if let Ok(custom) = std::env::var("RAY_EXOMEM_HOME") {
+        return std::path::PathBuf::from(custom);
+    }
+    dirs::home_dir()
+        .expect("home dir")
+        .join(".ray-exomem")
+}
+
+pub fn tree_root() -> std::path::PathBuf {
+    data_dir().join("tree")
+}
+
 fn path_to_cstring(path: &Path) -> Result<CString> {
     CString::new(path.to_str().ok_or_else(|| anyhow!("non-UTF8 path"))?)
         .context("path contains null byte")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_root_follows_env() {
+        std::env::set_var("RAY_EXOMEM_HOME", "/tmp/ray-exomem-test");
+        assert_eq!(tree_root(), std::path::PathBuf::from("/tmp/ray-exomem-test/tree"));
+        std::env::remove_var("RAY_EXOMEM_HOME");
+    }
 }
