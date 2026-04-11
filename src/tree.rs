@@ -133,6 +133,50 @@ fn walk_inner(
     }
 }
 
+/// Walk the top-level entries under `tree_root`. Returns a synthetic Folder node with
+/// name="" and path="" whose children are all top-level directories.
+pub fn walk_root(tree_root: &std::path::Path, opts: &WalkOptions) -> std::io::Result<TreeNode> {
+    use std::fs;
+    let mut children = vec![];
+    if tree_root.exists() {
+        let mut entries: Vec<_> = fs::read_dir(tree_root)?.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().is_dir() {
+                let p: crate::path::TreePath = name.parse().map_err(|e: crate::path::PathError|
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+                children.push(walk(tree_root, &p, opts)?);
+            }
+        }
+    }
+    Ok(TreeNode::Folder { name: String::new(), path: String::new(), children })
+}
+
+/// Rename the last segment of `path` to `new_segment`. Returns the new `TreePath`.
+/// Rejects session exom ids (callers should check meta.kind == Session before calling).
+pub fn rename_last_segment(
+    tree_root: &std::path::Path,
+    path: &crate::path::TreePath,
+    new_segment: &str,
+) -> Result<crate::path::TreePath, String> {
+    crate::path::validate_segment(new_segment).map_err(|e| e.to_string())?;
+    let parent = path.parent().unwrap_or_else(crate::path::TreePath::root);
+    let src = path.to_disk_path(tree_root);
+    let dst = if parent.is_empty() {
+        tree_root.join(new_segment)
+    } else {
+        parent.to_disk_path(tree_root).join(new_segment)
+    };
+    if dst.exists() { return Err(format!("target already exists: {}", dst.display())); }
+    std::fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    if parent.is_empty() {
+        new_segment.parse().map_err(|e: crate::path::PathError| e.to_string())
+    } else {
+        parent.join(new_segment).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

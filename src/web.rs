@@ -785,8 +785,14 @@ fn handle_api(
         return handle_events_sse(stream, req, state);
     }
 
+    // /api/guide writes its own Content-Type (text/markdown) directly.
+    if req.method == "GET" && api_path == "/api/guide" {
+        return api_guide(stream);
+    }
+
     let result = match (req.method.as_str(), api_path) {
         ("GET", "/api/status") => api_status(state, exom),
+        ("GET", "/api/tree") => api_tree(req),
         ("GET", "/api/schema") => api_schema(state, exom, &req.query),
         ("GET", "/api/graph") => api_graph(state, exom, &req.query),
         ("GET", "/api/clusters") => api_clusters(state, exom),
@@ -807,6 +813,13 @@ fn handle_api(
         ("POST", "/api/actions/evaluate") => api_evaluate(state),
         ("POST", "/api/actions/eval") => api_eval(state, &req.body, &ctx),
         ("POST", "/api/actions/consolidate-propose") => api_consolidate_propose(),
+        // Task 4.1 / 4.2 / 4.3 new action endpoints
+        ("POST", "/api/actions/init") => api_action_init(req, state),
+        ("POST", "/api/actions/exom-new") => api_action_exom_new(req, state),
+        ("POST", "/api/actions/session-new") => api_action_session_new(req, state),
+        ("POST", "/api/actions/session-join") => api_action_session_join(req, state),
+        ("POST", "/api/actions/branch-create") => api_action_branch_create(req, state),
+        ("POST", "/api/actions/rename") => api_action_rename(req, state),
         ("GET", "/api/facts/valid-at") => api_facts_valid_at(state, exom, &req.query),
         ("GET", "/api/facts/bitemporal") => api_facts_bitemporal(state, exom, &req.query),
         ("POST", "/api/exoms") => api_exom_create(state, &req.body, &ctx),
@@ -949,6 +962,13 @@ fn require_mutation_context(req: &Request) -> Result<MutationContext, &'static s
 }
 
 fn mutation_requires_actor(method: &str, api_path: &str) -> bool {
+    // Task 4.2/4.3 scaffold endpoints carry actor in JSON body (not X-Actor header).
+    if method == "POST" && matches!(api_path,
+        "/api/actions/init" | "/api/actions/exom-new" | "/api/actions/session-new" |
+        "/api/actions/session-join" | "/api/actions/branch-create" | "/api/actions/rename"
+    ) {
+        return false;
+    }
     ((matches!(method, "POST" | "PUT" | "PATCH"))
         && !matches!(api_path, "/api/query" | "/api/expand-query"))
         || (method == "DELETE" && api_path.starts_with("/api/branches/"))
@@ -2808,6 +2828,223 @@ fn api_belief_support(state: &ServerState, exom: &str, belief_id: &str) -> ApiRe
         },
         "supported_by_unresolved": unresolved,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.1 — GET /api/tree
+// ---------------------------------------------------------------------------
+
+fn api_tree(req: &Request) -> ApiResult {
+    let tree_root = crate::storage::tree_root();
+    let depth = req.query.get("depth").and_then(|s| s.parse::<usize>().ok());
+    let opts = crate::tree::WalkOptions {
+        depth: depth.or(Some(usize::MAX)),
+        include_archived: req.query.get("archived").map(|s| s == "true").unwrap_or(false),
+        include_branches: req.query.get("branches").map(|s| s == "true").unwrap_or(false),
+        include_activity: req.query.get("activity").map(|s| s == "true").unwrap_or(false),
+    };
+    let result = match req.query.get("path").map(|s| s.as_str()).filter(|s| !s.is_empty()) {
+        None => crate::tree::walk_root(&tree_root, &opts),
+        Some(p) => match p.parse::<crate::path::TreePath>() {
+            Ok(tp) => crate::tree::walk(&tree_root, &tp, &opts),
+            Err(e) => {
+                let (status, body) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+                return Ok(json_response(status, &body));
+            }
+        },
+    };
+    match result {
+        Ok(node) => {
+            let body = serde_json::to_string(&node).map_err(|e| anyhow::anyhow!("serialize: {}", e))?;
+            Ok((200, body))
+        }
+        Err(e) => {
+            let (status, body) = crate::http_error::ApiError::new("io", e.to_string()).into_response();
+            Ok(json_response(status, &body))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.2 — scaffold + session action endpoints
+// ---------------------------------------------------------------------------
+
+fn api_action_init(req: &Request, state: &ServerState) -> ApiResult {
+    let body: serde_json::Value = serde_json::from_slice(&req.body)
+        .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+    let path_str = body["path"].as_str().unwrap_or("").to_string();
+    let path: crate::path::TreePath = match path_str.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    let tree_root = crate::storage::tree_root();
+    match crate::scaffold::init_project(&tree_root, &path) {
+        Ok(()) => {
+            sse_push_tree_changed(state);
+            json_ok(&serde_json::json!({"ok": true, "path": path.to_slash_string()}))
+        }
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            Ok(json_response(s, &b))
+        }
+    }
+}
+
+fn api_action_exom_new(req: &Request, state: &ServerState) -> ApiResult {
+    let body: serde_json::Value = serde_json::from_slice(&req.body)
+        .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+    let path_str = body["path"].as_str().unwrap_or("").to_string();
+    let path: crate::path::TreePath = match path_str.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    let tree_root = crate::storage::tree_root();
+    match crate::scaffold::new_bare_exom(&tree_root, &path) {
+        Ok(()) => {
+            sse_push_tree_changed(state);
+            json_ok(&serde_json::json!({"ok": true, "path": path.to_slash_string()}))
+        }
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            Ok(json_response(s, &b))
+        }
+    }
+}
+
+fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
+    let body: serde_json::Value = serde_json::from_slice(&req.body)
+        .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+    let project_path_str = body["project_path"].as_str().unwrap_or("").to_string();
+    let project_path: crate::path::TreePath = match project_path_str.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    let session_type_str = body["type"].as_str().unwrap_or("").to_string();
+    let session_type = match session_type_str.as_str() {
+        "multi" => crate::exom::SessionType::Multi,
+        "single" => crate::exom::SessionType::Single,
+        other => {
+            let (s, b) = crate::http_error::ApiError::new(
+                "bad_session_type",
+                format!("unknown session type {:?}; use 'multi' or 'single'", other),
+            ).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    let label = body["label"].as_str().unwrap_or("").to_string();
+    let actor = body["actor"].as_str().unwrap_or("").to_string();
+    let agents: Vec<String> = body["agents"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let tree_root = crate::storage::tree_root();
+    match crate::brain::session_new(&tree_root, &project_path, session_type, &label, &actor, &agents) {
+        Ok(session_path) => {
+            sse_push_tree_changed(state);
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "session_path": session_path.to_slash_string(),
+            }))
+        }
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            Ok(json_response(s, &b))
+        }
+    }
+}
+
+fn api_action_session_join(_req: &Request, _state: &ServerState) -> ApiResult {
+    // FIXME(nested-exoms-task-4.4): wire to brain branch ops — TOFU claim requires
+    // branch splay table to be path-aware, which is deferred to Task 4.4.
+    let (s, b) = crate::http_error::ApiError::new("not_implemented", "session-join deferred to Task 4.4").into_response();
+    Ok(json_response(s, &b))
+}
+
+fn api_action_branch_create(_req: &Request, _state: &ServerState) -> ApiResult {
+    // FIXME(nested-exoms-task-4.4): wire to brain branch ops — branch-create against
+    // path-based exoms requires brain changes deferred to Task 4.4.
+    let (s, b) = crate::http_error::ApiError::new("not_implemented", "branch-create deferred to Task 4.4").into_response();
+    Ok(json_response(s, &b))
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.3 — POST /api/actions/rename
+// ---------------------------------------------------------------------------
+
+fn api_action_rename(req: &Request, state: &ServerState) -> ApiResult {
+    let body: serde_json::Value = serde_json::from_slice(&req.body)
+        .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+    let path_str = body["path"].as_str().unwrap_or("").to_string();
+    let new_segment = body["new_segment"].as_str().unwrap_or("").to_string();
+    let path: crate::path::TreePath = match path_str.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    let tree_root = crate::storage::tree_root();
+    let disk = path.to_disk_path(&tree_root);
+    // Reject renaming session exom ids — session ids are immutable.
+    if crate::tree::classify(&disk) == crate::tree::NodeKind::Exom {
+        if let Ok(meta) = crate::exom::read_meta(&disk) {
+            if meta.kind == crate::exom::ExomKind::Session {
+                let (s, b) = crate::http_error::ApiError::new(
+                    "session_id_immutable",
+                    "cannot rename session id; use session/label to change the display label",
+                ).into_response();
+                return Ok(json_response(s, &b));
+            }
+        }
+    }
+    match crate::tree::rename_last_segment(&tree_root, &path, &new_segment) {
+        Ok(new_path) => {
+            sse_push_tree_changed(state);
+            json_ok(&serde_json::json!({"ok": true, "new_path": new_path.to_slash_string()}))
+        }
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("rename_failed", e).into_response();
+            Ok(json_response(s, &b))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.6 — GET /api/guide
+// ---------------------------------------------------------------------------
+
+fn api_guide(stream: &mut TcpStream) -> Result<()> {
+    let body = crate::agent_guide::doctrine();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/markdown; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Task 4.5 — SSE tree-changed helper
+// ---------------------------------------------------------------------------
+
+fn sse_push_tree_changed(state: &ServerState) {
+    let event = serde_json::json!({
+        "v": 1,
+        "kind": "tree-changed",
+        "op": "tree_changed",
+    });
+    let _ = state.sse_ring.lock().unwrap().push_json(event);
 }
 
 fn handle_events_sse(stream: &mut TcpStream, req: &Request, state: &ServerState) -> Result<()> {
