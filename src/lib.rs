@@ -1,6 +1,7 @@
 pub mod agent_guide;
 pub mod backend;
 pub mod brain;
+pub mod http_error;
 pub mod client;
 pub mod context;
 pub mod datom;
