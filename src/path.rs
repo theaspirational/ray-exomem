@@ -69,9 +69,15 @@ impl fmt::Display for TreePath {
     }
 }
 
-fn validate_segment(seg: &str) -> Result<(), PathError> {
+/// Maximum bytes per segment, matching POSIX `NAME_MAX` on common filesystems.
+pub const MAX_SEGMENT_LEN: usize = 255;
+
+pub fn validate_segment(seg: &str) -> Result<(), PathError> {
     if seg.is_empty() {
         return Err(PathError::InvalidSegment(seg.to_string(), "empty"));
+    }
+    if seg.len() > MAX_SEGMENT_LEN {
+        return Err(PathError::InvalidSegment(seg.to_string(), "segment exceeds 255 bytes"));
     }
     let mut chars = seg.chars();
     let first = chars.next().unwrap();
@@ -123,7 +129,7 @@ mod tests {
     #[test]
     fn whitespace_in_segment_rejected() {
         let err = "work::a b".parse::<TreePath>().unwrap_err();
-        matches!(err, PathError::InvalidSegment(_, _));
+        assert!(matches!(err, PathError::InvalidSegment(_, _)));
     }
 
     #[test]
@@ -137,6 +143,12 @@ mod tests {
         let p = TreePath::from_str("work").unwrap();
         assert!(p.join("ath").is_ok());
         assert!(p.join("bad segment").is_err());
+    }
+
+    #[test]
+    fn mixed_separator_round_trip() {
+        let p: TreePath = "work::ath/lynx".parse().unwrap();
+        assert_eq!(p.segments(), &["work", "ath", "lynx"]);
     }
 
     #[test]
