@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 pub struct TestDaemon {
     pub data_dir: tempfile::TempDir,
     pub port: u16,
@@ -10,14 +11,18 @@ pub struct TestDaemon {
     child: Child,
 }
 
+#[allow(dead_code)]
 impl TestDaemon {
     pub fn start() -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let port = free_port();
         let bin = env!("CARGO_BIN_EXE_ray-exomem");
         let child = Command::new(bin)
-            .args(["serve", "--bind", &format!("127.0.0.1:{port}")])
-            .env("RAY_EXOMEM_HOME", data_dir.path())
+            .args([
+                "serve",
+                "--bind", &format!("127.0.0.1:{port}"),
+                "--data-dir", data_dir.path().to_str().expect("tempdir is utf-8"),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -25,11 +30,15 @@ impl TestDaemon {
 
         let base_url = format!("http://127.0.0.1:{port}");
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
         while Instant::now() < deadline {
             if let Ok(r) = ureq::get(&format!("{base_url}/api/status")).call() {
-                if r.status() == 200 { break; }
+                if r.status() == 200 { ready = true; break; }
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+        if !ready {
+            panic!("daemon did not become healthy within 5 seconds at {base_url}");
         }
 
         TestDaemon { data_dir, port, base_url, child }
