@@ -4,3 +4,4 @@
 /ui/.svelte-kit
 /ui/build
 .DS_Store
+.superpowers/
