@@ -393,6 +393,35 @@ pub fn system_attributes() -> Vec<OntologyAttribute> {
             category: "branch".into(),
             description: "Archive state for the branch.".into(),
         },
+        // Reserved attributes for branch ownership and session lifecycle.
+        OntologyAttribute {
+            name: "branch/claimed_by".to_string(),
+            entity_kind: "branch".into(),
+            value_kind: "string".into(),
+            category: "branch".into(),
+            description: "mutable string; TOFU-owner of this branch".into(),
+        },
+        OntologyAttribute {
+            name: "session/label".to_string(),
+            entity_kind: "session".into(),
+            value_kind: "string".into(),
+            category: "session".into(),
+            description: "mutable string; display label for the session".into(),
+        },
+        OntologyAttribute {
+            name: "session/closed_at".to_string(),
+            entity_kind: "session".into(),
+            value_kind: "timestamp".into(),
+            category: "session".into(),
+            description: "timestamp; non-null => writes rejected".into(),
+        },
+        OntologyAttribute {
+            name: "session/archived_at".to_string(),
+            entity_kind: "session".into(),
+            value_kind: "timestamp".into(),
+            category: "session".into(),
+            description: "timestamp; non-null => hidden from default inspect".into(),
+        },
     ]
 }
 

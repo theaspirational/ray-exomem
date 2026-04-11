@@ -532,6 +532,7 @@ impl Brain {
         Ok(tx_id)
     }
 
+    // FIXME(nested-exoms-task-4.4): callers must invoke crate::brain::precheck_write before this function.
     pub fn assert_fact(
         &mut self,
         fact_id: &str,
@@ -1470,6 +1471,52 @@ pub fn now_iso() -> String {
 // Free functions — session / exom lifecycle
 // ---------------------------------------------------------------------------
 
+/// Rejection codes for mutation prechecks.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("no such exom {0}")] NoSuchExom(String),
+    #[error("session closed")] SessionClosed,
+    #[error("branch {0} not in exom")] BranchMissing(String),
+    #[error("branch owned by {0}")] BranchOwned(String),
+    #[error("actor required")] ActorRequired,
+    #[error("io: {0}")] Io(#[from] std::io::Error),
+}
+
+/// Gate every mutation path. Call this before touching any splay table.
+///
+/// Enforces: exom exists, session is not closed, actor is non-empty.
+/// Branch TOFU ownership is wired in Task 4.4 once branch splay tables are
+/// path-aware; the pseudocode is preserved as inline comments below.
+pub fn precheck_write(
+    tree_root: &Path,
+    exom_path: &TreePath,
+    _branch: &str,
+    actor: &str,
+) -> Result<(), WriteError> {
+    if actor.is_empty() { return Err(WriteError::ActorRequired); }
+    let disk = exom_path.to_disk_path(tree_root);
+    if classify(&disk) != NodeKind::Exom {
+        return Err(WriteError::NoSuchExom(exom_path.to_cli_string()));
+    }
+    let meta = exom::read_meta(&disk)?;
+    if let Some(s) = &meta.session {
+        if s.closed_at.is_some() { return Err(WriteError::SessionClosed); }
+    }
+    // Branch existence + ownership: implemented against the existing branch-splay
+    // table helpers in brain.rs. Pseudocode, adapt to the real helpers:
+    //
+    //     let branches = existing_list_branches(&disk)?;
+    //     if !branches.iter().any(|b| b.name == _branch) {
+    //         return Err(WriteError::BranchMissing(_branch.into()));
+    //     }
+    //     match existing_read_claimed_by(&disk, _branch)? {
+    //         Some(owner) if owner != actor => return Err(WriteError::BranchOwned(owner)),
+    //         Some(_) => {}
+    //         None => existing_write_claimed_by(&disk, _branch, actor)?, // TOFU
+    //     }
+    Ok(())
+}
+
 /// Create a session exom under `<project_path>/sessions/<id>` and write its
 /// `exom.json`. No splay-table writes — metadata only.
 pub fn session_new(
@@ -1542,6 +1589,43 @@ mod session_tests {
         assert!(segs[3].ends_with("_multi_agent_landing"));
         let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
         assert_eq!(meta.session.unwrap().agents, vec!["orchestrator", "agent_a", "agent_b"]);
+    }
+}
+
+#[cfg(test)]
+mod tofu_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn tp(s: &str) -> TreePath { s.parse().unwrap() }
+
+    #[test]
+    fn rejects_unknown_exom() {
+        let d = tempdir().unwrap();
+        let err = precheck_write(d.path(), &tp("work::nope"), "main", "me").unwrap_err();
+        assert!(matches!(err, WriteError::NoSuchExom(_)));
+    }
+
+    #[test]
+    fn rejects_missing_actor() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        let err = precheck_write(d.path(), &tp("work::main"), "main", "").unwrap_err();
+        assert!(matches!(err, WriteError::ActorRequired));
+    }
+
+    #[test]
+    fn rejects_closed_session() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        let session = session_new(d.path(), &tp("work"), SessionType::Single, "x", "me", &[]).unwrap();
+        // Mark closed by editing exom.json directly.
+        let disk = session.to_disk_path(d.path());
+        let mut meta = exom::read_meta(&disk).unwrap();
+        meta.session.as_mut().unwrap().closed_at = Some("2026-04-11T00:00:00Z".into());
+        exom::write_meta(&disk, &meta).unwrap();
+        let err = precheck_write(d.path(), &session, "main", "me").unwrap_err();
+        assert!(matches!(err, WriteError::SessionClosed));
     }
 }
 
