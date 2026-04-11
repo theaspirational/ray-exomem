@@ -32,12 +32,15 @@ pub mod daemon;
 
 - [ ] **Step 2: Create `tests/common/daemon.rs` with a minimal test harness**
 
+The harness uses `--data-dir <tempdir>` for daemon isolation. (The earlier draft of this plan referenced `RAY_EXOMEM_HOME`, but the daemon today reads `--data-dir`; Task 2.1 adds the env-var fallback.)
+
 ```rust
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 pub struct TestDaemon {
     pub data_dir: tempfile::TempDir,
     pub port: u16,
@@ -45,14 +48,18 @@ pub struct TestDaemon {
     child: Child,
 }
 
+#[allow(dead_code)]
 impl TestDaemon {
     pub fn start() -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let port = free_port();
         let bin = env!("CARGO_BIN_EXE_ray-exomem");
         let child = Command::new(bin)
-            .args(["serve", "--bind", &format!("127.0.0.1:{port}")])
-            .env("RAY_EXOMEM_HOME", data_dir.path())
+            .args([
+                "serve",
+                "--bind", &format!("127.0.0.1:{port}"),
+                "--data-dir", data_dir.path().to_str().expect("tempdir is utf-8"),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -60,11 +67,15 @@ impl TestDaemon {
 
         let base_url = format!("http://127.0.0.1:{port}");
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
         while Instant::now() < deadline {
             if let Ok(r) = ureq::get(&format!("{base_url}/api/status")).call() {
-                if r.status() == 200 { break; }
+                if r.status() == 200 { ready = true; break; }
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+        if !ready {
+            panic!("daemon did not become healthy within 5 seconds at {base_url}");
         }
 
         TestDaemon { data_dir, port, base_url, child }
@@ -112,10 +123,10 @@ tempfile = "3"
 ureq = { version = "2", features = ["json"] }
 ```
 
-- [ ] **Step 5: Run smoke test and note the expected failure**
+- [ ] **Step 5: Run the smoke test as a liveness baseline**
 
 Run: `cargo test --test smoke`
-Expected: the test FAILS because the daemon does not yet honour `RAY_EXOMEM_HOME` or the new tree layout. This is the baseline; leave the test in place and move on — it will pass naturally once Phase 2 lands.
+Expected: PASS. The smoke test only asserts the daemon starts and `/api/status` returns 200, which is true today (the daemon currently ignores `RAY_EXOMEM_HOME` and falls back to its default data dir, but that doesn't break liveness). Real `RAY_EXOMEM_HOME` data isolation is exercised in Phase 2 by `tests/api_actions.rs` and friends, which write data into the temp dir and read it back.
 
 - [ ] **Step 6: Commit**
 
