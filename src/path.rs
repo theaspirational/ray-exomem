@@ -17,6 +17,9 @@ pub enum PathError {
 }
 
 impl TreePath {
+    /// An empty path representing the tree root itself.
+    pub fn root() -> TreePath { TreePath { segments: vec![] } }
+
     pub fn segments(&self) -> &[String] { &self.segments }
     pub fn is_empty(&self) -> bool { self.segments.is_empty() }
     pub fn len(&self) -> usize { self.segments.len() }
