@@ -11,6 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::context::MutationContext;
+use crate::exom::{self, ExomMeta, SessionMeta, SessionType, session_id, now_iso8601_basic};
+use crate::path::TreePath;
+use crate::tree::{classify, NodeKind};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -1464,8 +1467,83 @@ pub fn now_iso() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Free functions — session / exom lifecycle
+// ---------------------------------------------------------------------------
+
+/// Create a session exom under `<project_path>/sessions/<id>` and write its
+/// `exom.json`. No splay-table writes — metadata only.
+pub fn session_new(
+    tree_root: &Path,
+    project_path: &TreePath,
+    session_type: SessionType,
+    label: &str,
+    actor: &str,
+    agents: &[String],
+) -> Result<TreePath, crate::scaffold::ScaffoldError> {
+    // Project must exist and have sessions/ folder.
+    let project_disk = project_path.to_disk_path(tree_root);
+    if classify(&project_disk.join("main")) != NodeKind::Exom {
+        return Err(crate::scaffold::ScaffoldError::NestInsideExom(
+            format!("project not initialised at {}", project_path)));
+    }
+    let ts = now_iso8601_basic();
+    let dir = session_id(&ts, session_type.clone(), label);
+    let session_path = project_path
+        .join("sessions")
+        .and_then(|p| p.join(&dir))
+        .map_err(crate::scaffold::ScaffoldError::Path)?;
+    let disk = session_path.to_disk_path(tree_root);
+    std::fs::create_dir_all(&disk)?;
+
+    // Build agents list: orchestrator must always be first; dedupe.
+    let mut agents_final: Vec<String> = vec![actor.to_string()];
+    for a in agents {
+        if !agents_final.contains(a) { agents_final.push(a.clone()); }
+    }
+
+    let meta = ExomMeta::new_session(SessionMeta {
+        session_type,
+        label: label.to_string(),
+        initiated_by: actor.to_string(),
+        agents: agents_final.clone(),
+        closed_at: None,
+        archived_at: None,
+    });
+    exom::write_meta(&disk, &meta)?;
+
+    // Pre-create branches (logical records on the branch splay table will be handled
+    // by the existing brain branch-creation path in Task 3.2). For now, record the
+    // branch names into the session meta only.
+    Ok(session_path)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn creates_session_with_correct_name() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap()).unwrap();
+        let project: TreePath = "work::ath".parse().unwrap();
+        let session = session_new(
+            d.path(), &project, SessionType::Multi, "landing",
+            "orchestrator", &["agent_a".into(), "agent_b".into()],
+        ).unwrap();
+        let segs = session.segments();
+        assert_eq!(segs[0], "work");
+        assert_eq!(segs[1], "ath");
+        assert_eq!(segs[2], "sessions");
+        assert!(segs[3].ends_with("_multi_agent_landing"));
+        let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
+        assert_eq!(meta.session.unwrap().agents, vec!["orchestrator", "agent_a", "agent_b"]);
+    }
+}
 
 #[cfg(test)]
 mod tests {
