@@ -61,6 +61,7 @@ Offline (no daemon): evaluate a .ray file directly in-process (no shared KB):
 const CLI: &str = r#"CLI REFERENCE
 -------------
 Global: ray-exomem <command> [options]. Use `ray-exomem <command> --help` for flags.
+Global flag: --json (machine-readable stdout; several commands also default to JSON when stdout is not a TTY).
 
 run | load <file>     Run a .ray file via local rayforce2 (no daemon, no shared state).
 eval <source>         POST Rayfall text to /api/actions/eval on the daemon. Prints JSON
@@ -77,18 +78,61 @@ stop                  Read PID from default data dir and stop that process.
 
 status                GET /api/status?exom=… (default exom: main).
 
-assert <pred> <val>   Assert a fact via generated Rayfall (assert-fact). --exom, --addr.
-                      Note: --confidence and --source are accepted but not yet applied
-                      end-to-end; prefer import/eval for rich metadata.
+assert <pred> <val>   Uses POST /api/actions/assert-fact whenever metadata flags such as
+                      --source, --confidence, --valid-from, or --valid-to are provided.
+                      Zero-metadata assertions still emit Rayfall `(assert-fact …)` through eval.
 
-retract <pred>      Retract by predicate JSON. --exom, --addr.
+retract <fact-id>     Resolves the current tuple via GET /api/facts/<id>, then emits
+                      Rayfall `(retract-fact …)` through /api/actions/eval.
+
+query [--request RAY] POST /api/query with a single Rayfall query read form.
+                      Accepts either `(query <exom> ...)` or `(in-exom <exom> (query ...))`.
+                      Default: (query <exom> (find ?fact ?pred ?value)
+                                        (where (?fact 'fact/predicate ?pred)
+                                               (?fact 'fact/value ?value)))
+
+expand-query          POST /api/expand-query and print the original, normalized,
+                      and fully expanded query after `in-exom` lowering and rule injection.
+
+history <fact-id>     GET /api/facts/<id> — touch history + fact snapshot.
+
+why <fact-id>         GET /api/explain?predicate=<id> (provenance / explanation).
+
+why-not --predicate P [--value V]  Scans exported active facts and reports whether a match exists.
+
+watch                 Stream GET /ray-exomem/events (SSE: `event: memory` JSON for mutations,
+                      plus heartbeats; optional filters exom/branch/actor/predicate, `since=<id>`).
+
+lint-memory           Hygiene: duplicate (predicate,value) / distinct fact_ids, oversized values,
+                      missing provenance, bad predicates, empty fact_id, time-related heuristics.
+
+doctor / start-session  Operational helpers (see --help). doctor compares CLI and daemon build
+                      identities. start-session creates the exom via POST /api/exoms if missing
+                      (--actor), then verifies both status and an empty Rayfall query before
+                      reporting exom_ready=true.
+
+coord claim|release|depend|agent-session
+                      Coordination helpers over claim/*, task/*, and agent/* fact ids using
+                      coordination namespace predicates. --exom, --addr, --branch, and --json
+                      are accepted before or after the subcommand.
+coord list-claims [--owner ...] [--status ...]
+                      Read-side summary of current claims without writing Datalog.
+coord show-claim <id>
+                      Current owner/status/expiry plus field histories for one claim.
+coord list-dependencies [--task-id ...]
+                      Read-side summary of current task dependency facts.
+coord show-task <task-id>
+                      Current task dependency set plus fact histories for that task.
+coord list-agent-sessions [--agent-id ...]
+                      Read-side summary of current agent/session bindings.
+coord show-agent <agent-id>
+                      Current session binding plus fact history for that agent.
 
 facts                 Pretty-print schema/samples via GET /api/schema?include_samples=…
 
-observe <text>        Shortcut observation fact (predicate "observation"). Extra flags
-                      exist but are not fully wired to Brain metadata yet.
+observe <text>        Emits a simple `(assert-fact …)` observation marker through eval.
 
-import <file|-)       Read Rayfall source from file or stdin "-"; POST to /api/actions/eval.
+import <file|-)       Lossless backup; POST to /api/actions/import-json (requires X-Actor).
 
 export                GET /api/actions/export?exom=… — Rayfall text of facts.
 
@@ -96,10 +140,11 @@ exoms                 List knowledge bases (GET /api/exoms).
 
 log                   Recent events (GET /api/logs?exom=…).
 
-branch <subcommand>   List, create, switch, diff, merge, or archive branches. --exom, --addr.
+branch <subcommand>   List, create, switch, diff, merge, or archive branches. --exom, --addr,
+                      and --json are accepted before or after the subcommand.
                       eval/assert/retract/observe/import accept --branch to switch before the op.
 
-version               Binary + rayforce2 version string.
+version               Binary + rayforce2 version string plus build identity.
 
 brain-demo            Print the built-in Brain layer demo (time-travel sample); separate
                       from daemon Brain + rayforce2 integration details.
@@ -113,7 +158,7 @@ http://127.0.0.1:9780/ray-exomem/api/...). The Rust CLI client prepends this pre
 
 Common query param: exom=<name> (default exom name: main).
 
-GET  /api/status
+GET  /api/status         (stats.sym_entries, rules, current_branch, server.build.identity)
 GET  /api/schema?include_samples=true&sample_limit=…
 GET  /api/graph
 GET  /api/clusters
@@ -129,21 +174,34 @@ GET  /api/provenance
 GET  /api/relation-graph
 GET  /api/explain?…
 GET  /api/actions/export
-GET  /api/facts/<id>
-GET  /api/clusters/<id>
-POST /api/actions/clear
-POST /api/actions/retract        (JSON body; predicate, etc.)
-POST /api/actions/eval           (plain text body: Rayfall source)
+GET  /api/actions/export-json
+POST /api/actions/import-json
+GET  /api/beliefs/<id>/support   (resolve supported_by to fact/observation snapshots)
+POST /api/actions/eval           (plain text: Rayfall; advanced / engine path)
+POST /api/actions/assert-fact    (structured bitemporal fact assert)
 POST /api/actions/evaluate
-POST /api/actions/import
+POST /api/actions/consolidate-propose   (501 — not implemented)
 POST /api/exoms
 POST /api/exoms/<name>/manage
-GET  /events                     (Server-Sent Events stream for live mutations)
+GET  /events?exom=&branch=&actor=&predicate=&since= (SSE; `event: memory` + JSON body with
+     id/op/exom/branch/actor; predicate set on fact upserts/eval asserts; heartbeats)
 
 UI static assets: GET /ray-exomem/… (SvelteKit base path /ray-exomem).
 
 For quick checks:
   curl -s "http://127.0.0.1:9780/ray-exomem/api/status?exom=main"
+
+Queryable system predicates in the main exom datom store:
+  fact/predicate, fact/value,
+  fact/provenance, fact/valid_from, fact/valid_to, fact/created_by,
+  fact/superseded_by, fact/revoked_by,
+  tx/id, tx/time, tx/actor, tx/action, tx/branch, tx/parent, tx/session, tx/ref,
+  claim/owner, claim/status, claim/expires_at, task/depends_on, agent/session
+
+Built-in derived views:
+  fact-row, fact-meta, fact-with-tx, tx-row, observation-row, belief-row,
+  branch-row, merge-row, claim-owner-row, claim-status-row, task-dependency-row,
+  agent-session-row
 "##;
 
 const ENV: &str = r#"ENVIRONMENT
@@ -157,12 +215,15 @@ with path /ray-exomem."#;
 
 const LIMITATIONS: &str = r#"LIMITATIONS (read before production use)
 ----------------------------------------
- • Brain (event-sourced memory) and the rayforce2 datoms eval path are not fully unified;
-   some features exist in parallel. See plans/dx_improvements.md in the repo.
- • assert/observe: several CLI flags are parsed but not fully propagated to Brain.
+ • Some higher-level memory concepts still live in Rust-side structures; the intended public
+   interface remains Rayfall queries and mutations plus the existing structured bitemporal helpers.
+ • observe is currently a thin CLI convenience that emits a simple asserted fact.
  • import/eval: very large or complex Rayfall should be validated against rayforce2
    capabilities; there is no separate Teide layer.
- • No dedicated `query` CLI yet — use eval with appropriate Rayfall or the HTTP API.
+ • Raw eval "output" is still the engine formatter; use query --json when you need decoded rows.
+ • Metadata now lives in the same datom space as base facts via system predicates. That keeps the
+   model Datalog-native, but it does mean `(query <exom> (find ?e ?a ?v) (where (?e ?a ?v)))`
+   will include both user facts and system metadata rows.
 
 For version and backend:  ray-exomem version"#;
 
@@ -217,15 +278,7 @@ mod tests {
     #[test]
     fn each_topic_non_empty() {
         use GuideTopic::*;
-        for t in [
-            All,
-            Overview,
-            Workflow,
-            Cli,
-            Http,
-            Env,
-            Limitations,
-        ] {
+        for t in [All, Overview, Workflow, Cli, Http, Env, Limitations] {
             assert!(!render(t).is_empty(), "empty topic: {t:?}");
         }
     }

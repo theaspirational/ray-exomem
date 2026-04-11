@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use include_dir::{include_dir, Dir};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -11,16 +11,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     backend::RayforceEngine,
     brain::{self, Brain, MergePolicy},
     context::MutationContext,
     exom::ExomDir,
-    rayfall_parser::{self, FormKind},
+    ffi,
+    rayfall_ast::{self, CanonicalForm, CanonicalQuery, LoweringOptions},
+    rayfall_parser,
     rules::{self, ParsedRule},
     storage::{self, RayObj},
+    system_schema,
 };
 
 /// Embedded UI assets (built by build.rs before compilation).
@@ -73,6 +76,26 @@ fn content_type_for_ext(path: &str) -> &'static str {
     }
 }
 
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h1 = bytes[i + 1] as char;
+            let h2 = bytes[i + 2] as char;
+            if let (Some(a), Some(b)) = (h1.to_digit(16), h2.to_digit(16)) {
+                out.push(((a << 4) | b) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// URL users should open in a browser (uses `127.0.0.1` when the bind address is `0.0.0.0`).
 pub fn http_public_url(bind_addr: SocketAddr) -> String {
     let host = if bind_addr.ip().is_unspecified() {
@@ -82,7 +105,9 @@ pub fn http_public_url(bind_addr: SocketAddr) -> String {
     };
     match host {
         std::net::IpAddr::V4(v4) => format!("http://{}:{}{}/", v4, bind_addr.port(), UI_MOUNT_PATH),
-        std::net::IpAddr::V6(v6) => format!("http://[{}]:{}{}/", v6, bind_addr.port(), UI_MOUNT_PATH),
+        std::net::IpAddr::V6(v6) => {
+            format!("http://[{}]:{}{}/", v6, bind_addr.port(), UI_MOUNT_PATH)
+        }
     }
 }
 
@@ -97,11 +122,125 @@ pub struct DaemonState {
     pub exoms: HashMap<String, ExomState>,
 }
 
+/// Ring buffer of recent SSE event payloads (`data:` lines are JSON objects with monotonic `id`).
+pub struct SseRing {
+    next_id: u64,
+    entries: VecDeque<(u64, String)>,
+    cap: usize,
+}
+
+impl SseRing {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            next_id: 1,
+            entries: VecDeque::new(),
+            cap: cap.max(16),
+        }
+    }
+
+    fn push_json(&mut self, mut payload: serde_json::Value) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(id));
+        }
+        let line = payload.to_string();
+        self.entries.push_back((id, line));
+        while self.entries.len() > self.cap {
+            self.entries.pop_front();
+        }
+        id
+    }
+
+    fn snapshot_after(&self, after_id: u64) -> Vec<(u64, String)> {
+        self.entries
+            .iter()
+            .filter(|(id, _)| *id > after_id)
+            .cloned()
+            .collect()
+    }
+}
+
 /// Shared server state.
 pub struct ServerState {
     pub daemon: Mutex<DaemonState>,
     pub exom_dir: Option<ExomDir>,
     pub start_time: Instant,
+    pub sse_ring: Mutex<SseRing>,
+}
+
+fn sse_push_mutation(
+    state: &ServerState,
+    exom: &str,
+    op: &str,
+    actor: Option<&str>,
+    predicate: Option<&str>,
+) {
+    let branch = if exom == "*" {
+        String::new()
+    } else if let Ok(d) = state.daemon.try_lock() {
+        d.exoms
+            .get(exom)
+            .map(|e| e.brain.current_branch_id().to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut event = serde_json::json!({
+        "v": 1,
+        "kind": "memory",
+        "op": op,
+        "exom": exom,
+        "branch": branch,
+    });
+    if let Some(a) = actor {
+        if let Some(obj) = event.as_object_mut() {
+            obj.insert("actor".to_string(), serde_json::json!(a));
+        }
+    }
+    if let Some(p) = predicate {
+        if let Some(obj) = event.as_object_mut() {
+            obj.insert("predicate".to_string(), serde_json::json!(p));
+        }
+    }
+    let _ = state.sse_ring.lock().unwrap().push_json(event);
+}
+
+fn sse_event_matches_filter(
+    line: &str,
+    exom_f: &str,
+    branch_f: &str,
+    actor_f: &str,
+    pred_f: &str,
+) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if !exom_f.is_empty() {
+        match v.get("exom").and_then(|x| x.as_str()) {
+            Some(e) if e == exom_f => {}
+            _ => return false,
+        }
+    }
+    if !branch_f.is_empty() {
+        match v.get("branch").and_then(|x| x.as_str()) {
+            Some(b) if b == branch_f => {}
+            _ => return false,
+        }
+    }
+    if !actor_f.is_empty() {
+        match v.get("actor").and_then(|x| x.as_str()) {
+            Some(a) if a == actor_f => {}
+            _ => return false,
+        }
+    }
+    if !pred_f.is_empty() {
+        match v.get("predicate").and_then(|x| x.as_str()) {
+            Some(p) if p == pred_f => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn get_daemon(state: &ServerState) -> std::sync::MutexGuard<'_, DaemonState> {
@@ -116,6 +255,10 @@ fn datoms_path(ed: &ExomDir, exom: &str) -> PathBuf {
     ed.exom_path(exom).join("datoms")
 }
 
+fn schema_path(ed: &ExomDir, exom: &str) -> PathBuf {
+    ed.exom_path(exom).join(system_schema::SCHEMA_FILENAME)
+}
+
 fn load_rules(ed: Option<&ExomDir>, exom: &str) -> Result<Vec<ParsedRule>> {
     let Some(ed) = ed else {
         return Ok(Vec::new());
@@ -124,8 +267,8 @@ fn load_rules(ed: Option<&ExomDir>, exom: &str) -> Result<Vec<ParsedRule>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let src = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let src =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut out = Vec::new();
     for line in src.lines().map(str::trim).filter(|line| !line.is_empty()) {
         out.push(rules::parse_rule_line(
@@ -135,6 +278,12 @@ fn load_rules(ed: Option<&ExomDir>, exom: &str) -> Result<Vec<ParsedRule>> {
         )?);
     }
     Ok(out)
+}
+
+fn combined_rules(exom: &str, user_rules: &[ParsedRule]) -> Result<Vec<ParsedRule>> {
+    let mut rules = system_schema::builtin_rules(exom)?;
+    rules.extend_from_slice(user_rules);
+    Ok(rules)
 }
 
 fn save_rules(ed: Option<&ExomDir>, exom: &str, rules: &[ParsedRule]) -> Result<()> {
@@ -147,41 +296,26 @@ fn save_rules(ed: Option<&ExomDir>, exom: &str, rules: &[ParsedRule]) -> Result<
     } else {
         format!(
             "{}\n",
-            rules.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join("\n")
+            rules
+                .iter()
+                .map(|r| r.full_text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         )
     };
     fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
-/// Ensure a rule has the exom name. Rules are always stored with the exom name.
-fn ensure_rule_has_exom(exom: &str, rule: &str) -> String {
-    let trimmed = rule.trim();
-    let prefix = "(rule ";
-    if !trimmed.starts_with(prefix) {
-        return trimmed.to_string();
-    }
-    let after_prefix = &trimmed[prefix.len()..];
-    // Already has an exom name if the next token is a bare word (not a paren/bracket)
-    if !after_prefix.starts_with('(') && !after_prefix.starts_with('[') {
-        return trimmed.to_string();
-    }
-    // Insert exom name
-    format!("(rule {} {}", exom, after_prefix)
-}
-
 fn build_or_load_datoms(brain: &Brain, ed: Option<&ExomDir>, exom: &str) -> Result<RayObj> {
     if let Some(ed) = ed {
         let dir = datoms_path(ed, exom);
-        if storage::table_exists(&dir) {
-            return storage::load_table(&dir, &ed.sym_path());
-        }
-        let datoms = storage::build_datoms_table(&brain.current_facts())?;
+        let datoms = storage::build_datoms_table(brain)?;
         storage::save_table(&datoms, &dir, &ed.sym_path())?;
         storage::sym_save(&ed.sym_path())?;
         return Ok(datoms);
     }
-    storage::build_datoms_table(&brain.current_facts())
+    storage::build_datoms_table(brain)
 }
 
 fn persist_exom_state(ed: Option<&ExomDir>, exom: &str, state: &ExomState) -> Result<()> {
@@ -192,6 +326,58 @@ fn persist_exom_state(ed: Option<&ExomDir>, exom: &str, state: &ExomState) -> Re
     storage::save_table(&state.datoms, &datoms_path(ed, exom), &ed.sym_path())?;
     storage::sym_save(&ed.sym_path())?;
     save_rules(Some(ed), exom, &state.rules)?;
+    save_exom_disk_meta(ed, exom, &state.brain)?;
+    let ontology = system_schema::build_exom_ontology(exom, &state.brain, &state.rules);
+    system_schema::save_exom_ontology(&schema_path(ed, exom), &ontology)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Exom disk metadata — durable `current_branch` (upgrade-safe JSON alongside tables)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct ExomDiskMeta {
+    format_version: u32,
+    current_branch: String,
+}
+
+fn exom_disk_meta_path(ed: &ExomDir, exom: &str) -> PathBuf {
+    ed.exom_path(exom).join("exom.json")
+}
+
+fn load_apply_exom_disk_meta(ed: &ExomDir, exom: &str, brain: &mut Brain) -> Result<()> {
+    let path = exom_disk_meta_path(ed, exom);
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let meta: ExomDiskMeta = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if meta.format_version != 1 {
+        return Ok(());
+    }
+    if brain
+        .branches()
+        .iter()
+        .any(|b| b.branch_id == meta.current_branch && !b.archived)
+    {
+        let _ = brain.switch_branch(&meta.current_branch);
+    }
+    Ok(())
+}
+
+fn save_exom_disk_meta(ed: &ExomDir, exom: &str, brain: &Brain) -> Result<()> {
+    let path = exom_disk_meta_path(ed, exom);
+    let meta = ExomDiskMeta {
+        format_version: 1,
+        current_branch: brain.current_branch_id().to_string(),
+    };
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&meta)?;
+    fs::write(&tmp, &body).with_context(|| format!("failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -212,9 +398,12 @@ fn reconcile_runtime_after_failed_restore(daemon: &DaemonState) -> Result<()> {
 }
 
 fn load_exom_state(ed: Option<&ExomDir>, name: &str) -> Result<ExomState> {
-    let brain = if let Some(ed) = ed {
+    let mut brain = if let Some(ed) = ed {
         if ed.is_recovery_mode() {
-            eprintln!("[ray-exomem] recovering exom '{}' from JSONL sidecars", name);
+            eprintln!(
+                "[ray-exomem] recovering exom '{}' from JSONL sidecars",
+                name
+            );
             Brain::open_exom_from_jsonl(&ed.exom_path(name), &ed.sym_path())?
         } else {
             let b = Brain::open_exom(&ed.exom_path(name), &ed.sym_path())?;
@@ -225,17 +414,32 @@ fn load_exom_state(ed: Option<&ExomDir>, name: &str) -> Result<ExomState> {
     } else {
         Brain::new()
     };
+    if let Some(ed) = ed {
+        load_apply_exom_disk_meta(ed, name, &mut brain)?;
+    }
     let datoms = build_or_load_datoms(&brain, ed, name)?;
     let rules = load_rules(ed, name)?;
-    Ok(ExomState { brain, datoms, rules })
+    if let Some(ed) = ed {
+        let ontology = system_schema::build_exom_ontology(name, &brain, &rules);
+        system_schema::save_exom_ontology(&schema_path(ed, name), &ontology)?;
+    }
+    Ok(ExomState {
+        brain,
+        datoms,
+        rules,
+    })
 }
 
-fn refresh_exom_binding(daemon: &mut DaemonState, exom_dir: Option<&ExomDir>, exom: &str) -> Result<()> {
+fn refresh_exom_binding(
+    daemon: &mut DaemonState,
+    exom_dir: Option<&ExomDir>,
+    exom: &str,
+) -> Result<()> {
     let state = daemon
         .exoms
         .get_mut(exom)
         .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
-    state.datoms = storage::build_datoms_table(&state.brain.current_facts())?;
+    state.datoms = storage::build_datoms_table(&state.brain)?;
     daemon
         .engine
         .bind_named_db(storage::sym_intern(exom), &state.datoms)?;
@@ -243,7 +447,11 @@ fn refresh_exom_binding(daemon: &mut DaemonState, exom_dir: Option<&ExomDir>, ex
     Ok(())
 }
 
-pub fn serve(ui_dir: Option<PathBuf>, bind_addr: SocketAddr, data_dir: Option<PathBuf>) -> Result<()> {
+pub fn serve(
+    ui_dir: Option<PathBuf>,
+    bind_addr: SocketAddr,
+    data_dir: Option<PathBuf>,
+) -> Result<()> {
     let listener =
         TcpListener::bind(bind_addr).with_context(|| format!("failed to bind {}", bind_addr))?;
     listener
@@ -258,7 +466,10 @@ pub fn serve(ui_dir: Option<PathBuf>, bind_addr: SocketAddr, data_dir: Option<Pa
             let exom_names = ed.list_exoms()?;
             if exom_names.is_empty() {
                 ed.create_exom(DEFAULT_EXOM)?;
-                exoms.insert(DEFAULT_EXOM.to_string(), load_exom_state(Some(&ed), DEFAULT_EXOM)?);
+                exoms.insert(
+                    DEFAULT_EXOM.to_string(),
+                    load_exom_state(Some(&ed), DEFAULT_EXOM)?,
+                );
             } else {
                 for name in &exom_names {
                     eprintln!("[ray-exomem] loading exom '{}'", name);
@@ -268,7 +479,10 @@ pub fn serve(ui_dir: Option<PathBuf>, bind_addr: SocketAddr, data_dir: Option<Pa
             Some(ed)
         }
         None => {
-            exoms.insert(DEFAULT_EXOM.to_string(), load_exom_state(None, DEFAULT_EXOM)?);
+            exoms.insert(
+                DEFAULT_EXOM.to_string(),
+                load_exom_state(None, DEFAULT_EXOM)?,
+            );
             None
         }
     };
@@ -290,6 +504,7 @@ pub fn serve(ui_dir: Option<PathBuf>, bind_addr: SocketAddr, data_dir: Option<Pa
         daemon: Mutex::new(daemon),
         exom_dir,
         start_time: Instant::now(),
+        sse_ring: Mutex::new(SseRing::new(512)),
     });
 
     if let Some(ref dir) = ui_dir {
@@ -355,8 +570,13 @@ fn parse_request(raw: &[u8]) -> Result<Request> {
 
     let mut query = HashMap::new();
     for pair in query_str.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
         if let Some((k, v)) = pair.split_once('=') {
-            query.insert(k.to_string(), v.to_string());
+            query.insert(percent_decode(k), percent_decode(v));
+        } else {
+            query.insert(percent_decode(pair), String::new());
         }
     }
 
@@ -373,7 +593,10 @@ fn parse_request(raw: &[u8]) -> Result<Request> {
     // Extract Content-Length and body
     let mut content_length = 0usize;
     for line in header_str.lines() {
-        if let Some(val) = line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")) {
+        if let Some(val) = line
+            .strip_prefix("Content-Length:")
+            .or_else(|| line.strip_prefix("content-length:"))
+        {
             content_length = val.trim().parse().unwrap_or(0);
         }
     }
@@ -403,7 +626,11 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 // Connection handler
 // ---------------------------------------------------------------------------
 
-fn handle_connection(mut stream: TcpStream, ui_dir: Option<&Path>, state: &ServerState) -> Result<()> {
+fn handle_connection(
+    mut stream: TcpStream,
+    ui_dir: Option<&Path>,
+    state: &ServerState,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut buf = vec![0_u8; 131072];
@@ -423,9 +650,13 @@ fn handle_connection(mut stream: TcpStream, ui_dir: Option<&Path>, state: &Serve
     // Static file serving — GET/HEAD only
     if req.method != "GET" && req.method != "HEAD" {
         return write_response(
-            &mut stream, 405, "Method Not Allowed",
-            "text/plain; charset=utf-8", b"method not allowed",
-            req.method == "HEAD", None,
+            &mut stream,
+            405,
+            "Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"method not allowed",
+            req.method == "HEAD",
+            None,
         );
     }
 
@@ -433,7 +664,8 @@ fn handle_connection(mut stream: TcpStream, ui_dir: Option<&Path>, state: &Serve
         return write_redirect(&mut stream, "/ray-exomem/");
     }
 
-    let rel = req.path
+    let rel = req
+        .path
         .strip_prefix(UI_MOUNT_PATH)
         .unwrap_or(&req.path)
         .trim_start_matches('/');
@@ -449,14 +681,23 @@ fn handle_connection(mut stream: TcpStream, ui_dir: Option<&Path>, state: &Serve
         Some((content_type, data)) => {
             let body = if head_only { &[] as &[u8] } else { data };
             write_response(
-                &mut stream, 200, "OK", content_type, body,
-                head_only, Some(("Cache-Control", "no-cache")),
+                &mut stream,
+                200,
+                "OK",
+                content_type,
+                body,
+                head_only,
+                Some(("Cache-Control", "no-cache")),
             )
         }
         None => write_response(
-            &mut stream, 404, "Not Found",
-            "text/plain; charset=utf-8", b"not found",
-            head_only, None,
+            &mut stream,
+            404,
+            "Not Found",
+            "text/plain; charset=utf-8",
+            b"not found",
+            head_only,
+            None,
         ),
     }
 }
@@ -464,27 +705,31 @@ fn handle_connection(mut stream: TcpStream, ui_dir: Option<&Path>, state: &Serve
 fn serve_from_disk(stream: &mut TcpStream, req: &Request, ui_dir: &Path, rel: &str) -> Result<()> {
     let file_path = resolve_asset_path(ui_dir, rel);
 
-    let (status, reason, body_path) = match file_path {
-        Some(p) if p.is_file() => (200, "OK", p),
-        Some(p) if p.is_dir() => {
-            let index = p.join("index.html");
-            if index.is_file() { (200, "OK", index) }
-            else { (404, "Not Found", ui_dir.join("index.html")) }
-        }
-        _ => {
-            let index = ui_dir.join("index.html");
-            if index.is_file() {
-                (200, "OK", index)
-            } else {
-                return write_response(
+    let (status, reason, body_path) =
+        match file_path {
+            Some(p) if p.is_file() => (200, "OK", p),
+            Some(p) if p.is_dir() => {
+                let index = p.join("index.html");
+                if index.is_file() {
+                    (200, "OK", index)
+                } else {
+                    (404, "Not Found", ui_dir.join("index.html"))
+                }
+            }
+            _ => {
+                let index = ui_dir.join("index.html");
+                if index.is_file() {
+                    (200, "OK", index)
+                } else {
+                    return write_response(
                     stream, 404, "Not Found",
                     "text/plain; charset=utf-8",
                     b"ray-exomem UI not built; run npm install && npm run build in ray-exomem/ui",
                     req.method == "HEAD", None,
                 );
+                }
             }
-        }
-    };
+        };
 
     let body = if req.method == "HEAD" {
         Vec::new()
@@ -494,8 +739,13 @@ fn serve_from_disk(stream: &mut TcpStream, req: &Request, ui_dir: &Path, rel: &s
     };
     let content_type = content_type_for_path(&body_path);
     write_response(
-        stream, status, reason, content_type, &body,
-        req.method == "HEAD", Some(("Cache-Control", "no-cache")),
+        stream,
+        status,
+        reason,
+        content_type,
+        &body,
+        req.method == "HEAD",
+        Some(("Cache-Control", "no-cache")),
     )
 }
 
@@ -503,18 +753,36 @@ fn serve_from_disk(stream: &mut TcpStream, req: &Request, ui_dir: &Path, rel: &s
 // API router
 // ---------------------------------------------------------------------------
 
-fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &ServerState) -> Result<()> {
+fn handle_api(
+    stream: &mut TcpStream,
+    req: &Request,
+    api_path: &str,
+    state: &ServerState,
+) -> Result<()> {
     let exom = req
         .query
         .get("exom")
         .map(|s| s.as_str())
         .unwrap_or(DEFAULT_EXOM);
 
-    let ctx = extract_mutation_context(req);
+    let ctx = if mutation_requires_actor(req.method.as_str(), api_path) {
+        match require_mutation_context(req) {
+            Ok(c) => c,
+            Err(msg) => {
+                return write_json_response(
+                    stream,
+                    400,
+                    &serde_json::json!({ "error": msg }).to_string(),
+                );
+            }
+        }
+    } else {
+        extract_mutation_context(req)
+    };
 
     // SSE owns the connection for the lifetime of the stream; never send a second HTTP response.
     if req.method == "GET" && api_path == "/events" {
-        return handle_events_sse(stream);
+        return handle_events_sse(stream, req, state);
     }
 
     let result = match (req.method.as_str(), api_path) {
@@ -529,31 +797,51 @@ fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &Ser
         ("GET", "/api/explain") => api_explain(state, &req.query),
         ("GET", "/api/actions/export") => api_export(state, exom),
         ("GET", "/api/actions/export-json") => api_export_json(state, exom),
+        ("POST", "/api/query") => api_query(state, &req.body),
+        ("POST", "/api/expand-query") => api_expand_query(state, &req.body),
         ("POST", "/api/actions/import-json") => api_import_json(state, exom, &req.body, &ctx),
+        ("POST", "/api/actions/assert-fact") => api_assert_fact(state, exom, &req.body, &ctx),
         ("POST", "/api/actions/retract-all") => api_retract_all(state, exom, &ctx),
-        ("POST", "/api/actions/wipe") => api_wipe(state, exom),
-        ("POST", "/api/actions/factory-reset") => api_factory_reset(state),
-        ("POST", "/api/actions/retract") => api_retract(state, exom, &req.body, &ctx),
+        ("POST", "/api/actions/wipe") => api_wipe(state, exom, &ctx),
+        ("POST", "/api/actions/factory-reset") => api_factory_reset(state, &ctx),
         ("POST", "/api/actions/evaluate") => api_evaluate(state),
         ("POST", "/api/actions/eval") => api_eval(state, &req.body, &ctx),
-        ("POST", "/api/actions/import") => api_import(state, &req.body, &ctx),
-        ("POST", "/api/actions/assert-fact") => api_assert_fact_direct(state, exom, &req.body, &ctx),
+        ("POST", "/api/actions/consolidate-propose") => api_consolidate_propose(),
         ("GET", "/api/facts/valid-at") => api_facts_valid_at(state, exom, &req.query),
         ("GET", "/api/facts/bitemporal") => api_facts_bitemporal(state, exom, &req.query),
-        ("POST", "/api/exoms") => api_exom_create(state, &req.body),
+        ("POST", "/api/exoms") => api_exom_create(state, &req.body, &ctx),
         _ => {
             if (req.method.as_str(), api_path) == ("GET", "/api/branches") {
                 api_list_branches(state, exom)
             } else if (req.method.as_str(), api_path) == ("POST", "/api/branches") {
                 api_create_branch(state, exom, &req.body, &ctx)
             } else if api_path.starts_with("/api/branches/") {
-                api_branches_subpath(state, exom, api_path, req.method.as_str(), &req.body, &req.query, &ctx)
+                api_branches_subpath(
+                    state,
+                    exom,
+                    api_path,
+                    req.method.as_str(),
+                    &req.body,
+                    &req.query,
+                    &ctx,
+                )
             } else if api_path.starts_with("/api/derived/") {
-                let pred = api_path.strip_prefix("/api/derived/").unwrap_or("").trim_end_matches('/');
+                let pred = api_path
+                    .strip_prefix("/api/derived/")
+                    .unwrap_or("")
+                    .trim_end_matches('/');
                 api_derived(state, exom, pred)
+            } else if api_path.starts_with("/api/beliefs/") && api_path.ends_with("/support") {
+                let rest = api_path
+                    .strip_prefix("/api/beliefs/")
+                    .unwrap_or("")
+                    .strip_suffix("/support")
+                    .unwrap_or("");
+                api_belief_support(state, exom, rest)
             } else if api_path.starts_with("/api/facts/") {
                 let id = api_path.strip_prefix("/api/facts/").unwrap_or("");
-                api_fact_detail(state, id, exom)
+                let id = percent_decode(id);
+                api_fact_detail(state, &id, exom)
             } else if api_path.starts_with("/api/clusters/") {
                 let id = api_path.strip_prefix("/api/clusters/").unwrap_or("");
                 api_cluster_detail(state, id, exom)
@@ -569,7 +857,10 @@ fn handle_api(stream: &mut TcpStream, req: &Request, api_path: &str, state: &Ser
 
     let (status, body) = match result {
         Ok(resp) => resp,
-        Err(err) => (500, serde_json::json!({"error": err.to_string()}).to_string()),
+        Err(err) => (
+            500,
+            serde_json::json!({"error": err.to_string()}).to_string(),
+        ),
     };
 
     write_json_response(stream, status, &body)
@@ -605,6 +896,29 @@ fn get_exom_state<'a>(daemon: &'a DaemonState, exom: &str) -> Result<&'a ExomSta
         .ok_or_else(|| anyhow!("unknown exom '{}'", exom))
 }
 
+/// Run a mutation on an exom's state, then refresh rayforce bindings and persist.
+fn mutate_exom_brain<T>(
+    state: &ServerState,
+    exom_name: &str,
+    op: &str,
+    actor: Option<&str>,
+    predicate: Option<&str>,
+    f: impl FnOnce(&mut ExomState) -> Result<T>,
+) -> Result<T> {
+    let mut daemon = get_daemon(state);
+    let result = {
+        let es = daemon
+            .exoms
+            .get_mut(exom_name)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom_name))?;
+        f(es)
+    };
+    let out = result?;
+    refresh_exom_binding(&mut daemon, state.exom_dir.as_ref(), exom_name)?;
+    sse_push_mutation(state, exom_name, op, actor, predicate);
+    Ok(out)
+}
+
 fn extract_mutation_context(req: &Request) -> MutationContext {
     MutationContext {
         actor: req
@@ -618,38 +932,126 @@ fn extract_mutation_context(req: &Request) -> MutationContext {
     }
 }
 
-fn extract_exom_from_query_source(source: &str) -> Result<String> {
-    let t = source.trim();
-    let after = t
-        .strip_prefix("(query")
-        .ok_or_else(|| anyhow!("expected (query"))?;
-    let s = after.trim_start();
-    let end = s
-        .find(|c: char| c.is_whitespace() || c == '(')
-        .unwrap_or(s.len());
-    let name = s[..end].trim();
-    if name.is_empty() {
-        bail!("query missing database name");
-    }
-    Ok(name.to_string())
+fn require_mutation_context(req: &Request) -> Result<MutationContext, &'static str> {
+    let actor = req
+        .headers
+        .get("x-actor")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let Some(actor) = actor else {
+        return Err("X-Actor header is required for mutations");
+    };
+    Ok(MutationContext {
+        actor: actor.to_string(),
+        session: req.headers.get("x-session").cloned(),
+        model: req.headers.get("x-model").cloned(),
+    })
 }
 
-fn extract_exom_from_rule_source(source: &str) -> String {
-    let t = source.trim();
-    let Some(after) = t.strip_prefix("(rule") else {
-        return DEFAULT_EXOM.to_string();
+fn mutation_requires_actor(method: &str, api_path: &str) -> bool {
+    ((matches!(method, "POST" | "PUT" | "PATCH"))
+        && !matches!(api_path, "/api/query" | "/api/expand-query"))
+        || (method == "DELETE" && api_path.starts_with("/api/branches/"))
+}
+
+struct ExpandedQuery {
+    original_source: String,
+    normalized_query: String,
+    expanded_query: String,
+    exom_name: String,
+}
+
+enum EvalForm {
+    Canonical(CanonicalForm),
+    Raw(String),
+}
+
+fn lower_query_request(
+    source: &str,
+    default_exom: Option<&str>,
+    surface: &str,
+) -> Result<CanonicalQuery> {
+    let forms = rayfall_ast::parse_forms(source)?;
+    if forms.len() != 1 {
+        bail!("{surface} expects exactly one top-level Rayfall query form");
+    }
+    let lowered = rayfall_ast::lower_top_level(
+        &forms[0],
+        LoweringOptions {
+            default_query_exom: default_exom,
+            default_rule_exom: Some(DEFAULT_EXOM),
+        },
+    )?;
+    match lowered.as_slice() {
+        [CanonicalForm::Query(query)] => Ok(query.clone()),
+        [CanonicalForm::AssertFact(_) | CanonicalForm::RetractFact(_) | CanonicalForm::Rule(_)] => {
+            bail!("{surface} only accepts a Rayfall (query ...) form")
+        }
+        [] => bail!("{surface} expects exactly one top-level Rayfall query form"),
+        _ => bail!("{surface} accepts exactly one logical query form"),
+    }
+}
+
+fn lower_eval_forms(source: &str) -> Result<Vec<EvalForm>> {
+    let forms = rayfall_ast::parse_forms(source)?;
+    let mut out = Vec::new();
+    for form in forms {
+        match form
+            .as_list()
+            .and_then(|items| items.first())
+            .and_then(|item| item.as_symbol())
+        {
+            Some("assert-fact" | "retract-fact" | "rule" | "query" | "in-exom") => {
+                let lowered = rayfall_ast::lower_top_level(
+                    &form,
+                    LoweringOptions {
+                        default_query_exom: None,
+                        default_rule_exom: Some(DEFAULT_EXOM),
+                    },
+                )?;
+                out.extend(lowered.into_iter().map(EvalForm::Canonical));
+            }
+            _ => out.push(EvalForm::Raw(form.emit())),
+        }
+    }
+    Ok(out)
+}
+
+fn expand_canonical_query_with_daemon(
+    daemon: &mut DaemonState,
+    original_source: String,
+    query: &CanonicalQuery,
+) -> Result<ExpandedQuery> {
+    let exom_name = query.exom.clone();
+    let rule_inline_bodies: Vec<String> = {
+        let es = daemon
+            .exoms
+            .get(&exom_name)
+            .ok_or_else(|| anyhow!("unknown exom '{}'", exom_name))?;
+        combined_rules(&exom_name, &es.rules)?
+            .into_iter()
+            .map(|rule| rule.inline_body)
+            .collect()
     };
-    let s = after.trim_start();
-    if s.starts_with('(') {
-        return DEFAULT_EXOM.to_string();
-    }
-    let end = s
-        .find(|c: char| c.is_whitespace() || c == '(')
-        .unwrap_or(s.len());
-    if end == 0 {
-        return DEFAULT_EXOM.to_string();
-    }
-    s[..end].to_string()
+    let normalized_query = query.emit();
+    let expanded_query =
+        rayfall_parser::rewrite_query_with_rules(&normalized_query, &rule_inline_bodies)?;
+    Ok(ExpandedQuery {
+        original_source,
+        normalized_query,
+        expanded_query,
+        exom_name,
+    })
+}
+
+fn expand_query_with_daemon(
+    daemon: &mut DaemonState,
+    source: &str,
+    default_exom: Option<&str>,
+    surface: &str,
+) -> Result<ExpandedQuery> {
+    let query = lower_query_request(source, default_exom, surface)?;
+    expand_canonical_query_with_daemon(daemon, source.to_string(), &query)
 }
 
 #[derive(Deserialize)]
@@ -687,25 +1089,36 @@ fn api_list_branches(state: &ServerState, exom: &str) -> ApiResult {
     json_ok(&serde_json::json!({ "branches": branches }))
 }
 
-fn api_create_branch(state: &ServerState, exom: &str, body: &[u8], ctx: &MutationContext) -> ApiResult {
+fn api_create_branch(
+    state: &ServerState,
+    exom: &str,
+    body: &[u8],
+    ctx: &MutationContext,
+) -> ApiResult {
     let req: CreateBranchReq =
         serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON: {}", e))?;
     let name = req.name.unwrap_or_else(|| req.branch_id.clone());
-    let mut daemon = get_daemon(state);
-    let tx_id = {
-        let ex = daemon
-            .exoms
-            .get_mut(exom)
-            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
-        ex.brain.create_branch(&req.branch_id, &name, ctx)?
-    };
+    let bid = req.branch_id.clone();
+    let tx_id = mutate_exom_brain(
+        state,
+        exom,
+        "branch_create",
+        Some(ctx.actor.as_str()),
+        None,
+        |ex| ex.brain.create_branch(&bid, &name, ctx),
+    )?;
     json_ok(&serde_json::json!({
         "branch_id": req.branch_id,
         "tx_id": tx_id
     }))
 }
 
-fn api_switch_branch(state: &ServerState, exom: &str, branch_id: &str, _ctx: &MutationContext) -> ApiResult {
+fn api_switch_branch(
+    state: &ServerState,
+    exom: &str,
+    branch_id: &str,
+    _ctx: &MutationContext,
+) -> ApiResult {
     let mut daemon = get_daemon(state);
     {
         let ex = daemon
@@ -723,6 +1136,13 @@ fn api_switch_branch(state: &ServerState, exom: &str, branch_id: &str, _ctx: &Mu
             );
         }
     }
+    sse_push_mutation(
+        state,
+        exom,
+        "branch_switch",
+        Some(_ctx.actor.as_str()),
+        None,
+    );
     json_ok(&serde_json::json!({ "switched_to": branch_id }))
 }
 
@@ -813,6 +1233,7 @@ fn api_merge_branch(
             eprintln!("[ray-exomem] merge restore failed: {} / {}", err, e2);
         }
     }
+    sse_push_mutation(state, exom, "branch_merge", Some(ctx.actor.as_str()), None);
     json_ok(&serde_json::json!({
         "added": result.added,
         "conflicts": result.conflicts.iter().map(|c| serde_json::json!({
@@ -825,7 +1246,12 @@ fn api_merge_branch(
     }))
 }
 
-fn api_delete_branch(state: &ServerState, exom: &str, branch_id: &str) -> ApiResult {
+fn api_delete_branch(
+    state: &ServerState,
+    exom: &str,
+    branch_id: &str,
+    ctx: &MutationContext,
+) -> ApiResult {
     let mut daemon = get_daemon(state);
     {
         let es = daemon
@@ -843,6 +1269,13 @@ fn api_delete_branch(state: &ServerState, exom: &str, branch_id: &str) -> ApiRes
             );
         }
     }
+    sse_push_mutation(
+        state,
+        exom,
+        "branch_archive",
+        Some(ctx.actor.as_str()),
+        None,
+    );
     json_ok(&serde_json::json!({ "archived": branch_id }))
 }
 
@@ -874,7 +1307,7 @@ fn api_branches_subpath(
         return api_merge_branch(state, exom, id, body, ctx);
     }
     if parts.len() == 1 && method == "DELETE" {
-        return api_delete_branch(state, exom, id);
+        return api_delete_branch(state, exom, id, ctx);
     }
     Ok(json_response(404, r#"{"error":"not found"}"#))
 }
@@ -885,19 +1318,38 @@ fn api_branches_subpath(
 
 fn api_status(state: &ServerState, exom: &str) -> ApiResult {
     let daemon = get_daemon(state);
-    let brain = &get_exom_state(&daemon, exom)?.brain;
+    let es = get_exom_state(&daemon, exom)?;
+    let brain = &es.brain;
     let uptime = state.start_time.elapsed().as_secs();
     let facts = brain.current_facts();
     let beliefs = brain.current_beliefs();
+    let all_rules = combined_rules(exom, &es.rules)?;
+    let derived_names: Vec<String> = rules::derived_predicates(&all_rules)
+        .into_iter()
+        .map(|(n, _)| n)
+        .take(24)
+        .collect();
+    let ontology = if let Some(ed) = state.exom_dir.as_ref() {
+        let path = schema_path(ed, exom);
+        system_schema::load_exom_ontology(&path)
+            .unwrap_or_else(|_| system_schema::build_exom_ontology(exom, &es.brain, &es.rules))
+    } else {
+        system_schema::build_exom_ontology(exom, &es.brain, &es.rules)
+    };
 
-    json_ok(&serde_json::json!({
+    let status = serde_json::json!({
         "ok": true,
         "exom": exom,
         "current_branch": brain.current_branch_id(),
         "server": {
             "name": "ray-exomem",
-            "version": env!("CARGO_PKG_VERSION"),
-            "uptime_sec": uptime
+            "version": crate::frontend_version(),
+            "uptime_sec": uptime,
+            "build": {
+                "git_sha": crate::build_git_sha(),
+                "built_unix": crate::build_unix_timestamp(),
+                "identity": crate::build_identity(),
+            }
         },
         "storage": {
             "exom_path": state.exom_dir.as_ref().map(|ed| ed.exom_path(exom).display().to_string()).unwrap_or_else(|| "in-memory".into())
@@ -908,17 +1360,37 @@ fn api_status(state: &ServerState, exom: &str) -> ApiResult {
             "derived_tuples": beliefs.len(),
             "intervals": facts.iter().filter(|f| f.valid_to.is_some()).count(),
             "directives": 0,
-            "events_logged": brain.transactions().len()
+            "events_logged": brain.transactions().len(),
+            "sym_entries": storage::sym_count(),
+            "rules": {
+                "count": es.rules.len(),
+                "derived_predicates": derived_names,
+            }
+        },
+        "schema": {
+            "path": state.exom_dir.as_ref().map(|ed| schema_path(ed, exom).display().to_string()),
+            "system_attribute_count": ontology.system_attributes.len(),
+            "coordination_attribute_count": ontology.coordination_attributes.len(),
+            "builtin_view_count": ontology.builtin_views.len(),
+            "user_predicates": ontology.user_predicates,
         }
-    }))
+    });
+    json_ok(&status)
 }
 
 fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) -> ApiResult {
     let daemon = get_daemon(state);
     let es = get_exom_state(&daemon, exom)?;
     let brain = &es.brain;
-    let include_samples = query.get("include_samples").map(|v| v == "true").unwrap_or(false);
-    let sample_limit: usize = query.get("sample_limit").and_then(|v| v.parse().ok()).unwrap_or(10);
+    let all_rules = combined_rules(exom, &es.rules)?;
+    let include_samples = query
+        .get("include_samples")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let sample_limit: usize = query
+        .get("sample_limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
     let filter_relation = query.get("relation").map(|s| s.as_str());
 
     let facts = brain.current_facts();
@@ -951,7 +1423,9 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
 
     for (pred, tuples) in &fact_groups {
         if let Some(filter) = filter_relation {
-            if *pred != filter { continue; }
+            if *pred != filter {
+                continue;
+            }
         }
         let has_intervals = has_intervals_map.get(pred).copied().unwrap_or(false);
         let mut rel = serde_json::json!({
@@ -971,14 +1445,17 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
 
     // Observations as a relation
     if filter_relation.is_none() || filter_relation == Some("observation") {
-        let obs_tuples: Vec<Vec<serde_json::Value>> = observations.iter().map(|o| {
-            vec![
-                serde_json::Value::String(o.obs_id.clone()),
-                serde_json::Value::String(o.source_type.clone()),
-                serde_json::Value::String(o.content.clone()),
-                serde_json::json!(o.confidence),
-            ]
-        }).collect();
+        let obs_tuples: Vec<Vec<serde_json::Value>> = observations
+            .iter()
+            .map(|o| {
+                vec![
+                    serde_json::Value::String(o.obs_id.clone()),
+                    serde_json::Value::String(o.source_type.clone()),
+                    serde_json::Value::String(o.content.clone()),
+                    serde_json::json!(o.confidence),
+                ]
+            })
+            .collect();
         let mut rel = serde_json::json!({
             "name": "observation",
             "arity": 4,
@@ -997,18 +1474,21 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
     // Beliefs as a derived relation
     if filter_relation.is_none() || filter_relation == Some("belief") {
         let has_belief_intervals = beliefs.iter().any(|b| b.valid_to.is_some());
-        let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs.iter().map(|b| {
-            vec![
-                serde_json::Value::String(b.belief_id.clone()),
-                serde_json::Value::String(b.claim_text.clone()),
-                serde_json::json!(b.confidence),
-                serde_json::Value::String(b.status.to_string()),
-                serde_json::json!({
-                    "valid_from": b.valid_from,
-                    "valid_to": b.valid_to,
-                }),
-            ]
-        }).collect();
+        let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs
+            .iter()
+            .map(|b| {
+                vec![
+                    serde_json::Value::String(b.belief_id.clone()),
+                    serde_json::Value::String(b.claim_text.clone()),
+                    serde_json::json!(b.confidence),
+                    serde_json::Value::String(b.status.to_string()),
+                    serde_json::json!({
+                        "valid_from": b.valid_from,
+                        "valid_to": b.valid_to,
+                    }),
+                ]
+            })
+            .collect();
         let mut rel = serde_json::json!({
             "name": "belief",
             "arity": 5,
@@ -1029,7 +1509,7 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
     base_names.insert("observation".into());
     base_names.insert("belief".into());
 
-    let derived_preds = rules::derived_predicates(&es.rules);
+    let derived_preds = rules::derived_predicates(&all_rules);
     for (pred_name, arity) in derived_preds {
         if base_names.contains(&pred_name) {
             continue;
@@ -1039,8 +1519,7 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
                 continue;
             }
         }
-        let defined_by_rules: Vec<usize> = es
-            .rules
+        let defined_by_rules: Vec<usize> = all_rules
             .iter()
             .enumerate()
             .filter(|(_, r)| r.head_predicate == pred_name)
@@ -1070,6 +1549,7 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
 
     json_ok(&serde_json::json!({
         "relations": relations,
+        "ontology": system_schema::build_exom_ontology(exom, brain, &es.rules),
         "directives": [],
         "summary": {
             "relation_count": relations.len(),
@@ -1083,7 +1563,10 @@ fn api_schema(state: &ServerState, exom: &str, query: &HashMap<String, String>) 
 fn api_graph(state: &ServerState, exom: &str, query: &HashMap<String, String>) -> ApiResult {
     let daemon = get_daemon(state);
     let brain = &get_exom_state(&daemon, exom)?.brain;
-    let limit: usize = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(500);
+    let limit: usize = query
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
     let facts = brain.current_facts();
 
     let mut nodes = Vec::new();
@@ -1143,16 +1626,19 @@ fn api_clusters(state: &ServerState, exom: &str) -> ApiResult {
         *groups.entry(&f.predicate).or_default() += 1;
     }
 
-    let clusters: Vec<_> = groups.iter().map(|(pred, count)| {
-        serde_json::json!({
-            "id": format!("cluster:{}", pred),
-            "label": pred,
-            "kind": "shared_predicate",
-            "fact_count": count,
-            "active_count": count,
-            "deprecated_count": 0
+    let clusters: Vec<_> = groups
+        .iter()
+        .map(|(pred, count)| {
+            serde_json::json!({
+                "id": format!("cluster:{}", pred),
+                "label": pred,
+                "kind": "shared_predicate",
+                "fact_count": count,
+                "active_count": count,
+                "deprecated_count": 0
+            })
         })
-    }).collect();
+        .collect();
 
     json_ok(&serde_json::json!({ "clusters": clusters }))
 }
@@ -1164,25 +1650,31 @@ fn api_cluster_detail(state: &ServerState, id: &str, exom: &str) -> ApiResult {
     let facts = brain.current_facts();
     let matching: Vec<_> = facts.iter().filter(|f| f.predicate == pred).collect();
 
-    let nodes: Vec<_> = matching.iter().map(|f| {
-        serde_json::json!({
-            "id": f.fact_id,
-            "type": "fact",
-            "label": format!("{} = {}", f.predicate, f.value)
+    let nodes: Vec<_> = matching
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "id": f.fact_id,
+                "type": "fact",
+                "label": format!("{} = {}", f.predicate, f.value)
+            })
         })
-    }).collect();
+        .collect();
 
-    let fact_entries: Vec<_> = matching.iter().map(|f| {
-        serde_json::json!({
-            "id": f.fact_id,
-            "tuple": [f.fact_id, f.predicate, f.value, f.confidence],
-            "status": "active",
-            "interval": {
-                "start": f.valid_from,
-                "end": f.valid_to.as_deref().unwrap_or("inf")
-            }
+    let fact_entries: Vec<_> = matching
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "id": f.fact_id,
+                "tuple": [f.fact_id, f.predicate, f.value, f.confidence],
+                "status": "active",
+                "interval": {
+                    "start": f.valid_from,
+                    "end": f.valid_to.as_deref().unwrap_or("inf")
+                }
+            })
         })
-    }).collect();
+        .collect();
 
     json_ok(&serde_json::json!({
         "id": id,
@@ -1204,31 +1696,40 @@ fn api_logs(state: &ServerState, exom: &str) -> ApiResult {
     let brain = &get_exom_state(&daemon, exom)?.brain;
     let txs = brain.transactions();
 
-    let events: Vec<_> = txs.iter().rev().take(24).map(|tx| {
-        serde_json::json!({
-            "id": format!("tx{}", tx.tx_id),
-            "type": tx.action.to_string(),
-            "timestamp": tx.tx_time,
-            "pattern": tx.note,
-            "source": tx.actor
+    let events: Vec<_> = txs
+        .iter()
+        .rev()
+        .take(24)
+        .map(|tx| {
+            serde_json::json!({
+                "id": format!("tx{}", tx.tx_id),
+                "type": tx.action.to_string(),
+                "timestamp": tx.tx_time,
+                "pattern": tx.note,
+                "source": tx.actor
+            })
         })
-    }).collect();
+        .collect();
 
     json_ok(&serde_json::json!({ "events": events }))
 }
 
 fn api_exoms(state: &ServerState) -> ApiResult {
     let daemon = get_daemon(state);
-    let exom_list: Vec<_> = daemon.exoms.keys().map(|name| {
-        serde_json::json!({
-            "name": name,
-            "description": if name == DEFAULT_EXOM { "Default exom" } else { "" },
-            "created_at": 0,
-            "updated_at": 0,
-            "archived": false,
-            "archived_at": null
+    let exom_list: Vec<_> = daemon
+        .exoms
+        .keys()
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "description": if name == DEFAULT_EXOM { "Default exom" } else { "" },
+                "created_at": 0,
+                "updated_at": 0,
+                "archived": false,
+                "archived_at": null
+            })
         })
-    }).collect();
+        .collect();
 
     json_ok(&serde_json::json!({
         "exoms": exom_list
@@ -1240,19 +1741,22 @@ fn api_provenance(state: &ServerState, exom: &str) -> ApiResult {
     let es = get_exom_state(&daemon, exom)?;
     let brain = &es.brain;
     let facts = brain.current_facts();
-    let derived_n = rules::derived_predicates(&es.rules).len();
+    let derived_n = rules::derived_predicates(&combined_rules(exom, &es.rules)?).len();
 
-    let base_facts: Vec<_> = facts.iter().map(|f| {
-        serde_json::json!({
-            "id": f.fact_id,
-            "predicate": f.predicate,
-            "terms": [f.fact_id, f.predicate, f.value],
-            "kind": "base",
-            "source": f.provenance,
-            "confidence": f.confidence,
-            "asserted_at": f.created_by_tx
+    let base_facts: Vec<_> = facts
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "id": f.fact_id,
+                "predicate": f.predicate,
+                "terms": [f.fact_id, f.predicate, f.value],
+                "kind": "base",
+                "source": f.provenance,
+                "confidence": f.confidence,
+                "asserted_at": f.created_by_tx
+            })
         })
-    }).collect();
+        .collect();
 
     json_ok(&serde_json::json!({
         "derivations": [],
@@ -1278,13 +1782,16 @@ fn api_relation_graph(state: &ServerState, exom: &str) -> ApiResult {
         *preds.entry(&f.predicate).or_default() += 1;
     }
 
-    let nodes: Vec<_> = preds.iter().map(|(pred, count)| {
-        serde_json::json!({
-            "id": *pred,
-            "label": *pred,
-            "degree": count
+    let nodes: Vec<_> = preds
+        .iter()
+        .map(|(pred, count)| {
+            serde_json::json!({
+                "id": *pred,
+                "label": *pred,
+                "degree": count
+            })
         })
-    }).collect();
+        .collect();
 
     json_ok(&serde_json::json!({
         "nodes": nodes,
@@ -1302,15 +1809,15 @@ fn api_derived(state: &ServerState, exom: &str, pred_name: &str) -> ApiResult {
     }
     let daemon = get_daemon(state);
     let es = get_exom_state(&daemon, exom)?;
-    let arity = es
-        .rules
+    let all_rules = combined_rules(exom, &es.rules)?;
+    let arity = all_rules
         .iter()
         .find(|r| r.head_predicate == pred_name)
         .map(|r| r.head_arity)
         .ok_or_else(|| anyhow!("unknown derived predicate"))?;
     let find_vars: Vec<String> = (0..arity).map(|i| format!("?v{i}")).collect();
     let find_vars_str = find_vars.join(" ");
-    let bodies: Vec<String> = es.rules.iter().map(|r| r.inline_body.clone()).collect();
+    let bodies: Vec<String> = all_rules.iter().map(|r| r.inline_body.clone()).collect();
     let rules_clause = bodies.join(" ");
     let rayfall = format!(
         "(query {exom} (find {find_vars_str}) (where ({pred_name} {find_vars_str})) (rules {rules_clause}))"
@@ -1333,16 +1840,21 @@ fn api_derived(state: &ServerState, exom: &str, pred_name: &str) -> ApiResult {
 }
 
 fn api_explain(state: &ServerState, query: &HashMap<String, String>) -> ApiResult {
-    let exom = query.get("exom").map(|s| s.as_str()).unwrap_or(DEFAULT_EXOM);
+    let exom = query
+        .get("exom")
+        .map(|s| s.as_str())
+        .unwrap_or(DEFAULT_EXOM);
     let predicate = query.get("predicate").map(|s| s.as_str()).unwrap_or("");
     let _terms_str = query.get("terms").map(|s| s.as_str()).unwrap_or("");
     let daemon = get_daemon(state);
     let es = get_exom_state(&daemon, exom)?;
-    let brain = &es.brain;
-    let facts = brain.current_facts();
+    let all_rules = combined_rules(exom, &es.rules)?;
+    explain_with_brain(&es.brain, &all_rules, predicate)
+}
 
-    let defining_rules: Vec<&str> = es
-        .rules
+fn explain_with_brain(brain: &Brain, all_rules: &[ParsedRule], predicate: &str) -> ApiResult {
+    let facts = brain.current_facts();
+    let defining_rules: Vec<&str> = all_rules
         .iter()
         .filter(|r| r.head_predicate == predicate)
         .map(|r| r.full_text.as_str())
@@ -1356,9 +1868,9 @@ fn api_explain(state: &ServerState, query: &HashMap<String, String>) -> ApiResul
     }
 
     // Find matching fact
-    let matching = facts.iter().find(|f| {
-        f.predicate == predicate || f.fact_id == predicate
-    });
+    let matching = facts
+        .iter()
+        .find(|f| f.predicate == predicate || f.fact_id == predicate);
 
     match matching {
         Some(f) => json_ok(&serde_json::json!({
@@ -1379,9 +1891,13 @@ fn api_explain(state: &ServerState, query: &HashMap<String, String>) -> ApiResul
                 "asserted_at": f.created_by_tx
             }
         })),
-        None => Ok(json_response(404, &serde_json::json!({
-            "error": format!("no fact matching predicate '{}'", predicate)
-        }).to_string())),
+        None => Ok(json_response(
+            404,
+            &serde_json::json!({
+                "error": format!("no fact matching predicate '{}'", predicate)
+            })
+            .to_string(),
+        )),
     }
 }
 
@@ -1392,13 +1908,21 @@ fn api_fact_detail(state: &ServerState, id: &str, exom: &str) -> ApiResult {
 
     match history.last() {
         Some(f) => {
-            let status = if f.revoked_by_tx.is_some() { "retracted" } else { "active" };
-            let touch_history: Vec<_> = brain.explain(id).iter().map(|tx| {
-                serde_json::json!({
-                    "event_id": format!("tx{}", tx.tx_id),
-                    "event_type": tx.action.to_string()
+            let status = if f.revoked_by_tx.is_some() {
+                "retracted"
+            } else {
+                "active"
+            };
+            let touch_history: Vec<_> = brain
+                .explain(id)
+                .iter()
+                .map(|tx| {
+                    serde_json::json!({
+                        "event_id": format!("tx{}", tx.tx_id),
+                        "event_type": tx.action.to_string()
+                    })
                 })
-            }).collect();
+                .collect();
 
             json_ok(&serde_json::json!({
                 "fact": {
@@ -1411,6 +1935,18 @@ fn api_fact_detail(state: &ServerState, id: &str, exom: &str) -> ApiResult {
                     },
                     "status": status,
                     "cluster_ids": [format!("cluster:{}", f.predicate)]
+                },
+                "metadata": {
+                    "predicate": f.predicate,
+                    "value": f.value,
+                    "confidence": f.confidence,
+                    "provenance": f.provenance,
+                    "created_at": f.created_at,
+                    "valid_from": f.valid_from,
+                    "valid_to": f.valid_to,
+                    "created_by": format!("tx/{}", f.created_by_tx),
+                    "superseded_by": f.superseded_by_tx.map(|tx| format!("tx/{}", tx)),
+                    "revoked_by": f.revoked_by_tx.map(|tx| format!("tx/{}", tx))
                 },
                 "provenance": { "type": "base" },
                 "touch_history": touch_history
@@ -1467,6 +2003,63 @@ fn api_export_json(state: &ServerState, exom: &str) -> ApiResult {
     Ok((200, serde_json::to_string_pretty(&payload).unwrap()))
 }
 
+#[derive(Deserialize)]
+struct AssertFactReq {
+    fact_id: Option<String>,
+    predicate: String,
+    value: String,
+    #[serde(default = "default_confidence")]
+    confidence: f64,
+    source: Option<String>,
+    provenance: Option<String>,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+}
+
+fn default_confidence() -> f64 {
+    1.0
+}
+
+fn api_assert_fact(
+    state: &ServerState,
+    exom: &str,
+    body: &[u8],
+    ctx: &MutationContext,
+) -> ApiResult {
+    let req: AssertFactReq =
+        serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON: {}", e))?;
+    let fact_id = req.fact_id.clone().unwrap_or_else(|| req.predicate.clone());
+    let provenance = req
+        .source
+        .as_deref()
+        .or(req.provenance.as_deref())
+        .unwrap_or("api");
+    let tx_id = mutate_exom_brain(
+        state,
+        exom,
+        "assert_fact",
+        Some(ctx.actor.as_str()),
+        Some(req.predicate.as_str()),
+        |ex| {
+            ex.brain.assert_fact(
+                &fact_id,
+                &req.predicate,
+                &req.value,
+                req.confidence,
+                provenance,
+                req.valid_from.as_deref(),
+                req.valid_to.as_deref(),
+                ctx,
+            )
+        },
+    )?;
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "fact_id": fact_id,
+        "tx_id": tx_id
+    }))
+}
+
 /// Lossless JSON import — replaces all data in the exom.
 fn api_import_json(
     state: &ServerState,
@@ -1490,8 +2083,8 @@ fn api_import_json(
         rules: Vec<String>,
     }
 
-    let payload: ImportPayload = serde_json::from_slice(body)
-        .map_err(|e| anyhow!("invalid JSON import payload: {}", e))?;
+    let payload: ImportPayload =
+        serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON import payload: {}", e))?;
 
     let mut daemon = get_daemon(state);
 
@@ -1526,7 +2119,7 @@ fn api_import_json(
         es.rules = parsed_rules;
 
         // Rebuild datoms and persist
-        es.datoms = storage::build_datoms_table(&es.brain.current_facts())?;
+        es.datoms = storage::build_datoms_table(&es.brain)?;
         persist_exom_state(state.exom_dir.as_ref(), exom, es)?;
 
         (es.brain.all_facts().len(), es.brain.transactions().len())
@@ -1543,6 +2136,7 @@ fn api_import_json(
         }
     }
 
+    sse_push_mutation(state, exom, "import_json", Some(_ctx.actor.as_str()), None);
     json_ok(&serde_json::json!({
         "ok": true,
         "imported": {
@@ -1556,7 +2150,11 @@ fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> Ap
     let mut daemon = get_daemon(state);
     let fact_ids: Vec<String> = {
         let es = get_exom_state(&daemon, exom)?;
-        es.brain.current_facts().iter().map(|f| f.fact_id.clone()).collect()
+        es.brain
+            .current_facts()
+            .iter()
+            .map(|f| f.fact_id.clone())
+            .collect()
     };
     let count = fact_ids.len();
     for id in &fact_ids {
@@ -1580,6 +2178,7 @@ fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> Ap
             std::process::exit(1);
         }
     }
+    sse_push_mutation(state, exom, "retract_all", Some(ctx.actor.as_str()), None);
     json_ok(&serde_json::json!({
         "ok": true,
         "tuples_removed": count
@@ -1587,15 +2186,17 @@ fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> Ap
 }
 
 /// True wipe: reset the Brain to empty (no tx history), delete and recreate on-disk state.
-fn api_wipe(state: &ServerState, exom: &str) -> ApiResult {
+fn api_wipe(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult {
     let mut daemon = get_daemon(state);
 
     {
-        let es = daemon.exoms.get_mut(exom)
+        let es = daemon
+            .exoms
+            .get_mut(exom)
             .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
         es.brain.reset();
         es.rules.clear();
-        es.datoms = storage::build_datoms_table(&[])?;
+        es.datoms = storage::build_datoms_table(&es.brain)?;
 
         // Wipe on-disk state and recreate empty dir
         if let Some(ed) = state.exom_dir.as_ref() {
@@ -1610,12 +2211,15 @@ fn api_wipe(state: &ServerState, exom: &str) -> ApiResult {
     }
 
     let es = get_exom_state(&daemon, exom)?;
-    daemon.engine.bind_named_db(storage::sym_intern(exom), &es.datoms)?;
+    daemon
+        .engine
+        .bind_named_db(storage::sym_intern(exom), &es.datoms)?;
+    sse_push_mutation(state, exom, "wipe", Some(ctx.actor.as_str()), None);
     json_ok(&serde_json::json!({ "ok": true, "wiped": exom }))
 }
 
 /// Factory reset: wipe ALL exoms and sym table, recreate only "main".
-fn api_factory_reset(state: &ServerState) -> ApiResult {
+fn api_factory_reset(state: &ServerState, ctx: &MutationContext) -> ApiResult {
     let mut daemon = get_daemon(state);
     let old_names: Vec<String> = daemon.exoms.keys().cloned().collect();
     daemon.exoms.clear();
@@ -1645,7 +2249,10 @@ fn api_factory_reset(state: &ServerState) -> ApiResult {
         let es = load_exom_state(Some(ed), DEFAULT_EXOM)?;
         daemon.exoms.insert(DEFAULT_EXOM.to_string(), es);
     } else {
-        daemon.exoms.insert(DEFAULT_EXOM.to_string(), load_exom_state(None, DEFAULT_EXOM)?);
+        daemon.exoms.insert(
+            DEFAULT_EXOM.to_string(),
+            load_exom_state(None, DEFAULT_EXOM)?,
+        );
     }
 
     if let Err(err) = restore_runtime(&daemon) {
@@ -1657,40 +2264,11 @@ fn api_factory_reset(state: &ServerState) -> ApiResult {
             std::process::exit(1);
         }
     }
+    sse_push_mutation(state, "*", "factory_reset", Some(ctx.actor.as_str()), None);
     json_ok(&serde_json::json!({
         "ok": true,
         "removed_exoms": old_names,
         "state": "clean"
-    }))
-}
-
-fn api_retract(state: &ServerState, exom: &str, body: &[u8], ctx: &MutationContext) -> ApiResult {
-    let payload: serde_json::Value = serde_json::from_slice(body)
-        .unwrap_or(serde_json::json!({}));
-    let predicate = payload["predicate"].as_str().unwrap_or("").to_string();
-
-    let mut daemon = get_daemon(state);
-    let matching_ids: Vec<String> = {
-        let es = get_exom_state(&daemon, exom)?;
-        es.brain.current_facts().iter()
-            .filter(|f| f.predicate == predicate)
-            .map(|f| f.fact_id.clone())
-            .collect()
-    };
-    let mut retracted = 0;
-    for id in &matching_ids {
-        if let Some(es) = daemon.exoms.get_mut(exom) {
-            if es.brain.retract_fact(id, ctx).is_ok() {
-                retracted += 1;
-            }
-        }
-    }
-    if retracted > 0 {
-        refresh_exom_binding(&mut daemon, state.exom_dir.as_ref(), exom)?;
-    }
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "retracted": retracted
     }))
 }
 
@@ -1703,166 +2281,265 @@ fn api_evaluate(_state: &ServerState) -> ApiResult {
     }))
 }
 
+fn eval_query_form_with_daemon(
+    daemon: &mut DaemonState,
+    query: &CanonicalQuery,
+) -> Result<(String, Option<serde_json::Value>)> {
+    let expanded = expand_canonical_query_with_daemon(daemon, query.emit(), query)?;
+    let raw = daemon.engine.eval_raw(&expanded.expanded_query)?;
+    if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE {
+        let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+        Ok((storage::format_decoded_query_table(&decoded), Some(decoded)))
+    } else {
+        Ok((daemon.engine.format_obj(&raw)?, None))
+    }
+}
+
+fn api_query(state: &ServerState, body: &[u8]) -> ApiResult {
+    let source = String::from_utf8_lossy(body).into_owned();
+    let mut daemon = get_daemon(state);
+    let expanded = match expand_query_with_daemon(&mut daemon, &source, None, "api/query") {
+        Ok(expanded) => expanded,
+        Err(err) => {
+            return Ok(json_response(
+                400,
+                &serde_json::json!({ "error": err.to_string() }).to_string(),
+            ));
+        }
+    };
+    match daemon.engine.eval_raw(&expanded.expanded_query) {
+        Ok(raw) => {
+            let (output, decoded) = if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE
+            {
+                let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+                (storage::format_decoded_query_table(&decoded), Some(decoded))
+            } else {
+                (daemon.engine.format_obj(&raw)?, None)
+            };
+            let mut payload = serde_json::json!({
+                "ok": true,
+                "output": output,
+                "mutated_exom": serde_json::Value::Null,
+                "mutation_count": 0,
+                "normalized_query": expanded.normalized_query,
+                "expanded_query": expanded.expanded_query
+            });
+            if let Some(decoded) = decoded {
+                if let (Some(dst), Some(src)) = (payload.as_object_mut(), decoded.as_object()) {
+                    for (k, v) in src {
+                        dst.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            json_ok(&payload)
+        }
+        Err(err) => {
+            if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+                eprintln!(
+                    "[ray-exomem] fatal: restore after query error (first: {}, recover: {})",
+                    err, e2
+                );
+                std::process::exit(1);
+            }
+            Ok(json_response(
+                400,
+                &serde_json::json!({ "error": err.to_string() }).to_string(),
+            ))
+        }
+    }
+}
+
+fn api_expand_query(state: &ServerState, body: &[u8]) -> ApiResult {
+    let source = String::from_utf8_lossy(body).into_owned();
+    let mut daemon = get_daemon(state);
+    match expand_query_with_daemon(&mut daemon, &source, None, "api/expand-query") {
+        Ok(expanded) => json_ok(&serde_json::json!({
+            "ok": true,
+            "original_source": expanded.original_source,
+            "normalized_query": expanded.normalized_query,
+            "expanded_query": expanded.expanded_query,
+            "exom": expanded.exom_name,
+        })),
+        Err(err) => Ok(json_response(
+            400,
+            &serde_json::json!({ "error": err.to_string() }).to_string(),
+        )),
+    }
+}
+
 fn api_eval(state: &ServerState, body: &[u8], ctx: &MutationContext) -> ApiResult {
     let source = String::from_utf8_lossy(body).into_owned();
     let exom_dir = state.exom_dir.as_ref();
-    let forms = rayfall_parser::split_forms(&source);
+    let forms = match lower_eval_forms(&source) {
+        Ok(forms) => forms,
+        Err(err) => {
+            return Ok(json_response(
+                400,
+                &serde_json::json!({ "error": err.to_string() }).to_string(),
+            ));
+        }
+    };
     let mut last_result = String::new();
+    let mut last_decoded: Option<serde_json::Value> = None;
     let mut daemon = get_daemon(state);
     for form in forms {
-        match form.kind {
-            FormKind::AssertFact => {
-                let (exom, entity, pred, val) =
-                    rayfall_parser::parse_fact_mutation_args(&form.inner_source)?;
-                {
-                    let es = daemon
-                        .exoms
-                        .get_mut(&exom)
-                        .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
-                    es.brain.assert_fact(
-                        &entity,
-                        &pred,
-                        &val,
-                        1.0,
-                        "rayfall-eval",
-                        None,
-                        None,
-                        ctx,
-                    )?;
-                }
-                refresh_exom_binding(&mut daemon, exom_dir, &exom)?;
+        let exec = match form {
+            EvalForm::Canonical(CanonicalForm::AssertFact(mutation)) => {
+                let exom = mutation.exom;
+                let pred = mutation.predicate;
+                let fact_id = mutation.fact_id;
+                let value = mutation.value;
+                let result: Result<()> = (|| {
+                    {
+                        let es = daemon
+                            .exoms
+                            .get_mut(&exom)
+                            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+                        es.brain.assert_fact(
+                            &fact_id,
+                            &pred,
+                            &value,
+                            1.0,
+                            "rayfall-eval",
+                            None,
+                            None,
+                            ctx,
+                        )?;
+                    }
+                    refresh_exom_binding(&mut daemon, exom_dir, &exom)?;
+                    sse_push_mutation(
+                        state,
+                        &exom,
+                        "eval_assert_fact",
+                        Some(ctx.actor.as_str()),
+                        Some(pred.as_str()),
+                    );
+                    Ok(())
+                })();
+                result
             }
-            FormKind::RetractFact => {
-                let (exom, entity, pred, val) =
-                    rayfall_parser::parse_fact_mutation_args(&form.inner_source)?;
-                {
-                    let es = daemon
-                        .exoms
-                        .get_mut(&exom)
-                        .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
-                    es.brain.retract_fact_exact(&entity, &pred, &val, ctx)?;
-                }
-                refresh_exom_binding(&mut daemon, exom_dir, &exom)?;
+            EvalForm::Canonical(CanonicalForm::RetractFact(mutation)) => {
+                let exom = mutation.exom;
+                let pred = mutation.predicate;
+                let fact_id = mutation.fact_id;
+                let value = mutation.value;
+                let result: Result<()> = (|| {
+                    {
+                        let es = daemon
+                            .exoms
+                            .get_mut(&exom)
+                            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
+                        es.brain.retract_fact_exact(&fact_id, &pred, &value, ctx)?;
+                    }
+                    refresh_exom_binding(&mut daemon, exom_dir, &exom)?;
+                    sse_push_mutation(
+                        state,
+                        &exom,
+                        "eval_retract_fact",
+                        Some(ctx.actor.as_str()),
+                        Some(pred.as_str()),
+                    );
+                    Ok(())
+                })();
+                result
             }
-            FormKind::Rule => {
-                let exom_name = extract_exom_from_rule_source(&form.source);
-                let normalized = form.source.replace('[', "(").replace(']', ")");
-                let full = ensure_rule_has_exom(&exom_name, &normalized);
-                let pr = rules::parse_rule_line(&full, ctx.clone(), brain::now_iso())?;
-                {
-                    let es = daemon
-                        .exoms
-                        .get_mut(&exom_name)
-                        .ok_or_else(|| anyhow!("unknown exom '{}'", exom_name))?;
-                    es.rules.push(pr);
-                }
-                let es = daemon
-                    .exoms
-                    .get(&exom_name)
-                    .ok_or_else(|| anyhow!("unknown exom '{}'", exom_name))?;
-                persist_exom_state(exom_dir, &exom_name, es)?;
-            }
-            FormKind::Query => {
-                let exom_name = extract_exom_from_query_source(&form.source)?;
-                let bodies: Vec<String> = {
+            EvalForm::Canonical(CanonicalForm::Rule(rule)) => {
+                let full = rule.emit();
+                let exom_name = rule.exom;
+                let result: Result<()> = (|| {
+                    let pr = rules::parse_rule_line(&full, ctx.clone(), brain::now_iso())?;
+                    {
+                        let es = daemon
+                            .exoms
+                            .get_mut(&exom_name)
+                            .ok_or_else(|| anyhow!("unknown exom '{}'", exom_name))?;
+                        es.rules.push(pr);
+                    }
                     let es = daemon
                         .exoms
                         .get(&exom_name)
                         .ok_or_else(|| anyhow!("unknown exom '{}'", exom_name))?;
-                    es.rules.iter().map(|r| r.inline_body.clone()).collect()
-                };
-                let q = rayfall_parser::rewrite_query_with_rules(&form.source, &bodies);
-                match daemon.engine.eval(&q) {
-                    Ok(out) => last_result = out,
-                    Err(err) => {
-                        if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
-                            eprintln!(
-                                "[ray-exomem] fatal: restore after eval error (first: {}, recover: {})",
-                                err, e2
-                            );
-                            std::process::exit(1);
-                        }
-                        return Ok(json_response(
-                            400,
-                            &serde_json::json!({ "error": err.to_string() }).to_string(),
-                        ));
-                    }
-                }
+                    persist_exom_state(exom_dir, &exom_name, es)?;
+                    sse_push_mutation(
+                        state,
+                        &exom_name,
+                        "rule_append",
+                        Some(ctx.actor.as_str()),
+                        None,
+                    );
+                    Ok(())
+                })();
+                result
             }
-            FormKind::Other => match daemon.engine.eval(&form.source) {
-                Ok(out) => last_result = out,
-                Err(err) => {
-                    if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
-                        eprintln!(
-                            "[ray-exomem] fatal: restore after eval error (first: {}, recover: {})",
-                            err, e2
-                        );
-                        std::process::exit(1);
-                    }
-                    return Ok(json_response(
-                        400,
-                        &serde_json::json!({ "error": err.to_string() }).to_string(),
-                    ));
-                }
-            },
+            EvalForm::Canonical(CanonicalForm::Query(query)) => {
+                let result: Result<()> = (|| {
+                    let (output, decoded) = eval_query_form_with_daemon(&mut daemon, &query)?;
+                    last_result = output;
+                    last_decoded = decoded;
+                    Ok(())
+                })();
+                result
+            }
+            EvalForm::Raw(source) => {
+                let result: Result<()> = (|| {
+                    last_result = daemon.engine.eval(&source)?;
+                    last_decoded = None;
+                    Ok(())
+                })();
+                result
+            }
+        };
+
+        if let Err(err) = exec {
+            if let Err(e2) = reconcile_runtime_after_failed_restore(&daemon) {
+                eprintln!(
+                    "[ray-exomem] fatal: restore after eval error (first: {}, recover: {})",
+                    err, e2
+                );
+                std::process::exit(1);
+            }
+            return Ok(json_response(
+                400,
+                &serde_json::json!({ "error": err.to_string() }).to_string(),
+            ));
         }
     }
-    json_ok(&serde_json::json!({
+    let mut payload = serde_json::json!({
         "ok": true,
         "output": last_result,
         "mutated_exom": serde_json::Value::Null,
         "mutation_count": 0
-    }))
-}
-
-fn api_import(state: &ServerState, body: &[u8], ctx: &MutationContext) -> ApiResult {
-    api_eval(state, body, ctx)
-}
-
-fn api_assert_fact_direct(state: &ServerState, exom: &str, body: &[u8], ctx: &MutationContext) -> ApiResult {
-    let payload: serde_json::Value = serde_json::from_slice(body)
-        .unwrap_or(serde_json::json!({}));
-    let predicate = payload["predicate"].as_str().unwrap_or("").to_string();
-    let value = payload["value"].as_str().unwrap_or("").to_string();
-    let fact_id = payload["fact_id"].as_str().unwrap_or(&predicate).to_string();
-    let confidence: f64 = payload["confidence"].as_f64().unwrap_or(1.0);
-    let provenance = payload["provenance"].as_str().unwrap_or("api").to_string();
-    let valid_from = payload["valid_from"].as_str().map(|s| s.to_string());
-    let valid_to = payload["valid_to"].as_str().map(|s| s.to_string());
-
-    if predicate.is_empty() || value.is_empty() {
-        return Ok(json_response(400, r#"{"error":"predicate and value are required"}"#));
+    });
+    if let Some(decoded) = last_decoded {
+        if let (Some(dst), Some(src)) = (payload.as_object_mut(), decoded.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
     }
-
-    let mut daemon = get_daemon(state);
-    {
-        let es = daemon.exoms.get_mut(exom)
-            .ok_or_else(|| anyhow!("unknown exom '{}'", exom))?;
-        es.brain.assert_fact(
-            &fact_id, &predicate, &value, confidence, &provenance,
-            valid_from.as_deref(), valid_to.as_deref(),
-            ctx,
-        )?;
-    }
-    refresh_exom_binding(&mut daemon, state.exom_dir.as_ref(), exom)?;
-
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "fact_id": fact_id,
-        "valid_from": valid_from,
-        "valid_to": valid_to
-    }))
+    json_ok(&payload)
 }
 
-fn api_facts_valid_at(state: &ServerState, exom: &str, query: &HashMap<String, String>) -> ApiResult {
+fn api_facts_valid_at(
+    state: &ServerState,
+    exom: &str,
+    query: &HashMap<String, String>,
+) -> ApiResult {
     let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
     if timestamp.is_empty() {
-        return Ok(json_response(400, r#"{"error":"timestamp query parameter is required"}"#));
+        return Ok(json_response(
+            400,
+            r#"{"error":"timestamp query parameter is required"}"#,
+        ));
     }
 
     let daemon = get_daemon(state);
     let brain = &get_exom_state(&daemon, exom)?.brain;
-    let entries: Vec<_> = brain.facts_valid_at(timestamp).iter().map(|f| fact_to_json(f)).collect();
+    let entries: Vec<_> = brain
+        .facts_valid_at(timestamp)
+        .iter()
+        .map(|f| fact_to_json(f))
+        .collect();
 
     json_ok(&serde_json::json!({
         "ok": true,
@@ -1872,17 +2549,28 @@ fn api_facts_valid_at(state: &ServerState, exom: &str, query: &HashMap<String, S
     }))
 }
 
-fn api_facts_bitemporal(state: &ServerState, exom: &str, query: &HashMap<String, String>) -> ApiResult {
+fn api_facts_bitemporal(
+    state: &ServerState,
+    exom: &str,
+    query: &HashMap<String, String>,
+) -> ApiResult {
     let timestamp = query.get("timestamp").map(|s| s.as_str()).unwrap_or("");
     let tx_id: u64 = query.get("tx_id").and_then(|v| v.parse().ok()).unwrap_or(0);
 
     if timestamp.is_empty() || tx_id == 0 {
-        return Ok(json_response(400, r#"{"error":"timestamp and tx_id query parameters are required"}"#));
+        return Ok(json_response(
+            400,
+            r#"{"error":"timestamp and tx_id query parameters are required"}"#,
+        ));
     }
 
     let daemon = get_daemon(state);
     let brain = &get_exom_state(&daemon, exom)?.brain;
-    let entries: Vec<_> = brain.facts_bitemporal(tx_id, timestamp).iter().map(|f| fact_to_json(f)).collect();
+    let entries: Vec<_> = brain
+        .facts_bitemporal(tx_id, timestamp)
+        .iter()
+        .map(|f| fact_to_json(f))
+        .collect();
 
     json_ok(&serde_json::json!({
         "ok": true,
@@ -1893,25 +2581,34 @@ fn api_facts_bitemporal(state: &ServerState, exom: &str, query: &HashMap<String,
     }))
 }
 
-fn api_exom_create(state: &ServerState, body: &[u8]) -> ApiResult {
-    let payload: serde_json::Value = serde_json::from_slice(body)
-        .unwrap_or(serde_json::json!({}));
+fn api_exom_create(state: &ServerState, body: &[u8], ctx: &MutationContext) -> ApiResult {
+    let payload: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::json!({}));
     let name = payload["name"].as_str().unwrap_or("new").to_string();
 
     let mut daemon = get_daemon(state);
     if daemon.exoms.contains_key(&name) {
-        return Ok(json_response(409, &serde_json::json!({
-            "error": format!("exom '{}' already exists", name)
-        }).to_string()));
+        return Ok(json_response(
+            409,
+            &serde_json::json!({
+                "error": format!("exom '{}' already exists", name)
+            })
+            .to_string(),
+        ));
     }
 
     let exom_state = if let Some(ref ed) = state.exom_dir {
-        ed.create_exom(&name).with_context(|| format!("failed to create exom '{}'", name))?;
+        ed.create_exom(&name)
+            .with_context(|| format!("failed to create exom '{}'", name))?;
         load_exom_state(Some(ed), &name)?
     } else {
         load_exom_state(None, &name)?
     };
     daemon.exoms.insert(name.clone(), exom_state);
+    if let Some(ref ed) = state.exom_dir {
+        if let Some(es) = daemon.exoms.get(&name) {
+            persist_exom_state(Some(ed), &name, es)?;
+        }
+    }
     if let Err(e) = restore_runtime(&daemon) {
         if let Err(e2) = daemon.engine.reconcile_lang_env() {
             eprintln!(
@@ -1937,6 +2634,7 @@ fn api_exom_create(state: &ServerState, body: &[u8]) -> ApiResult {
         ));
     }
 
+    sse_push_mutation(state, &name, "exom_create", Some(ctx.actor.as_str()), None);
     json_ok(&serde_json::json!({
         "ok": true,
         "name": name
@@ -1944,8 +2642,7 @@ fn api_exom_create(state: &ServerState, body: &[u8]) -> ApiResult {
 }
 
 fn api_exom_manage(state: &ServerState, name: &str, body: &[u8]) -> ApiResult {
-    let payload: serde_json::Value = serde_json::from_slice(body)
-        .unwrap_or(serde_json::json!({}));
+    let payload: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::json!({}));
     let action = payload["action"].as_str().unwrap_or("").to_string();
 
     let mut daemon = get_daemon(state);
@@ -1953,7 +2650,10 @@ fn api_exom_manage(state: &ServerState, name: &str, body: &[u8]) -> ApiResult {
     match action.as_str() {
         "delete" => {
             if name == DEFAULT_EXOM {
-                return Ok(json_response(400, r#"{"error":"cannot delete the default exom"}"#));
+                return Ok(json_response(
+                    400,
+                    r#"{"error":"cannot delete the default exom"}"#,
+                ));
             }
             if daemon.exoms.remove(name).is_some() {
                 if let Some(ref ed) = state.exom_dir {
@@ -1970,9 +2670,13 @@ fn api_exom_manage(state: &ServerState, name: &str, body: &[u8]) -> ApiResult {
                 }
                 json_ok(&serde_json::json!({ "ok": true, "deleted": name }))
             } else {
-                Ok(json_response(404, &serde_json::json!({
-                    "error": format!("exom '{}' not found", name)
-                }).to_string()))
+                Ok(json_response(
+                    404,
+                    &serde_json::json!({
+                        "error": format!("exom '{}' not found", name)
+                    })
+                    .to_string(),
+                ))
             }
         }
         "rename" => {
@@ -1981,12 +2685,19 @@ fn api_exom_manage(state: &ServerState, name: &str, body: &[u8]) -> ApiResult {
                 return Ok(json_response(400, r#"{"error":"new_name is required"}"#));
             }
             if name == DEFAULT_EXOM {
-                return Ok(json_response(400, r#"{"error":"cannot rename the default exom"}"#));
+                return Ok(json_response(
+                    400,
+                    r#"{"error":"cannot rename the default exom"}"#,
+                ));
             }
             if daemon.exoms.contains_key(new_name.as_str()) {
-                return Ok(json_response(409, &serde_json::json!({
-                    "error": format!("exom '{}' already exists", new_name)
-                }).to_string()));
+                return Ok(json_response(
+                    409,
+                    &serde_json::json!({
+                        "error": format!("exom '{}' already exists", new_name)
+                    })
+                    .to_string(),
+                ));
             }
             if let Some(exom_state) = daemon.exoms.remove(name) {
                 daemon.exoms.insert(new_name.clone(), exom_state);
@@ -2004,39 +2715,149 @@ fn api_exom_manage(state: &ServerState, name: &str, body: &[u8]) -> ApiResult {
                 }
                 json_ok(&serde_json::json!({ "ok": true, "old_name": name, "new_name": new_name }))
             } else {
-                Ok(json_response(404, &serde_json::json!({
-                    "error": format!("exom '{}' not found", name)
-                }).to_string()))
+                Ok(json_response(
+                    404,
+                    &serde_json::json!({
+                        "error": format!("exom '{}' not found", name)
+                    })
+                    .to_string(),
+                ))
             }
         }
         "archive" => {
             if daemon.exoms.contains_key(name) {
                 json_ok(&serde_json::json!({ "ok": true, "archived": name }))
             } else {
-                Ok(json_response(404, &serde_json::json!({
-                    "error": format!("exom '{}' not found", name)
-                }).to_string()))
+                Ok(json_response(
+                    404,
+                    &serde_json::json!({
+                        "error": format!("exom '{}' not found", name)
+                    })
+                    .to_string(),
+                ))
             }
         }
-        _ => Ok(json_response(400, &serde_json::json!({
-            "error": format!("unknown action '{}'", action)
-        }).to_string())),
+        _ => Ok(json_response(
+            400,
+            &serde_json::json!({
+                "error": format!("unknown action '{}'", action)
+            })
+            .to_string(),
+        )),
     }
 }
 
-fn handle_events_sse(stream: &mut TcpStream) -> Result<()> {
+fn api_consolidate_propose() -> ApiResult {
+    Ok(json_response(
+        501,
+        &serde_json::json!({
+            "ok": false,
+            "error": "consolidation propose API is not implemented yet"
+        })
+        .to_string(),
+    ))
+}
+
+/// Resolve `supported_by` ids on a belief to embedded fact/observation snapshots.
+fn api_belief_support(state: &ServerState, exom: &str, belief_id: &str) -> ApiResult {
+    let daemon = get_daemon(state);
+    let es = get_exom_state(&daemon, exom)?;
+    let brain = &es.brain;
+    let bid = belief_id.trim();
+    if bid.is_empty() {
+        return Ok(json_response(400, r#"{"error":"missing belief id"}"#));
+    }
+    let beliefs: Vec<_> = brain
+        .current_beliefs()
+        .into_iter()
+        .filter(|b| b.belief_id == bid)
+        .collect();
+    let b = match beliefs.first() {
+        Some(x) => *x,
+        None => {
+            return Ok(json_response(
+                404,
+                &serde_json::json!({ "error": format!("belief '{}' not found", bid) }).to_string(),
+            ));
+        }
+    };
+    let mut support_facts = Vec::new();
+    let mut support_obs = Vec::new();
+    let mut unresolved: Vec<&str> = Vec::new();
+    for id in &b.supported_by {
+        if let Some(f) = brain.current_facts().iter().find(|f| f.fact_id == *id) {
+            support_facts.push(fact_to_json(f));
+        } else if let Some(o) = brain.observations().iter().find(|o| o.obs_id == *id) {
+            support_obs.push(serde_json::json!({
+                "obs_id": o.obs_id,
+                "source_type": o.source_type,
+                "source_ref": o.source_ref,
+                "content": o.content,
+            }));
+        } else {
+            unresolved.push(id.as_str());
+        }
+    }
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "belief_id": b.belief_id,
+        "claim_text": b.claim_text,
+        "supported_by_resolved": {
+            "facts": support_facts,
+            "observations": support_obs,
+        },
+        "supported_by_unresolved": unresolved,
+    }))
+}
+
+fn handle_events_sse(stream: &mut TcpStream, req: &Request, state: &ServerState) -> Result<()> {
+    let exom_f = req.query.get("exom").map(|s| s.as_str()).unwrap_or("");
+    let branch_f = req.query.get("branch").map(|s| s.as_str()).unwrap_or("");
+    let actor_f = req.query.get("actor").map(|s| s.as_str()).unwrap_or("");
+    let pred_f = req.query.get("predicate").map(|s| s.as_str()).unwrap_or("");
+    let mut last_id = req
+        .query
+        .get("since")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
     let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
     stream.write_all(headers.as_bytes())?;
-    stream.write_all(b": connected\n\n")?;
+    let connected = format!(
+        ": connected exom={} branch={} actor={} predicate={} since={}\n\n",
+        exom_f, branch_f, actor_f, pred_f, last_id
+    );
+    stream.write_all(connected.as_bytes())?;
     stream.flush()?;
 
+    let mut last_hb = Instant::now();
     loop {
-        thread::sleep(Duration::from_secs(15));
-        if stream.write_all(b": heartbeat\n\n").is_err() {
-            break;
+        thread::sleep(Duration::from_millis(50));
+        let batch = {
+            let ring = state.sse_ring.lock().unwrap();
+            ring.snapshot_after(last_id)
+        };
+        for (id, line) in batch {
+            last_id = id;
+            if !sse_event_matches_filter(&line, exom_f, branch_f, actor_f, pred_f) {
+                continue;
+            }
+            let frame = format!("event: memory\ndata: {line}\n\n");
+            if stream.write_all(frame.as_bytes()).is_err() {
+                return Ok(());
+            }
+            if stream.flush().is_err() {
+                return Ok(());
+            }
         }
-        if stream.flush().is_err() {
-            break;
+        if last_hb.elapsed() >= Duration::from_secs(15) {
+            last_hb = Instant::now();
+            if stream.write_all(b": heartbeat\n\n").is_err() {
+                break;
+            }
+            if stream.flush().is_err() {
+                break;
+            }
         }
     }
 
@@ -2056,7 +2877,9 @@ fn write_json_response(stream: &mut TcpStream, status: u16, body: &str) -> Resul
         _ => "Unknown",
     };
     write_response(
-        stream, status, reason,
+        stream,
+        status,
+        reason,
         "application/json",
         body.as_bytes(),
         false,
@@ -2085,7 +2908,9 @@ fn resolve_asset_path(ui_dir: &Path, rel: &str) -> Option<PathBuf> {
 fn write_redirect(stream: &mut TcpStream, location: &str) -> Result<()> {
     let body = format!("<html><body>Moved to <a href=\"{location}\">{location}</a></body></html>");
     write_response(
-        stream, 302, "Found",
+        stream,
+        302,
+        "Found",
         "text/html; charset=utf-8",
         body.as_bytes(),
         false,
@@ -2136,6 +2961,29 @@ fn content_type_for_path(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::MutationContext;
+
+    fn test_brain_with_fact(fact_id: &str, predicate: &str, value: &str) -> Brain {
+        let mut brain = Brain::new();
+        let ctx = MutationContext {
+            actor: "web-test".into(),
+            session: Some("session-web-test".into()),
+            model: Some("gpt-test".into()),
+        };
+        brain
+            .assert_fact(
+                fact_id,
+                predicate,
+                value,
+                0.7,
+                "web-test",
+                Some("2026-04-11T00:00:00Z"),
+                None,
+                &ctx,
+            )
+            .unwrap();
+        brain
+    }
 
     #[test]
     fn resolve_asset_path_rejects_parent_escape() {
@@ -2148,5 +2996,89 @@ mod tests {
         let root = Path::new("/tmp/ui");
         let resolved = resolve_asset_path(root, "build/_app/immutable/app.js").unwrap();
         assert_eq!(resolved, Path::new("/tmp/ui/build/_app/immutable/app.js"));
+    }
+
+    #[test]
+    fn lower_query_request_accepts_in_exom_wrapped_query() {
+        let query = lower_query_request(
+            "(in-exom main (query (find ?x) (where (fact-row ?x ?p ?v))))",
+            None,
+            "api/query",
+        )
+        .unwrap();
+        assert_eq!(
+            query.emit(),
+            "(query main (find ?x) (where (fact-row ?x ?p ?v)))"
+        );
+    }
+
+    #[test]
+    fn lower_query_request_rejects_wrapped_mutation() {
+        let err = lower_query_request(
+            "(in-exom main (assert-fact \"f\" 'pred \"v\"))",
+            None,
+            "api/query",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("api/query only accepts a Rayfall (query ...) form"));
+    }
+
+    #[test]
+    fn lower_eval_forms_lowers_mixed_in_exom_body_in_order() {
+        let forms = lower_eval_forms(
+            "(in-exom main (assert-fact \"f\" 'pred \"v\") (query (find ?x) (where (pred ?x))))",
+        )
+        .unwrap();
+        assert_eq!(forms.len(), 2);
+        let rendered = forms
+            .into_iter()
+            .map(|form| match form {
+                EvalForm::Canonical(form) => form.emit(),
+                EvalForm::Raw(source) => source,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "(assert-fact main \"f\" 'pred \"v\")".to_string(),
+                "(query main (find ?x) (where (pred ?x)))".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_request_percent_decodes_query_pairs() {
+        let req = parse_request(
+            b"GET /ray-exomem/api/explain?ex%6Fm=main&predicate=user%2Fpreference%2Feditor&terms=a%2Cb HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(req.query.get("exom").map(String::as_str), Some("main"));
+        assert_eq!(
+            req.query.get("predicate").map(String::as_str),
+            Some("user/preference/editor")
+        );
+        assert_eq!(req.query.get("terms").map(String::as_str), Some("a,b"));
+    }
+
+    #[test]
+    fn api_explain_accepts_percent_decoded_fact_ids_from_query_string() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let brain = test_brain_with_fact("user/preference/editor", "preference", "vim");
+        let req = parse_request(
+            b"GET /ray-exomem/api/explain?exom=main&predicate=user%2Fpreference%2Feditor HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .unwrap();
+        let (status, body) =
+            explain_with_brain(&brain, &Vec::<ParsedRule>::new(), req.query["predicate"].as_str())
+                .unwrap();
+        assert_eq!(status, 200);
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            payload["tree"]["id"].as_str(),
+            Some("user/preference/editor")
+        );
+        assert_eq!(payload["predicate"].as_str(), Some("preference"));
     }
 }

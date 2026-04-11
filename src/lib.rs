@@ -6,9 +6,11 @@ pub mod context;
 pub mod datom;
 pub mod exom;
 pub mod ffi;
+pub mod rayfall_ast;
 pub mod rayfall_parser;
 pub mod rules;
 pub mod storage;
+pub mod system_schema;
 pub mod web;
 
 use anyhow::{Context, Result};
@@ -28,8 +30,29 @@ pub fn frontend_name() -> &'static str {
     "ray-exomem"
 }
 
+pub fn frontend_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 pub fn syntax_name() -> &'static str {
     "rayfall-native"
+}
+
+pub fn build_git_sha() -> &'static str {
+    option_env!("RAY_EXOMEM_GIT_SHA").unwrap_or("unknown")
+}
+
+pub fn build_unix_timestamp() -> &'static str {
+    option_env!("RAY_EXOMEM_BUILD_UNIX").unwrap_or("0")
+}
+
+pub fn build_identity() -> String {
+    format!(
+        "{}+{}-{}",
+        frontend_version(),
+        build_git_sha(),
+        build_unix_timestamp()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +204,17 @@ mod tests {
     fn version_info_is_consistent() {
         assert_eq!(backend_name(), "rayforce2");
         assert_eq!(frontend_name(), "ray-exomem");
+        assert_eq!(frontend_version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(syntax_name(), "rayfall-native");
+        assert!(!build_git_sha().is_empty(), "git sha should not be empty");
+        assert!(
+            build_unix_timestamp().parse::<u64>().is_ok(),
+            "build timestamp should be numeric"
+        );
+        assert!(
+            build_identity().starts_with(frontend_version()),
+            "build identity should begin with the crate version"
+        );
 
         let ver = rayforce_version();
         assert!(

@@ -16,6 +16,11 @@ export interface ExomemStatus {
 		name: string;
 		version: string;
 		uptime_sec: number;
+		build?: {
+			git_sha: string;
+			built_unix: string;
+			identity: string;
+		};
 	};
 	storage: {
 		exom_path: string;
@@ -27,6 +32,18 @@ export interface ExomemStatus {
 		intervals: number;
 		directives: number;
 		events_logged: number;
+		sym_entries?: number;
+		rules?: {
+			count: number;
+			derived_predicates: string[];
+		};
+	};
+	schema?: {
+		path?: string | null;
+		builtin_view_count: number;
+		coordination_attribute_count: number;
+		system_attribute_count: number;
+		user_predicates: string[];
 	};
 }
 
@@ -46,6 +63,31 @@ export interface ExomemSchemaResponse {
 		type: string;
 		predicate: string;
 	}>;
+	ontology?: {
+		exom: string;
+		format_version: number;
+		builtin_views: Array<{
+			name: string;
+			arity: number;
+			description: string;
+			rule: string;
+		}>;
+		system_attributes: Array<{
+			name: string;
+			category: string;
+			entity_kind: string;
+			value_kind: string;
+			description: string;
+		}>;
+		coordination_attributes: Array<{
+			name: string;
+			category: string;
+			entity_kind: string;
+			value_kind: string;
+			description: string;
+		}>;
+		user_predicates: string[];
+	};
 	summary: {
 		relation_count: number;
 		base_relation_count: number;
@@ -162,6 +204,8 @@ export const MEMORY_STATE_BG: Record<MemoryState, string> = {
 // ---------------------------------------------------------------------------
 
 export interface FactEntry {
+	/** Stable id for retract/upsert (from brain `fact_id`). Omitted for derived-only rows. */
+	factId?: string;
 	predicate: string;
 	terms: string[];
 	confidence?: number | null;
@@ -202,6 +246,17 @@ export interface QueryResult {
 	rows: unknown[][];
 	tuples_matched: number;
 	duration_ms: number;
+}
+
+export interface EvalResponse {
+	ok: boolean;
+	output?: string;
+	columns?: string[];
+	rows?: unknown[][];
+	types?: string[];
+	raw_types?: string[];
+	mutated_exom?: string | null;
+	mutation_count?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +325,18 @@ export interface FactDetail {
 		interval?: { start: string; end: string } | null;
 		status: string;
 		cluster_ids: string[];
+	};
+	metadata?: {
+		predicate: string;
+		value: string;
+		confidence: number;
+		provenance: string;
+		created_at: string;
+		valid_from: string;
+		valid_to?: string | null;
+		created_by: string;
+		superseded_by?: string | null;
+		revoked_by?: string | null;
 	};
 	provenance: { type: 'base' | 'derived' };
 	touch_history: Array<{ event_id: string; event_type: string }>;

@@ -56,10 +56,17 @@ ray-exomem daemon
 ```bash
 ray-exomem --help
 ray-exomem assert --help
-ray-exomem eval   --help
+ray-exomem query --help
+ray-exomem expand-query --help
 ```
 
-**3. Assert facts**
+**3. Bootstrap an agent session**
+```bash
+ray-exomem doctor --exom main --json
+ray-exomem start-session --exom main --actor cli --json
+```
+
+**4. Assert facts**
 ```bash
 # assert <predicate> <value>  [--exom <name>] [--confidence 0-1] [--source label]
 ray-exomem assert sky-color blue
@@ -68,16 +75,22 @@ ray-exomem assert location paris   --valid-from 2024-01-01T00:00:00Z \
                                    --valid-to   2024-06-01T00:00:00Z
 ```
 
-**4. List and query facts**
+When any metadata flag is provided (`--source`, `--confidence`, `--valid-from`, `--valid-to`),
+the CLI uses the structured assert endpoint so provenance and confidence are preserved in history.
+
+**5. List and query facts**
 ```bash
 # Show all facts in the current exom
 ray-exomem facts
 
-# Rayfall query — finds all (predicate, value) pairs
-ray-exomem eval '(query main (find ?p ?v) (where (?p :value ?v)))'
+# Query current logical facts with decoded JSON rows
+ray-exomem query --exom main --json
+
+# Inspect normalized + expanded query text
+ray-exomem expand-query --exom main --request '(query (find ?fact ?pred ?value) (where (?fact '\''fact/predicate ?pred) (?fact '\''fact/value ?value)))'
 ```
 
-**5. Add a Datalog rule and query derived facts**
+**6. Add a Datalog rule and query derived facts**
 ```bash
 # Define a rule: anything observed by a sensor is trusted
 ray-exomem eval '(rule main (trusted ?p ?v) (?p :source sensor) (?p :value ?v))'
@@ -86,14 +99,14 @@ ray-exomem eval '(rule main (trusted ?p ?v) (?p :source sensor) (?p :value ?v))'
 ray-exomem eval '(query main (find ?p ?v) (where (trusted ?p ?v)))'
 ```
 
-**6. Record an observation and export**
+**7. Record an observation and export**
 ```bash
 ray-exomem observe "humidity is 65%" --source-type sensor --source-ref "sensor-7" \
                                      --confidence 0.95 --tags "env,climate"
 ray-exomem export > backup.json
 ```
 
-**7. Full agent workflow in one eval call**
+**8. Full agent workflow in one eval call**
 ```bash
 ray-exomem eval '
   (assert-fact main "alice" :knows "bob")
@@ -103,7 +116,7 @@ ray-exomem eval '
 '
 ```
 
-**8. Evaluate from a file**
+**9. Evaluate from a file**
 ```bash
 ray-exomem eval --file examples/native_smoke.ray
 ```
@@ -196,7 +209,11 @@ ray-exomem [OPTIONS] <COMMAND>
 | `status` | Show daemon health and exom stats |
 | `eval <expr>` | Evaluate Rayfall source (inline or `--file`) |
 | `assert <predicate> <value>` | Assert a fact (`--confidence`, `--valid-from`, `--valid-to`, `--source`) |
-| `retract <predicate>` | Soft-retract a fact (closes valid-time interval) |
+| `query` | Execute a read-only Rayfall `(query ...)` request with decoded rows |
+| `expand-query` | Show normalized and expanded query text after exom/rule lowering |
+| `doctor` | Health checks plus CLI/daemon build identity comparison |
+| `start-session` | Bootstrap an exom for agents and print the session contract |
+| `retract <fact-id>` | Retract a fact by stable fact id |
 | `facts` | List current facts in an exom |
 | `observe <content>` | Record an observation (`--source-type`, `--source-ref`, `--confidence`, `--tags`) |
 | `export` | Export all data as lossless JSON (`--format rayfall` for human-readable) |
@@ -206,6 +223,12 @@ ray-exomem [OPTIONS] <COMMAND>
 | `branch <sub>` | Manage branches: `list`, `create`, `switch`, `diff`, `merge`, `delete` |
 | `run <file>` | Evaluate a `.ray` file offline (no daemon) |
 | `version` | Print version and rayforce2 engine info |
+| `coord <sub>` | Coordination helpers for claims, dependencies, and agent sessions |
+| `history <fact-id>` | Show fact detail + touch history |
+| `why <fact-id>` | Explain a fact or derived predicate |
+| `why-not` | Check whether a matching active fact exists |
+| `watch` | Stream mutation events over SSE |
+| `lint-memory` | Run hygiene checks over exported facts |
 | `guide [topic]` | Print operator reference (`overview`, `cli`, `http`, `env`, `limitations`) |
 
 All commands that talk to the daemon accept `--exom <name>` (default: `main`)
@@ -256,7 +279,7 @@ Attribution: `X-Actor`, `X-Session`, `X-Model` request headers
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/status` | Engine health, KB load state, version |
+| `GET` | `/api/status` | Engine health, KB load state, version, and build identity |
 | `GET` | `/api/schema` | Relation catalog: arity, field types, row counts, samples |
 | `GET` | `/api/exoms` | List all exoms |
 | `POST` | `/api/exoms` | Create a new exom |

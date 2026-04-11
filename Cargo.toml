@@ -1,6 +1,6 @@
 [package]
 name = "ray-exomem"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Native rayforce2 knowledge-base front-end — Rayfall list-style syntax only"
 build = "build.rs"
