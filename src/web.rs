@@ -115,6 +115,8 @@ pub struct ExomState {
     pub brain: Brain,
     pub datoms: RayObj,
     pub rules: Vec<ParsedRule>,
+    /// The on-disk directory for this exom (set for tree-path exoms; None for in-memory or legacy flat exoms).
+    pub exom_disk: Option<std::path::PathBuf>,
 }
 
 pub struct DaemonState {
@@ -430,7 +432,150 @@ fn load_exom_state(ed: Option<&ExomDir>, name: &str) -> Result<ExomState> {
         brain,
         datoms,
         rules,
+        exom_disk: None,
     })
+}
+
+/// Load an exom from a tree-based disk path + global sym file.
+/// `exom_disk` is the full path to the exom directory (e.g. `<tree_root>/work/main`).
+/// `sym_path` is the global sym file for this data-dir.
+/// `slash_key` is the HashMap key (e.g. `"work/main"`) used for schema/log labelling.
+fn load_exom_state_from_tree_path(
+    exom_disk: &std::path::Path,
+    sym_path: &std::path::Path,
+    slash_key: &str,
+) -> Result<ExomState> {
+    let mut brain = {
+        let b = Brain::open_exom(exom_disk, sym_path)?;
+        b.ensure_jsonl_sidecars()?;
+        b
+    };
+    // Apply current_branch from exom.json if present (covers both ExomMeta format versions).
+    let meta_p = exom_disk.join(crate::exom::META_FILENAME);
+    if meta_p.exists() {
+        // Try the new ExomMeta format first.
+        if let Ok(meta) = crate::exom::read_meta(exom_disk) {
+            if brain.branches().iter().any(|b| b.branch_id == meta.current_branch && !b.archived) {
+                let _ = brain.switch_branch(&meta.current_branch);
+            }
+        } else if let Ok(raw) = fs::read_to_string(&meta_p) {
+            // Fall back to legacy ExomDiskMeta format.
+            if let Ok(meta) = serde_json::from_str::<ExomDiskMeta>(&raw) {
+                if meta.format_version == 1 {
+                    if brain.branches().iter().any(|b| b.branch_id == meta.current_branch && !b.archived) {
+                        let _ = brain.switch_branch(&meta.current_branch);
+                    }
+                }
+            }
+        }
+    }
+    // Build datoms table.
+    let datoms = storage::build_datoms_table(&brain)?;
+    // Load rules from rules.ray if present.
+    let rules_p = exom_disk.join("rules.ray");
+    let rules = if rules_p.exists() {
+        let src = fs::read_to_string(&rules_p)
+            .with_context(|| format!("failed to read {}", rules_p.display()))?;
+        let mut out = Vec::new();
+        for line in src.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            out.push(crate::rules::parse_rule_line(line, crate::context::MutationContext::default(), String::new())?);
+        }
+        out
+    } else {
+        Vec::new()
+    };
+    // Save ontology schema.
+    let schema_p = exom_disk.join(system_schema::SCHEMA_FILENAME);
+    let ontology = system_schema::build_exom_ontology(slash_key, &brain, &rules);
+    let _ = system_schema::save_exom_ontology(&schema_p, &ontology);
+    Ok(ExomState { brain, datoms, rules, exom_disk: Some(exom_disk.to_path_buf()) })
+}
+
+/// Recursively walk `tree_root` and load every directory that contains `exom.json`.
+/// Returns a map of slash-path key → ExomState.
+fn load_tree_exoms(
+    tree_root: &std::path::Path,
+    sym_path: &std::path::Path,
+) -> Result<HashMap<String, ExomState>> {
+    let mut result = HashMap::new();
+    if !tree_root.exists() {
+        return Ok(result);
+    }
+    walk_tree_dir(tree_root, tree_root, sym_path, &mut result)?;
+    Ok(result)
+}
+
+fn walk_tree_dir(
+    tree_root: &std::path::Path,
+    current: &std::path::Path,
+    sym_path: &std::path::Path,
+    out: &mut HashMap<String, ExomState>,
+) -> Result<()> {
+    let rd = match std::fs::read_dir(current) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(()),
+    };
+    for entry in rd {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if !ft.is_dir() {
+            continue;
+        }
+        let disk = entry.path();
+        // Compute slash key relative to tree_root.
+        let rel = disk.strip_prefix(tree_root).unwrap_or(&disk);
+        let slash_key = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        if slash_key.is_empty() {
+            continue;
+        }
+        // Check for exom.json (new ExomMeta format).
+        let meta_p = disk.join(crate::exom::META_FILENAME);
+        if meta_p.exists() {
+            eprintln!("[ray-exomem] loading tree exom '{}'", slash_key);
+            match load_exom_state_from_tree_path(&disk, sym_path, &slash_key) {
+                Ok(es) => {
+                    out.insert(slash_key.clone(), es);
+                }
+                Err(e) => {
+                    eprintln!("[ray-exomem] WARNING: failed to load tree exom '{}': {}", slash_key, e);
+                }
+            }
+            // Don't descend into exom directories (no exoms nested inside exoms).
+            continue;
+        }
+        // Not an exom — recurse into folder.
+        walk_tree_dir(tree_root, &disk, sym_path, out)?;
+    }
+    Ok(())
+}
+
+/// Get an exom's state by slash key, lazy-loading from the tree on a cache miss.
+/// Returns an error if the exom cannot be found on disk either.
+fn get_or_load_exom<'a>(
+    daemon: &'a mut DaemonState,
+    slash_key: &str,
+    tree_root: Option<&std::path::Path>,
+    sym_path: Option<&std::path::Path>,
+) -> Result<&'a mut ExomState> {
+    if daemon.exoms.contains_key(slash_key) {
+        return Ok(daemon.exoms.get_mut(slash_key).unwrap());
+    }
+    // Attempt lazy load from tree.
+    if let (Some(tr), Some(sp)) = (tree_root, sym_path) {
+        let disk = tr.join(slash_key);
+        let meta_p = disk.join(crate::exom::META_FILENAME);
+        if meta_p.exists() {
+            let es = load_exom_state_from_tree_path(&disk, sp, slash_key)?;
+            daemon.engine.bind_named_db(storage::sym_intern(slash_key), &es.datoms)?;
+            daemon.exoms.insert(slash_key.to_string(), es);
+            return Ok(daemon.exoms.get_mut(slash_key).unwrap());
+        }
+    }
+    Err(anyhow!("unknown exom '{}'", slash_key))
 }
 
 fn refresh_exom_binding(
@@ -446,7 +591,19 @@ fn refresh_exom_binding(
     daemon
         .engine
         .bind_named_db(storage::sym_intern(exom), &state.datoms)?;
-    persist_exom_state(exom_dir, exom, state)?;
+    // For tree-path exoms (with exom_disk set), we persist via Brain::save() directly.
+    // For legacy flat-path exoms, persist via ExomDir.
+    if let Some(disk) = state.exom_disk.as_ref() {
+        state.brain.save()?;
+        // Save rules.ray if any rules exist.
+        let rules_p = disk.join("rules.ray");
+        let body: String = state.rules.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join("\n");
+        if !body.is_empty() {
+            fs::write(&rules_p, format!("{}\n", body))?;
+        }
+    } else {
+        persist_exom_state(exom_dir, exom, state)?;
+    }
     Ok(())
 }
 
@@ -466,18 +623,37 @@ pub fn serve(
     let exom_dir = match data_dir {
         Some(ref root) => {
             let ed = ExomDir::open(root.clone())?;
-            let exom_names = ed.list_exoms()?;
-            if exom_names.is_empty() {
+            // Load tree-based exoms from <data_dir>/tree/ (new layout).
+            let tree_dir = root.join("tree");
+            if tree_dir.exists() {
+                let sym_path = ed.sym_path();
+                match load_tree_exoms(&tree_dir, &sym_path) {
+                    Ok(tree_exoms) => {
+                        for (key, es) in tree_exoms {
+                            exoms.insert(key, es);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[ray-exomem] WARNING: tree loader failed: {}", e);
+                    }
+                }
+            }
+            // Load legacy flat exoms from <data_dir>/exoms/ for backward compat.
+            let flat_exom_names = ed.list_exoms()?;
+            for name in &flat_exom_names {
+                if exoms.contains_key(name.as_str()) {
+                    continue; // don't clobber a tree exom with same slash key
+                }
+                eprintln!("[ray-exomem] loading flat exom '{}'", name);
+                exoms.insert(name.clone(), load_exom_state(Some(&ed), name)?);
+            }
+            // Seed the default flat exom only if nothing was loaded at all.
+            if exoms.is_empty() {
                 ed.create_exom(DEFAULT_EXOM)?;
                 exoms.insert(
                     DEFAULT_EXOM.to_string(),
                     load_exom_state(Some(&ed), DEFAULT_EXOM)?,
                 );
-            } else {
-                for name in &exom_names {
-                    eprintln!("[ray-exomem] loading exom '{}'", name);
-                    exoms.insert(name.clone(), load_exom_state(Some(&ed), name)?);
-                }
             }
             Some(ed)
         }
@@ -792,21 +968,20 @@ fn serve_from_disk(stream: &mut TcpStream, req: &Request, ui_dir: &Path, rel: &s
 // ---------------------------------------------------------------------------
 
 /// Parse an exom address string (flat name or `::` / `/` separated path) and
-/// return the **last segment** as the flat brain key, or return a 400 error tuple.
+/// return the **slash-form path** as the HashMap key, or return a 400 error tuple.
 ///
 /// Examples:
 ///   "main"          → Ok("main")
-///   "work::main"    → Ok("main")
-///   "work/ath/main" → Ok("main")
-fn parse_exom_to_flat_name(raw: &str) -> Result<String, (u16, String)> {
+///   "work::main"    → Ok("work/main")
+///   "work/ath/main" → Ok("work/ath/main")
+fn parse_exom_to_slash_path(raw: &str) -> Result<String, (u16, String)> {
     let path: crate::path::TreePath = raw.parse().map_err(|e: crate::path::PathError| {
         let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string())
             .with_path(raw)
             .into_response();
         (s, b)
     })?;
-    let flat = path.last().unwrap_or(DEFAULT_EXOM).to_string();
-    Ok(flat)
+    Ok(path.to_slash_string())
 }
 
 fn handle_api(
@@ -821,7 +996,7 @@ fn handle_api(
         .map(|s| s.as_str())
         .unwrap_or(DEFAULT_EXOM);
 
-    let exom = match parse_exom_to_flat_name(exom_raw) {
+    let exom = match parse_exom_to_slash_path(exom_raw) {
         Ok(e) => e,
         Err((status, body)) => return write_json_response(stream, status, &body),
     };
@@ -971,7 +1146,24 @@ fn get_exom_state<'a>(daemon: &'a DaemonState, exom: &str) -> Result<&'a ExomSta
         .ok_or_else(|| anyhow!("unknown exom '{}'", exom))
 }
 
+/// Like `get_exom_state` but lazy-loads from the tree on a cache miss (read-only callers).
+fn get_exom_state_or_load<'a>(
+    daemon: &'a mut DaemonState,
+    exom: &str,
+    tree_root: Option<&std::path::Path>,
+    sym_path: Option<&std::path::Path>,
+) -> Result<&'a ExomState> {
+    if !daemon.exoms.contains_key(exom) {
+        let _ = get_or_load_exom(daemon, exom, tree_root, sym_path);
+    }
+    daemon
+        .exoms
+        .get(exom)
+        .ok_or_else(|| anyhow!("unknown exom '{}'", exom))
+}
+
 /// Run a mutation on an exom's state, then refresh rayforce bindings and persist.
+/// `exom_name` is the slash-path key (e.g. `"work/main"` or `"main"`).
 fn mutate_exom_brain<T>(
     state: &ServerState,
     exom_name: &str,
@@ -981,6 +1173,13 @@ fn mutate_exom_brain<T>(
     f: impl FnOnce(&mut ExomState) -> Result<T>,
 ) -> Result<T> {
     let mut daemon = get_daemon(state);
+    // Lazy-load from tree on cache miss.
+    let tree_root = state.tree_root.as_deref();
+    let sym_path_buf = state.exom_dir.as_ref().map(|ed| ed.sym_path());
+    let sym_path = sym_path_buf.as_deref();
+    if !daemon.exoms.contains_key(exom_name) {
+        let _ = get_or_load_exom(&mut daemon, exom_name, tree_root, sym_path);
+    }
     let result = {
         let es = daemon
             .exoms
@@ -1026,10 +1225,11 @@ fn require_mutation_context(req: &Request) -> Result<MutationContext, &'static s
 fn mutation_requires_actor(method: &str, api_path: &str) -> bool {
     // Task 4.2/4.3 scaffold endpoints carry actor in JSON body (not X-Actor header).
     // Task 4.4: assert-fact also carries actor + branch + exom in JSON body.
+    // /api/exoms returns 410 immediately so actor is irrelevant.
     if method == "POST" && matches!(api_path,
         "/api/actions/init" | "/api/actions/exom-new" | "/api/actions/session-new" |
         "/api/actions/session-join" | "/api/actions/branch-create" | "/api/actions/rename" |
-        "/api/actions/assert-fact"
+        "/api/actions/assert-fact" | "/api/exoms"
     ) {
         return false;
     }
@@ -1179,6 +1379,15 @@ fn api_create_branch(
     body: &[u8],
     ctx: &MutationContext,
 ) -> ApiResult {
+    if state.tree_root.is_some() {
+        if let Ok(exom_path) = exom.parse::<crate::path::TreePath>() {
+            let tree_root = server_tree_root(state);
+            if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
+                let (status, body) = crate::http_error::ApiError::from(e).into_response();
+                return Ok(json_response(status, &body));
+            }
+        }
+    }
     let req: CreateBranchReq =
         serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON: {}", e))?;
     let name = req.name.unwrap_or_else(|| req.branch_id.clone());
@@ -2120,11 +2329,11 @@ fn api_assert_fact(
     // Resolve exom: body field takes priority over query-string param.
     let exom_raw = req.exom.as_deref().unwrap_or(exom_query);
 
-    // Parse as TreePath to validate the path and extract the flat brain key.
+    // Parse as TreePath to validate the path and use slash-form as HashMap key.
     let exom_path: crate::path::TreePath = exom_raw.parse().map_err(|e: crate::path::PathError| {
         anyhow!("bad exom path: {}", e)
     })?;
-    let exom_flat = exom_path.last().unwrap_or(DEFAULT_EXOM).to_string();
+    let exom_slash = exom_path.to_slash_string();
 
     // Task 4.4: actor is required in the body when exom is a path address.
     // We do NOT fall back to X-Actor header for path-based writes because
@@ -2170,7 +2379,7 @@ fn api_assert_fact(
 
     let tx_id = mutate_exom_brain(
         state,
-        &exom_flat,
+        &exom_slash,
         "assert_fact",
         Some(actor_str),
         Some(predicate.as_str()),
@@ -2232,6 +2441,15 @@ fn api_import_json(
         serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON import payload: {}", e))?;
 
     let mut daemon = get_daemon(state);
+    // Lazy-load from tree on cache miss.
+    {
+        let tree_root = state.tree_root.as_deref();
+        let sym_path_buf = state.exom_dir.as_ref().map(|ed| ed.sym_path());
+        let sym_path = sym_path_buf.as_deref();
+        if !daemon.exoms.contains_key(exom) {
+            let _ = get_or_load_exom(&mut daemon, exom, tree_root, sym_path);
+        }
+    }
 
     // Mutate exom state in a block so the mutable borrow is released
     let (n_facts, n_txs) = {
@@ -2292,6 +2510,16 @@ fn api_import_json(
 }
 
 fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult {
+    // Precheck: validate exom path exists and actor is valid.
+    if state.tree_root.is_some() {
+        if let Ok(exom_path) = exom.parse::<crate::path::TreePath>() {
+            let tree_root = server_tree_root(state);
+            if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
+                let (status, body) = crate::http_error::ApiError::from(e).into_response();
+                return Ok(json_response(status, &body));
+            }
+        }
+    }
     let mut daemon = get_daemon(state);
     let fact_ids: Vec<String> = {
         let es = get_exom_state(&daemon, exom)?;
@@ -2332,6 +2560,16 @@ fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> Ap
 
 /// True wipe: reset the Brain to empty (no tx history), delete and recreate on-disk state.
 fn api_wipe(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult {
+    // Precheck: validate exom path exists and actor is valid.
+    if state.tree_root.is_some() {
+        if let Ok(exom_path) = exom.parse::<crate::path::TreePath>() {
+            let tree_root = server_tree_root(state);
+            if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
+                let (status, body) = crate::http_error::ApiError::from(e).into_response();
+                return Ok(json_response(status, &body));
+            }
+        }
+    }
     let mut daemon = get_daemon(state);
 
     {
@@ -2726,64 +2964,16 @@ fn api_facts_bitemporal(
     }))
 }
 
-fn api_exom_create(state: &ServerState, body: &[u8], ctx: &MutationContext) -> ApiResult {
-    let payload: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::json!({}));
-    let name = payload["name"].as_str().unwrap_or("new").to_string();
-
-    let mut daemon = get_daemon(state);
-    if daemon.exoms.contains_key(&name) {
-        return Ok(json_response(
-            409,
-            &serde_json::json!({
-                "error": format!("exom '{}' already exists", name)
-            })
-            .to_string(),
-        ));
-    }
-
-    let exom_state = if let Some(ref ed) = state.exom_dir {
-        ed.create_exom(&name)
-            .with_context(|| format!("failed to create exom '{}'", name))?;
-        load_exom_state(Some(ed), &name)?
-    } else {
-        load_exom_state(None, &name)?
-    };
-    daemon.exoms.insert(name.clone(), exom_state);
-    if let Some(ref ed) = state.exom_dir {
-        if let Some(es) = daemon.exoms.get(&name) {
-            persist_exom_state(Some(ed), &name, es)?;
-        }
-    }
-    if let Err(e) = restore_runtime(&daemon) {
-        if let Err(e2) = daemon.engine.reconcile_lang_env() {
-            eprintln!(
-                "[ray-exomem] fatal: reconcile env after failed exom create restore: {}",
-                e2
-            );
-            std::process::exit(1);
-        }
-        daemon.exoms.remove(&name);
-        if let Some(ref ed) = state.exom_dir {
-            let _ = ed.delete_exom(&name);
-        }
-        if let Err(e2) = restore_runtime(&daemon) {
-            eprintln!(
-                "[ray-exomem] fatal: re-restore after rolling back exom create: {}",
-                e2
-            );
-            std::process::exit(1);
-        }
-        return Ok(json_response(
-            500,
-            &serde_json::json!({"error": format!("restore_runtime: {}", e)}).to_string(),
-        ));
-    }
-
-    sse_push_mutation(state, &name, "exom_create", Some(ctx.actor.as_str()), None);
-    json_ok(&serde_json::json!({
-        "ok": true,
-        "name": name
-    }))
+fn api_exom_create(_state: &ServerState, _body: &[u8], _ctx: &MutationContext) -> ApiResult {
+    // Task 4.4 / Task 5.x: POST /api/exoms is removed. Use POST /api/actions/init instead.
+    Ok((
+        410,
+        serde_json::to_string(&serde_json::json!({
+            "error": "gone",
+            "message": "POST /api/exoms is removed; use POST /api/actions/init instead",
+        }))
+        .unwrap(),
+    ))
 }
 
 fn api_exom_manage(state: &ServerState, name: &str, body: &[u8]) -> ApiResult {

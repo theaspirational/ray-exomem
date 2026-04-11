@@ -121,6 +121,57 @@ fn status_includes_tree_root() {
     assert!(body["server"]["tree_root"].is_string(), "server.tree_root missing: {}", body);
 }
 
+// ---------------------------------------------------------------------------
+// Task 5 load-bearing tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_exoms_do_not_collide() {
+    let d = TestDaemon::start();
+    // Create two projects whose main exoms have the same last segment "main".
+    ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path":"work"})).unwrap();
+    ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path":"lab"})).unwrap();
+
+    // Write to work::main with one value.
+    ureq::post(&format!("{}/ray-exomem/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom":"work::main","branch":"main","actor":"alice",
+            "predicate":"note/body","value":"work-note",
+        })).unwrap();
+
+    // Write to lab::main with a different value.
+    ureq::post(&format!("{}/ray-exomem/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom":"lab::main","branch":"main","actor":"alice",
+            "predicate":"note/body","value":"lab-note",
+        })).unwrap();
+
+    // The on-disk files must be in their respective tree paths.
+    assert!(d.tree_root().join("work/main/fact.jsonl").exists(),
+            "work::main facts must live under tree/work/main/");
+    assert!(d.tree_root().join("lab/main/fact.jsonl").exists(),
+            "lab::main facts must live under tree/lab/main/");
+
+    // Read back via /api/tree?path=work/main and confirm fact_count is correct.
+    let work: serde_json::Value = ureq::get(&format!("{}/ray-exomem/api/tree?path=work/main", d.base_url))
+        .call().unwrap().into_json().unwrap();
+    assert_eq!(work["fact_count"], 1, "work/main should have 1 fact, got: {}", work);
+    let lab: serde_json::Value = ureq::get(&format!("{}/ray-exomem/api/tree?path=lab/main", d.base_url))
+        .call().unwrap().into_json().unwrap();
+    assert_eq!(lab["fact_count"], 1, "lab/main should have 1 fact, got: {}", lab);
+}
+
+#[test]
+fn post_api_exoms_is_gone() {
+    let d = TestDaemon::start();
+    let err = ureq::post(&format!("{}/ray-exomem/api/exoms", d.base_url))
+        .send_json(json!({"name":"foo"})).unwrap_err();
+    if let ureq::Error::Status(s, _) = err { assert_eq!(s, 410); }
+    else { panic!("expected 410"); }
+}
+
 #[test]
 #[ignore] // FIXME(nested-exoms-task-4.4): session-join deferred to Task 4.4
 fn session_join_claims_branch() {
