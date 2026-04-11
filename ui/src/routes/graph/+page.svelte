@@ -1,6 +1,6 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import { resolve } from '$app/paths';
-	import { onMount } from 'svelte';
 	import * as d3 from 'd3';
 	import {
 		ArrowLeft, RefreshCw, ZoomIn, ZoomOut, Maximize2,
@@ -11,11 +11,12 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Card } from '$lib/components/ui/card';
 	import {
+		fetchExomemSchema,
 		fetchRelationGraph,
 		fetchEntityFacts,
 		type RelationGraphResponse
 	} from '$lib/exomem.svelte';
-	import type { FactEntry } from '$lib/types';
+	import type { ExomemSchemaResponse, FactEntry } from '$lib/types';
 	import { app } from '$lib/stores.svelte';
 
 	const PALETTE = [
@@ -27,6 +28,7 @@
 	// --- State ---
 	let svgEl = $state<SVGSVGElement | null>(null);
 	let graph = $state<RelationGraphResponse | null>(null);
+	let schema = $state<ExomemSchemaResponse | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let hoveredNode = $state<string | null>(null);
@@ -39,15 +41,19 @@
 	let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
 	let showControls = $state(true);
 
+	const systemPredicateSet = $derived(new Set(schema?.ontology?.system_attributes.map((attr) => attr.name) ?? []));
+	const coordinationPredicateSet = $derived(new Set(schema?.ontology?.coordination_attributes.map((attr) => attr.name) ?? []));
+	const userPredicateSet = $derived(new Set(schema?.ontology?.user_predicates ?? []));
+
 	// --- Entity panel derived state ---
-	const selectedNodeEdges = $derived(() => {
+	const selectedNodeEdges = $derived.by(() => {
 		if (!graph || !selectedNode) return [];
 		return graph.edges.filter((e) => e.source === selectedNode || e.target === selectedNode
 			|| (typeof e.source === 'object' && (e.source as any).id === selectedNode)
 			|| (typeof e.target === 'object' && (e.target as any).id === selectedNode));
 	});
 
-	const selectedNodePredicates = $derived(() => {
+	const selectedNodePredicates = $derived.by(() => {
 		const facts = selectedNodeFacts;
 		const preds = new Set(facts.map((f) => f.predicate));
 		return Array.from(preds).sort();
@@ -57,6 +63,32 @@
 		if (!factFilterPredicate) return selectedNodeFacts;
 		return selectedNodeFacts.filter((f) => f.predicate === factFilterPredicate);
 	});
+
+	const selectedFactCounts = $derived.by(() => ({
+		user: selectedNodeFacts.filter((f) => userPredicateSet.has(f.predicate)).length,
+		system: selectedNodeFacts.filter((f) => systemPredicateSet.has(f.predicate)).length,
+		coordination: selectedNodeFacts.filter((f) => coordinationPredicateSet.has(f.predicate)).length
+	}));
+
+	function predicateKind(predicate: string): 'user' | 'system' | 'coordination' | 'derived' {
+		if (coordinationPredicateSet.has(predicate)) return 'coordination';
+		if (systemPredicateSet.has(predicate)) return 'system';
+		if (userPredicateSet.has(predicate)) return 'user';
+		return 'derived';
+	}
+
+	function predicateBadgeClass(predicate: string): string {
+		switch (predicateKind(predicate)) {
+			case 'system':
+				return 'text-rule-accent';
+			case 'coordination':
+				return 'text-contra';
+			case 'user':
+				return 'text-fact-base';
+			default:
+				return 'text-fact-derived';
+		}
+	}
 
 	async function selectEntity(entityId: string) {
 		if (selectedNode === entityId) {
@@ -216,15 +248,25 @@
 		}
 	}
 
-	onMount(() => {
-		loadGraph();
+	$effect(() => {
+		if (!browser) return;
+		app.selectedExom;
+		void loadGraph();
 	});
 
 	async function loadGraph() {
 		loading = true;
 		error = null;
 		try {
-			graph = await fetchRelationGraph();
+			const [graphRes, schemaRes] = await Promise.all([
+				fetchRelationGraph(app.selectedExom),
+				fetchExomemSchema(app.selectedExom)
+			]);
+			graph = graphRes;
+			schema = schemaRes;
+			selectedNode = null;
+			selectedNodeFacts = [];
+			factFilterPredicate = null;
 			loading = false;
 			// Initialize filters to show all predicates
 			if (!filtersInitialized && graph) {
@@ -298,11 +340,13 @@
 	}
 
 	function renderGraph(data: RelationGraphResponse) {
-		const svg = d3.select(svgEl);
+		if (!svgEl) return;
+		const root = svgEl;
+		const svg = d3.select(root);
 		svg.selectAll('*').remove();
 
-		const width = svgEl.clientWidth;
-		const height = svgEl.clientHeight;
+		const width = root.clientWidth;
+		const height = root.clientHeight;
 
 		// Zoom
 		const g = svg.append('g');
@@ -467,6 +511,7 @@
 		</a>
 		<div class="h-5 w-px bg-border/80"></div>
 		<h1 class="text-sm font-semibold">Graph View</h1>
+		<Badge variant="secondary" class="text-xs">{app.selectedExom}</Badge>
 		{#if graph}
 			<Badge variant="outline" class="tabular-nums text-xs">
 				{graph.summary.node_count} nodes
@@ -525,6 +570,12 @@
 		<!-- Controls panel -->
 		{#if showControls && graph}
 			<div class="w-60 shrink-0 overflow-y-auto border-l border-border/80 bg-background/95 p-4 backdrop-blur">
+				<div class="mb-4 rounded-md border border-border/60 bg-card/60 px-3 py-2.5">
+					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Scope</p>
+					<p class="mt-1 text-sm text-foreground">Current branch visibility for <span class="font-mono">{app.selectedExom}</span>.</p>
+					<p class="mt-1 text-xs text-muted-foreground">System and coordination predicates are shown explicitly instead of being mixed invisibly into the graph.</p>
+				</div>
+
 				<!-- Forces section -->
 				<div class="flex items-center justify-between mb-3">
 					<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Forces</p>
@@ -658,9 +709,7 @@
 								style="background: {color}; opacity: {active ? 1 : 0.3}"
 							></span>
 							<span class="flex-1 truncate font-medium">{pred}</span>
-							{#if pred === 'dependency'}
-								<span class="text-[0.6rem] text-muted-foreground/70 font-mono">dep</span>
-							{/if}
+							<span class="text-[0.6rem] font-mono {predicateBadgeClass(pred)}">{predicateKind(pred)}</span>
 							<span class="tabular-nums text-muted-foreground">{count}</span>
 						</button>
 					{/each}
@@ -689,6 +738,82 @@
 								<p class="text-xs text-muted-foreground/60">+{inEdges.length - 8} more</p>
 							{/if}
 						</div>
+					</div>
+				{/if}
+
+				{#if selectedNode}
+					<div class="mt-5 border-t border-border/80 pt-4">
+						<div class="mb-2 flex items-center justify-between gap-2">
+							<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Selected Entity</p>
+							<button class="rounded p-1 text-muted-foreground hover:bg-muted/60" onclick={closeEntityPanel}>
+								<X class="size-3.5" />
+							</button>
+						</div>
+						<p class="truncate font-mono text-sm text-foreground">{selectedNode}</p>
+						<div class="mt-2 flex flex-wrap gap-1.5">
+							<Badge variant="outline" class="h-4 px-1.5 text-[10px]">{selectedNodeEdges.length} graph edges</Badge>
+							<Badge variant="outline" class="h-4 px-1.5 text-[10px]">{selectedNodeFacts.length} facts</Badge>
+							{#if selectedFactCounts.user > 0}
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px] text-fact-base">{selectedFactCounts.user} user</Badge>
+							{/if}
+							{#if selectedFactCounts.system > 0}
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px] text-rule-accent">{selectedFactCounts.system} system</Badge>
+							{/if}
+							{#if selectedFactCounts.coordination > 0}
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px] text-contra">{selectedFactCounts.coordination} coordination</Badge>
+							{/if}
+						</div>
+
+						{#if selectedNodeLoading}
+							<div class="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+								<RefreshCw class="size-3 animate-spin" />
+								Loading entity facts...
+							</div>
+						{:else if selectedNodeFacts.length === 0}
+							<p class="mt-3 text-xs text-muted-foreground">No sampled facts for this entity in the current graph scope.</p>
+						{:else}
+							{#if selectedNodePredicates.length > 1}
+								<div class="mt-3 flex flex-wrap gap-1">
+									<button
+										class="rounded-md border border-border/60 px-2 py-1 text-[10px] {factFilterPredicate === null ? 'bg-muted/40 text-foreground' : 'text-muted-foreground'}"
+										onclick={() => (factFilterPredicate = null)}
+									>
+										all
+									</button>
+									{#each selectedNodePredicates as pred (pred)}
+										<button
+											class="rounded-md border border-border/60 px-2 py-1 text-[10px] {factFilterPredicate === pred ? 'bg-muted/40 text-foreground' : 'text-muted-foreground'}"
+											onclick={() => (factFilterPredicate = pred)}
+										>
+											{pred}
+										</button>
+									{/each}
+								</div>
+							{/if}
+
+							<div class="mt-3 flex flex-col gap-2">
+								{#each filteredFacts() as fact, idx (`${fact.predicate}-${fact.terms.join(',')}-${idx}`)}
+									<div class="rounded-md border border-border/60 bg-card/50 px-2.5 py-2">
+										<div class="flex flex-wrap items-center gap-1.5">
+											<span class="font-mono text-[11px] text-foreground">{fact.predicate}</span>
+											<Badge variant="outline" class="h-4 px-1.5 text-[10px] {predicateBadgeClass(fact.predicate)}">{predicateKind(fact.predicate)}</Badge>
+											{#if fact.branchRole}
+												<Badge variant="outline" class="h-4 px-1.5 text-[10px]">{fact.branchRole}</Badge>
+											{/if}
+										</div>
+										<p class="mt-1 font-mono text-[11px] text-muted-foreground">({fact.terms.join(', ')})</p>
+										{#if fact.validFrom || fact.validTo}
+											<p class="mt-1 text-[10px] text-muted-foreground">
+												{fact.validFrom ?? 'unknown'} → {fact.validTo ?? 'open'}
+											</p>
+										{/if}
+										{#if fact.branchOrigin}
+											<p class="mt-1 text-[10px] text-muted-foreground">origin branch: <span class="font-mono">{fact.branchOrigin}</span></p>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>

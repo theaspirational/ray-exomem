@@ -25,10 +25,19 @@ impl Client {
 
     /// DELETE request, returns the response body.
     pub fn delete(&self, path: &str) -> Result<String> {
+        self.delete_with_headers(path, &[])
+    }
+
+    /// DELETE with extra headers (e.g. X-Actor for branch archive).
+    pub fn delete_with_headers(&self, path: &str, extra: &[(&str, &str)]) -> Result<String> {
         let url = format!("{}{}", PREFIX, path);
+        let mut header_block = String::new();
+        for (k, v) in extra {
+            header_block.push_str(&format!("{}: {}\r\n", k, v));
+        }
         let request = format!(
-            "DELETE {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            url, self.addr
+            "DELETE {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+            url, self.addr, header_block
         );
         self.send_request(&request)
     }
@@ -100,25 +109,25 @@ impl Client {
     }
 
     fn send_request(&self, request: &str) -> Result<String> {
-        let mut stream = TcpStream::connect(&self.addr)
-            .with_context(|| format!("cannot connect to daemon at {} — is it running?", self.addr))?;
+        let mut stream = TcpStream::connect(&self.addr).with_context(|| {
+            format!("cannot connect to daemon at {} — is it running?", self.addr)
+        })?;
         stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
         stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
 
-        stream.write_all(request.as_bytes())
+        stream
+            .write_all(request.as_bytes())
             .context("failed to send request to daemon")?;
 
         let mut response = Vec::new();
-        stream.read_to_end(&mut response)
+        stream
+            .read_to_end(&mut response)
             .context("failed to read response from daemon")?;
 
         let response_str = String::from_utf8_lossy(&response);
 
         // Parse HTTP response: find body after \r\n\r\n
-        let body_start = response_str
-            .find("\r\n\r\n")
-            .map(|i| i + 4)
-            .unwrap_or(0);
+        let body_start = response_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
 
         let body = &response_str[body_start..];
 
@@ -133,5 +142,58 @@ impl Client {
         }
 
         Ok(body.to_string())
+    }
+
+    /// Long-lived GET for Server-Sent Events: skip HTTP headers, then copy the remainder to `out`.
+    pub fn stream_sse(&self, path: &str, out: &mut impl Write) -> Result<()> {
+        let url = format!("{}{}", PREFIX, path);
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+            url, self.addr
+        );
+        let mut stream = TcpStream::connect(&self.addr).with_context(|| {
+            format!("cannot connect to daemon at {} — is it running?", self.addr)
+        })?;
+        stream.set_read_timeout(None).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+
+        stream
+            .write_all(request.as_bytes())
+            .context("failed to send SSE request to daemon")?;
+
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream
+                .read(&mut chunk)
+                .context("failed to read SSE response headers")?;
+            if n == 0 {
+                bail!("daemon closed connection before SSE headers completed");
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf
+                .windows(4)
+                .position(|w| w == [b'\r', b'\n', b'\r', b'\n'])
+            {
+                let after = pos + 4;
+                out.write_all(&buf[after..])
+                    .context("failed to write SSE prelude")?;
+                out.flush().ok();
+                break;
+            }
+            if buf.len() > 65536 {
+                bail!("SSE response headers too large");
+            }
+        }
+
+        loop {
+            let n = stream.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&chunk[..n])?;
+            out.flush().ok();
+        }
+        Ok(())
     }
 }

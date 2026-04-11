@@ -6,6 +6,7 @@
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -265,13 +266,16 @@ impl Brain {
             brain.branches = storage::load_branches(&tbl)?;
             // Ensure "main" branch exists
             if !brain.branches.iter().any(|b| b.branch_id == "main") {
-                brain.branches.insert(0, Branch {
-                    branch_id: "main".into(),
-                    name: "main".into(),
-                    parent_branch_id: None,
-                    created_tx_id: 0,
-                    archived: false,
-                });
+                brain.branches.insert(
+                    0,
+                    Branch {
+                        branch_id: "main".into(),
+                        name: "main".into(),
+                        parent_branch_id: None,
+                        created_tx_id: 0,
+                        archived: false,
+                    },
+                );
             }
         }
 
@@ -346,11 +350,7 @@ impl Brain {
         self.branches = branches;
 
         // Rebuild derived state
-        self.next_tx = self
-            .transactions
-            .last()
-            .map(|t| t.tx_id + 1)
-            .unwrap_or(1);
+        self.next_tx = self.transactions.last().map(|t| t.tx_id + 1).unwrap_or(1);
         self.tx_branch_index = self
             .transactions
             .iter()
@@ -387,11 +387,23 @@ impl Brain {
         };
 
         let tables: &[(&str, Box<dyn Fn(&Path) -> Result<()> + '_>)] = &[
-            ("tx", Box::new(|p| storage::save_jsonl(&self.transactions, p))),
+            (
+                "tx",
+                Box::new(|p| storage::save_jsonl(&self.transactions, p)),
+            ),
             ("fact", Box::new(|p| storage::save_jsonl(&self.facts, p))),
-            ("observation", Box::new(|p| storage::save_jsonl(&self.observations, p))),
-            ("belief", Box::new(|p| storage::save_jsonl(&self.beliefs, p))),
-            ("branch", Box::new(|p| storage::save_jsonl(&self.branches, p))),
+            (
+                "observation",
+                Box::new(|p| storage::save_jsonl(&self.observations, p)),
+            ),
+            (
+                "belief",
+                Box::new(|p| storage::save_jsonl(&self.beliefs, p)),
+            ),
+            (
+                "branch",
+                Box::new(|p| storage::save_jsonl(&self.branches, p)),
+            ),
         ];
 
         for (name, save_fn) in tables {
@@ -424,7 +436,10 @@ impl Brain {
         let (name, ray_table) = match &table {
             DirtyTable::Tx => ("tx", storage::build_tx_table(&self.transactions)),
             DirtyTable::Fact => ("fact", storage::build_fact_table(&self.facts)),
-            DirtyTable::Observation => ("observation", storage::build_observation_table(&self.observations)),
+            DirtyTable::Observation => (
+                "observation",
+                storage::build_observation_table(&self.observations),
+            ),
             DirtyTable::Belief => ("belief", storage::build_belief_table(&self.beliefs)),
             DirtyTable::Branch => ("branch", storage::build_branch_table(&self.branches)),
         };
@@ -563,7 +578,11 @@ impl Brain {
             &format!("retract: {}", fact_id),
             ctx,
         )?;
-        if let Some(f) = self.facts.iter_mut().find(|f| f.fact_id == fact_id && f.revoked_by_tx.is_none()) {
+        if let Some(f) = self
+            .facts
+            .iter_mut()
+            .find(|f| f.fact_id == fact_id && f.revoked_by_tx.is_none())
+        {
             f.revoked_by_tx = Some(tx_id);
             if f.valid_to.is_none() {
                 f.valid_to = Some(tx_time);
@@ -595,7 +614,9 @@ impl Brain {
         if matching_ids.is_empty() {
             bail!(
                 "no active fact matching ({}, {}, {})",
-                fact_id, predicate, value
+                fact_id,
+                predicate,
+                value
             );
         }
 
@@ -668,7 +689,12 @@ impl Brain {
         Ok(tx_id)
     }
 
-    pub fn create_branch(&mut self, branch_id: &str, name: &str, ctx: &MutationContext) -> Result<TxId> {
+    pub fn create_branch(
+        &mut self,
+        branch_id: &str,
+        name: &str,
+        ctx: &MutationContext,
+    ) -> Result<TxId> {
         if self
             .branches
             .iter()
@@ -761,10 +787,7 @@ impl Brain {
     /// Depth of a tx's branch in the ancestor chain (0 = closest to the viewing branch).
     pub fn branch_depth_of_tx(&self, tx_id: TxId, ancestors: &[String]) -> usize {
         match self.tx_branch(tx_id) {
-            Some(b) => ancestors
-                .iter()
-                .position(|a| a == b)
-                .unwrap_or(usize::MAX),
+            Some(b) => ancestors.iter().position(|a| a == b).unwrap_or(usize::MAX),
             None => usize::MAX,
         }
     }
@@ -792,7 +815,12 @@ impl Brain {
             .iter()
             .filter(|f| self.fact_visible_on_branch(f, branch_id))
             .collect();
-        visible.sort_by_key(|f| self.branch_depth_of_tx(f.created_by_tx, &ancestors));
+        visible.sort_by_key(|f| {
+            (
+                self.branch_depth_of_tx(f.created_by_tx, &ancestors),
+                Reverse(f.created_by_tx),
+            )
+        });
         visible.dedup_by(|a, b| a.fact_id == b.fact_id);
         visible
     }
@@ -850,21 +878,12 @@ impl Brain {
             bail!("target branch '{}' not found", target);
         }
 
-        let target_ancestors: HashSet<String> =
-            self.branch_ancestors(target).into_iter().collect();
+        let target_ancestors: HashSet<String> = self.branch_ancestors(target).into_iter().collect();
         let target_ancestors_ref: HashSet<&str> =
             target_ancestors.iter().map(|s| s.as_str()).collect();
 
-        let source_facts: Vec<Fact> = self
-            .facts_on_branch(source)
-            .into_iter()
-            .cloned()
-            .collect();
-        let target_facts: Vec<Fact> = self
-            .facts_on_branch(target)
-            .into_iter()
-            .cloned()
-            .collect();
+        let source_facts: Vec<Fact> = self.facts_on_branch(source).into_iter().cloned().collect();
+        let target_facts: Vec<Fact> = self.facts_on_branch(target).into_iter().cloned().collect();
         let target_map: HashMap<&str, &Fact> = target_facts
             .iter()
             .map(|f| (f.fact_id.as_str(), f))
@@ -895,33 +914,31 @@ impl Brain {
                     )?;
                     added.push(fact.fact_id.clone());
                 }
-                Some(target_fact) if target_fact.value != fact.value => {
-                    match policy {
-                        MergePolicy::LastWriterWins => {
-                            self.retract_fact(&fact.fact_id, ctx)?;
-                            self.assert_fact(
-                                &fact.fact_id,
-                                &fact.predicate,
-                                &fact.value,
-                                fact.confidence,
-                                &format!("merged-from:{}", source),
-                                Some(&fact.valid_from),
-                                fact.valid_to.as_deref(),
-                                ctx,
-                            )?;
-                            added.push(fact.fact_id.clone());
-                        }
-                        MergePolicy::KeepTarget => {}
-                        MergePolicy::Manual => {
-                            conflicts.push(MergeConflict {
-                                fact_id: fact.fact_id.clone(),
-                                predicate: fact.predicate.clone(),
-                                source_value: fact.value.clone(),
-                                target_value: target_fact.value.clone(),
-                            });
-                        }
+                Some(target_fact) if target_fact.value != fact.value => match policy {
+                    MergePolicy::LastWriterWins => {
+                        self.retract_fact(&fact.fact_id, ctx)?;
+                        self.assert_fact(
+                            &fact.fact_id,
+                            &fact.predicate,
+                            &fact.value,
+                            fact.confidence,
+                            &format!("merged-from:{}", source),
+                            Some(&fact.valid_from),
+                            fact.valid_to.as_deref(),
+                            ctx,
+                        )?;
+                        added.push(fact.fact_id.clone());
                     }
-                }
+                    MergePolicy::KeepTarget => {}
+                    MergePolicy::Manual => {
+                        conflicts.push(MergeConflict {
+                            fact_id: fact.fact_id.clone(),
+                            predicate: fact.predicate.clone(),
+                            source_value: fact.value.clone(),
+                            target_value: target_fact.value.clone(),
+                        });
+                    }
+                },
                 _ => {}
             }
         }
@@ -966,6 +983,21 @@ impl Brain {
         self.facts_on_branch(&self.current_branch)
     }
 
+    /// Return transactions visible on the current branch (including inherited ancestor-branch txs).
+    pub fn current_transactions(&self) -> Vec<&Tx> {
+        self.transactions_on_branch(&self.current_branch)
+    }
+
+    /// Return transactions visible on a specific branch.
+    pub fn transactions_on_branch(&self, branch_id: &str) -> Vec<&Tx> {
+        let ancestors = self.branch_ancestors(branch_id);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        self.transactions
+            .iter()
+            .filter(|tx| branch_set.contains(tx.branch_id.as_str()))
+            .collect()
+    }
+
     /// Return active beliefs on the current branch (closest version wins per `claim_text`).
     pub fn current_beliefs(&self) -> Vec<&Belief> {
         self.beliefs_on_branch(&self.current_branch)
@@ -997,7 +1029,12 @@ impl Brain {
             .iter()
             .filter(|f| self.fact_active_as_of_on_branch(f, tx_id, view_branch))
             .collect();
-        visible.sort_by_key(|f| self.branch_depth_of_tx(f.created_by_tx, &ancestors));
+        visible.sort_by_key(|f| {
+            (
+                self.branch_depth_of_tx(f.created_by_tx, &ancestors),
+                Reverse(f.created_by_tx),
+            )
+        });
         visible.dedup_by(|a, b| a.fact_id == b.fact_id);
         visible
     }
@@ -1010,10 +1047,16 @@ impl Brain {
             .beliefs
             .iter()
             .filter(|b| {
-                b.status == BeliefStatus::Active && self.tx_on_branches(b.created_by_tx, &branch_set)
+                b.status == BeliefStatus::Active
+                    && self.tx_on_branches(b.created_by_tx, &branch_set)
             })
             .collect();
-        visible.sort_by_key(|b| self.branch_depth_of_tx(b.created_by_tx, &ancestors));
+        visible.sort_by_key(|b| {
+            (
+                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
+                Reverse(b.created_by_tx),
+            )
+        });
         visible.dedup_by(|a, b| a.claim_text == b.claim_text);
         visible
     }
@@ -1045,7 +1088,12 @@ impl Brain {
                     && latest_tx_by_claim.get(b.claim_text.as_str()) == Some(&b.created_by_tx)
             })
             .collect();
-        out.sort_by_key(|b| self.branch_depth_of_tx(b.created_by_tx, &ancestors));
+        out.sort_by_key(|b| {
+            (
+                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
+                Reverse(b.created_by_tx),
+            )
+        });
         out.dedup_by(|a, b| a.claim_text == b.claim_text);
         out
     }
@@ -1075,7 +1123,12 @@ impl Brain {
                     && is_valid_at(&f.valid_from, f.valid_to.as_deref(), timestamp)
             })
             .collect();
-        visible.sort_by_key(|f| self.branch_depth_of_tx(f.created_by_tx, &ancestors));
+        visible.sort_by_key(|f| {
+            (
+                self.branch_depth_of_tx(f.created_by_tx, &ancestors),
+                Reverse(f.created_by_tx),
+            )
+        });
         visible.dedup_by(|a, b| a.fact_id == b.fact_id);
         visible
     }
@@ -1119,7 +1172,12 @@ impl Brain {
                     && is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp)
             })
             .collect();
-        out.sort_by_key(|b| self.branch_depth_of_tx(b.created_by_tx, &ancestors));
+        out.sort_by_key(|b| {
+            (
+                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
+                Reverse(b.created_by_tx),
+            )
+        });
         out.dedup_by(|a, b| a.claim_text == b.claim_text);
         out
     }
@@ -1168,10 +1226,28 @@ impl Brain {
         // Step 1: Assert facts
         out.push_str("-- Step 1: Assert two facts --\n");
         let tx1 = brain
-            .assert_fact("f1", "sky-color", "blue", 0.9, "observation", None, None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "sky-color",
+                "blue",
+                0.9,
+                "observation",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
         let tx2 = brain
-            .assert_fact("f2", "grass-color", "green", 0.85, "observation", None, None, &MutationContext::default())
+            .assert_fact(
+                "f2",
+                "grass-color",
+                "green",
+                0.85,
+                "observation",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
         out.push_str(&format!("  tx{}: assert f1 (sky-color = blue)\n", tx1));
         out.push_str(&format!("  tx{}: assert f2 (grass-color = green)\n", tx2));
@@ -1189,7 +1265,8 @@ impl Brain {
                 0.9,
                 vec!["f1".into()],
                 "direct observation supports this",
-                None, None,
+                None,
+                None,
                 &MutationContext::default(),
             )
             .unwrap();
@@ -1204,7 +1281,9 @@ impl Brain {
 
         // Step 3: Retract a fact (does NOT erase history)
         out.push_str("-- Step 3: Retract f2 (grass-color) --\n");
-        let tx4 = brain.retract_fact("f2", &MutationContext::default()).unwrap();
+        let tx4 = brain
+            .retract_fact("f2", &MutationContext::default())
+            .unwrap();
         out.push_str(&format!("  tx{}: retract f2\n", tx4));
         out.push_str(&format!(
             "  current facts: {}\n",
@@ -1232,7 +1311,8 @@ impl Brain {
                 0.3,
                 vec!["f1".into()],
                 "overcast today, revising confidence down",
-                None, None,
+                None,
+                None,
                 &MutationContext::default(),
             )
             .unwrap();
@@ -1335,7 +1415,10 @@ fn fmt_belief_history(beliefs: &[&Belief]) -> String {
         .map(|b| {
             format!(
                 "\"{}\" [{}] confidence={:.1} valid={}..{}",
-                b.claim_text, b.status, b.confidence, b.valid_from,
+                b.claim_text,
+                b.status,
+                b.confidence,
+                b.valid_from,
                 b.valid_to.as_deref().unwrap_or("now")
             )
         })
@@ -1374,7 +1457,10 @@ pub fn now_iso() -> String {
     let hour = time_secs / 3600;
     let min = (time_secs % 3600) / 60;
     let sec = time_secs % 60;
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hour, min, sec)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hour, min, sec
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,12 +1479,32 @@ mod tests {
     fn append_only_history_is_preserved() {
         let mut brain = Brain::new();
         brain
-            .assert_fact("f1", "color", "red", 1.0, "test", None, None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "color",
+                "red",
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
         brain
-            .assert_fact("f2", "color", "blue", 1.0, "test", None, None, &MutationContext::default())
+            .assert_fact(
+                "f2",
+                "color",
+                "blue",
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
-        brain.retract_fact("f1", &MutationContext::default()).unwrap();
+        brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap();
 
         // f1 still exists in the history even though it was retracted
         let history = brain.fact_history("f1");
@@ -1413,12 +1519,32 @@ mod tests {
     fn current_vs_as_of_differ_after_retraction() {
         let mut brain = Brain::new();
         let tx1 = brain
-            .assert_fact("f1", "temp", "hot", 1.0, "sensor", None, None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "temp",
+                "hot",
+                1.0,
+                "sensor",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
         let tx2 = brain
-            .assert_fact("f2", "temp", "cold", 1.0, "sensor", None, None, &MutationContext::default())
+            .assert_fact(
+                "f2",
+                "temp",
+                "cold",
+                1.0,
+                "sensor",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
-        let tx3 = brain.retract_fact("f1", &MutationContext::default()).unwrap();
+        let tx3 = brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap();
 
         // Current: only f2
         let current = brain.current_facts();
@@ -1444,10 +1570,28 @@ mod tests {
     fn history_returns_prior_versions() {
         let mut brain = Brain::new();
         brain
-            .revise_belief("b1", "sky is blue", 0.9, vec![], "sunny day", None, None, &MutationContext::default())
+            .revise_belief(
+                "b1",
+                "sky is blue",
+                0.9,
+                vec![],
+                "sunny day",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
         brain
-            .revise_belief("b2", "sky is blue", 0.3, vec![], "cloudy now", None, None, &MutationContext::default())
+            .revise_belief(
+                "b2",
+                "sky is blue",
+                0.3,
+                vec![],
+                "cloudy now",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
 
         let history = brain.belief_history("sky is blue");
@@ -1462,10 +1606,28 @@ mod tests {
     fn beliefs_as_of_shows_time_travel() {
         let mut brain = Brain::new();
         let tx1 = brain
-            .revise_belief("b1", "it is warm", 0.8, vec![], "morning", None, None, &MutationContext::default())
+            .revise_belief(
+                "b1",
+                "it is warm",
+                0.8,
+                vec![],
+                "morning",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
         let tx2 = brain
-            .revise_belief("b2", "it is warm", 0.2, vec![], "evening", None, None, &MutationContext::default())
+            .revise_belief(
+                "b2",
+                "it is warm",
+                0.2,
+                vec![],
+                "evening",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
 
         // At tx1, b1 was active
@@ -1483,9 +1645,20 @@ mod tests {
     fn explain_returns_all_related_transactions() {
         let mut brain = Brain::new();
         brain
-            .assert_fact("f1", "mood", "happy", 1.0, "self-report", None, None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "mood",
+                "happy",
+                1.0,
+                "self-report",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
-        brain.retract_fact("f1", &MutationContext::default()).unwrap();
+        brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap();
 
         let txs = brain.explain("f1");
         assert_eq!(txs.len(), 2);
@@ -1496,23 +1669,42 @@ mod tests {
     #[test]
     fn retract_nonexistent_fact_errors() {
         let mut brain = Brain::new();
-        let err = brain.retract_fact("nope", &MutationContext::default()).unwrap_err();
+        let err = brain
+            .retract_fact("nope", &MutationContext::default())
+            .unwrap_err();
         assert!(err.to_string().contains("no active fact"));
     }
 
     #[test]
     fn double_retract_errors() {
         let mut brain = Brain::new();
-        brain.assert_fact("f1", "x", "y", 1.0, "test", None, None, &MutationContext::default()).unwrap();
-        brain.retract_fact("f1", &MutationContext::default()).unwrap();
-        let err = brain.retract_fact("f1", &MutationContext::default()).unwrap_err();
+        brain
+            .assert_fact(
+                "f1",
+                "x",
+                "y",
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap();
+        let err = brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap_err();
         assert!(err.to_string().contains("no active fact"));
     }
 
     #[test]
     fn branch_lifecycle() {
         let mut brain = Brain::new();
-        brain.create_branch("exp", "experiment", &MutationContext::default()).unwrap();
+        brain
+            .create_branch("exp", "experiment", &MutationContext::default())
+            .unwrap();
         brain.switch_branch("exp").unwrap();
         assert_eq!(brain.current_branch, "exp");
 
@@ -1524,12 +1716,32 @@ mod tests {
     fn facts_on_branch_shadows_ancestor() {
         let mut brain = Brain::new();
         brain
-            .assert_fact("f1", "sky-color", "blue", 1.0, "t", None, None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "sky-color",
+                "blue",
+                1.0,
+                "t",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
-        brain.create_branch("exp", "e", &MutationContext::default()).unwrap();
+        brain
+            .create_branch("exp", "e", &MutationContext::default())
+            .unwrap();
         brain.switch_branch("exp").unwrap();
         brain
-            .assert_fact("f1", "sky-color", "red", 1.0, "t", None, None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "sky-color",
+                "red",
+                1.0,
+                "t",
+                None,
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
 
         let on_main = brain.facts_on_branch("main");
@@ -1552,7 +1764,8 @@ mod tests {
                 "temperature=22C",
                 0.95,
                 vec!["env".into()],
-                None, None,
+                None,
+                None,
                 &MutationContext::default(),
             )
             .unwrap();
@@ -1576,12 +1789,32 @@ mod tests {
         {
             let mut brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
             brain
-                .assert_fact("f1", "color", "red", 1.0, "test", None, None, &MutationContext::default())
+                .assert_fact(
+                    "f1",
+                    "color",
+                    "red",
+                    1.0,
+                    "test",
+                    None,
+                    None,
+                    &MutationContext::default(),
+                )
                 .unwrap();
             brain
-                .assert_fact("f2", "color", "blue", 1.0, "test", None, None, &MutationContext::default())
+                .assert_fact(
+                    "f2",
+                    "color",
+                    "blue",
+                    1.0,
+                    "test",
+                    None,
+                    None,
+                    &MutationContext::default(),
+                )
                 .unwrap();
-            brain.retract_fact("f1", &MutationContext::default()).unwrap();
+            brain
+                .retract_fact("f1", &MutationContext::default())
+                .unwrap();
         }
 
         // Reload and verify
@@ -1651,9 +1884,33 @@ mod tests {
     #[test]
     fn transaction_ids_are_monotonic() {
         let mut brain = Brain::new();
-        let tx1 = brain.assert_fact("f1", "a", "b", 1.0, "t", None, None, &MutationContext::default()).unwrap();
-        let tx2 = brain.assert_fact("f2", "c", "d", 1.0, "t", None, None, &MutationContext::default()).unwrap();
-        let tx3 = brain.retract_fact("f1", &MutationContext::default()).unwrap();
+        let tx1 = brain
+            .assert_fact(
+                "f1",
+                "a",
+                "b",
+                1.0,
+                "t",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx2 = brain
+            .assert_fact(
+                "f2",
+                "c",
+                "d",
+                1.0,
+                "t",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx3 = brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap();
         assert!(tx1 < tx2);
         assert!(tx2 < tx3);
     }
@@ -1663,13 +1920,29 @@ mod tests {
         let mut brain = Brain::new();
         // Fact happened on Jan 1st, ended March 1st
         brain
-            .assert_fact("f1", "location", "paris", 1.0, "agent",
-                Some("2024-01-01T00:00:00Z"), Some("2024-03-01T00:00:00Z"), &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "location",
+                "paris",
+                1.0,
+                "agent",
+                Some("2024-01-01T00:00:00Z"),
+                Some("2024-03-01T00:00:00Z"),
+                &MutationContext::default(),
+            )
             .unwrap();
         // Fact happened on March 1st, still valid
         brain
-            .assert_fact("f2", "location", "london", 1.0, "agent",
-                Some("2024-03-01T00:00:00Z"), None, &MutationContext::default())
+            .assert_fact(
+                "f2",
+                "location",
+                "london",
+                1.0,
+                "agent",
+                Some("2024-03-01T00:00:00Z"),
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
 
         // Query: what was valid on Feb 15?
@@ -1692,13 +1965,31 @@ mod tests {
     fn bitemporal_cross_dimensional_query() {
         let mut brain = Brain::new();
         let tx1 = brain
-            .assert_fact("f1", "status", "ok", 1.0, "sensor",
-                Some("2024-01-01T00:00:00Z"), None, &MutationContext::default())
+            .assert_fact(
+                "f1",
+                "status",
+                "ok",
+                1.0,
+                "sensor",
+                Some("2024-01-01T00:00:00Z"),
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
-        let _tx2 = brain.retract_fact("f1", &MutationContext::default()).unwrap();
+        let _tx2 = brain
+            .retract_fact("f1", &MutationContext::default())
+            .unwrap();
         let _tx3 = brain
-            .assert_fact("f2", "status", "degraded", 1.0, "sensor",
-                Some("2024-06-01T00:00:00Z"), None, &MutationContext::default())
+            .assert_fact(
+                "f2",
+                "status",
+                "degraded",
+                1.0,
+                "sensor",
+                Some("2024-06-01T00:00:00Z"),
+                None,
+                &MutationContext::default(),
+            )
             .unwrap();
 
         // At tx1, we only knew about f1. Query valid-at March.

@@ -75,8 +75,14 @@ pub fn extract_inline_rule_body(full_rule: &str) -> Result<String> {
 
 /// Parse head predicate and arity from an inline rule body `((pred ?a ?b) (clause)...)`.
 pub fn parse_rule_head(inline_body: &str) -> Result<(String, usize)> {
-    let head = scan_balanced_from_open(inline_body.trim())
-        .ok_or_else(|| anyhow!("could not find rule head"))?;
+    let trimmed = inline_body.trim();
+    let head_source = if let Some(rest) = trimmed.strip_prefix('(') {
+        rest.trim_start()
+    } else {
+        trimmed
+    };
+    let head =
+        scan_balanced_from_open(head_source).ok_or_else(|| anyhow!("could not find rule head"))?;
     let head_inner = head
         .strip_prefix('(')
         .and_then(|x| x.strip_suffix(')'))
@@ -119,8 +125,7 @@ pub fn parse_rule_line(
 pub fn derived_predicates(rules: &[ParsedRule]) -> Vec<(String, usize)> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     for r in rules {
-        seen
-            .entry(r.head_predicate.clone())
+        seen.entry(r.head_predicate.clone())
             .and_modify(|a: &mut usize| *a = (*a).max(r.head_arity))
             .or_insert(r.head_arity);
     }

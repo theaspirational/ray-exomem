@@ -9,10 +9,13 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::{json, Value};
 
-use crate::brain::{Belief, BeliefStatus, Branch, Fact, Observation, Tx, TxAction};
+use crate::brain::{Belief, BeliefStatus, Brain, Branch, Fact, Observation, Tx, TxAction};
 use crate::datom;
 use crate::ffi;
+use crate::rayfall_parser::{self, DatomRole};
+use crate::system_schema;
 
 // ---------------------------------------------------------------------------
 // RAII wrapper for ray_t*
@@ -69,6 +72,11 @@ impl Drop for RayObj {
 
 pub fn sym_intern(s: &str) -> i64 {
     unsafe { ffi::ray_sym_intern(s.as_ptr() as *const _, s.len()) }
+}
+
+/// Current number of entries in the global rayforce2 symbol table (best-effort diagnostic).
+pub fn sym_count() -> u32 {
+    unsafe { ffi::ray_sym_count() }
 }
 
 pub fn sym_lookup(id: i64) -> Result<String> {
@@ -140,12 +148,13 @@ pub fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let f = std::fs::File::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let f =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = std::io::BufReader::new(f);
     let mut items = Vec::new();
     for (i, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read line {} of {}", i + 1, path.display()))?;
+        let line =
+            line.with_context(|| format!("failed to read line {} of {}", i + 1, path.display()))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -168,7 +177,11 @@ pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
     let c_sym = path_to_cstring(sym_path)?;
     let err = unsafe { ffi::ray_splay_save(table.as_ptr(), c_dir.as_ptr(), c_sym.as_ptr()) };
     if err != ffi::RAY_OK {
-        bail!("ray_splay_save failed for {} (error code {})", dir.display(), err);
+        bail!(
+            "ray_splay_save failed for {} (error code {})",
+            dir.display(),
+            err
+        );
     }
     Ok(())
 }
@@ -177,8 +190,7 @@ pub fn load_table(dir: &Path, sym_path: &Path) -> Result<RayObj> {
     let c_dir = path_to_cstring(dir)?;
     let c_sym = path_to_cstring(sym_path)?;
     let ptr = unsafe { ffi::ray_splay_load(c_dir.as_ptr(), c_sym.as_ptr()) };
-    RayObj::from_raw(ptr)
-        .with_context(|| format!("ray_splay_load failed for {}", dir.display()))
+    RayObj::from_raw(ptr).with_context(|| format!("ray_splay_load failed for {}", dir.display()))
 }
 
 pub fn table_exists(dir: &Path) -> bool {
@@ -190,6 +202,11 @@ pub fn encode_string_datom(value: &str) -> i64 {
     datom::encode_str(sym_id)
 }
 
+pub fn encode_symbol_datom(value: &str) -> i64 {
+    let sym_id = sym_intern(value);
+    datom::encode_sym(sym_id)
+}
+
 pub fn decode_datom_to_string(encoded: i64) -> Result<String> {
     let kind = datom::kind(encoded);
     if kind == datom::KIND_I64 {
@@ -199,16 +216,392 @@ pub fn decode_datom_to_string(encoded: i64) -> Result<String> {
     sym_lookup(payload)
 }
 
-pub fn build_datoms_table(facts: &[&Fact]) -> Result<RayObj> {
+pub fn decode_query_table(table: &RayObj, query_source: &str) -> Result<Value> {
+    let tbl = table.as_ptr();
+    let ncols = unsafe { ffi::ray_table_ncols(tbl) };
+    let nrows = unsafe { ffi::ray_table_nrows(tbl) };
+    let roles = rayfall_parser::datom_query_projection_roles(query_source).unwrap_or_default();
+
+    let mut columns = Vec::with_capacity(ncols as usize);
+    let mut raw_types = Vec::with_capacity(ncols as usize);
+    let mut rows = Vec::with_capacity(nrows as usize);
+
+    for c in 0..ncols {
+        let name_id = unsafe { ffi::ray_table_col_name(tbl, c) };
+        columns.push(sym_lookup(name_id).unwrap_or_else(|_| format!("col{c}")));
+        let col = unsafe { ffi::ray_table_get_col_idx(tbl, c) };
+        if col.is_null() {
+            raw_types.push("unknown".to_string());
+            continue;
+        }
+        let typ = unsafe { ffi::ray_obj_type(col) };
+        raw_types.push(type_name(typ).to_string());
+    }
+
+    for r in 0..nrows {
+        let mut row = Vec::with_capacity(ncols as usize);
+        for c in 0..ncols {
+            let col = unsafe { ffi::ray_table_get_col_idx(tbl, c) };
+            if col.is_null() {
+                row.push(Value::Null);
+                continue;
+            }
+            if unsafe { ffi::ray_vec_is_null(col, r) } {
+                row.push(Value::Null);
+                continue;
+            }
+            let role = roles.get(c as usize).copied().flatten();
+            let typ = unsafe { ffi::ray_obj_type(col) };
+            row.push(decode_query_cell(col, typ, r, role)?);
+        }
+        rows.push(Value::Array(row));
+    }
+
+    let types = infer_semantic_types(&rows, ncols as usize);
+
+    Ok(json!({
+        "columns": columns,
+        "raw_types": raw_types,
+        "types": types,
+        "rows": rows
+    }))
+}
+
+pub fn format_decoded_query_table(decoded: &Value) -> String {
+    let columns = decoded
+        .get("columns")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let types = decoded
+        .get("types")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rows = decoded
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let column_strings: Vec<String> = columns
+        .iter()
+        .map(|v| v.as_str().unwrap_or("?").to_string())
+        .collect();
+    let type_strings: Vec<String> = types
+        .iter()
+        .map(|v| v.as_str().unwrap_or("unknown").to_string())
+        .collect();
+
+    let display_rows: Vec<Vec<String>> = rows
+        .iter()
+        .filter_map(Value::as_array)
+        .map(|row| row.iter().map(display_json_value).collect())
+        .collect();
+
+    format_string_table(&column_strings, &type_strings, &display_rows)
+}
+
+fn type_name(typ: i8) -> &'static str {
+    match typ {
+        ffi::RAY_BOOL => "bool",
+        ffi::RAY_U8 => "u8",
+        ffi::RAY_I16 => "i16",
+        ffi::RAY_I32 => "i32",
+        ffi::RAY_I64 => "i64",
+        ffi::RAY_F32 => "f32",
+        ffi::RAY_F64 => "f64",
+        ffi::RAY_DATE => "date",
+        ffi::RAY_TIME => "time",
+        ffi::RAY_TIMESTAMP => "timestamp",
+        ffi::RAY_SYM => "sym",
+        ffi::RAY_STR => "str",
+        ffi::RAY_TABLE => "table",
+        _ => "unknown",
+    }
+}
+
+fn infer_semantic_types(rows: &[Value], ncols: usize) -> Vec<String> {
+    let mut types = vec!["null".to_string(); ncols];
+    for col_idx in 0..ncols {
+        let mut inferred = "null";
+        for row in rows {
+            let Some(arr) = row.as_array() else {
+                continue;
+            };
+            let Some(value) = arr.get(col_idx) else {
+                continue;
+            };
+            if value.is_null() {
+                continue;
+            }
+            inferred = match value {
+                Value::String(_) => "string",
+                Value::Bool(_) => "bool",
+                Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                Value::Number(_) => "number",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                _ => "unknown",
+            };
+            break;
+        }
+        types[col_idx] = inferred.to_string();
+    }
+    types
+}
+
+fn display_json_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn format_string_table(columns: &[String], types: &[String], rows: &[Vec<String>]) -> String {
+    if columns.is_empty() {
+        return "(empty)".to_string();
+    }
+
+    let ncols = columns.len();
+    let mut widths = vec![0usize; ncols];
+    for i in 0..ncols {
+        widths[i] = columns[i]
+            .len()
+            .max(types.get(i).map(|s| s.len()).unwrap_or(0));
+    }
+    for row in rows {
+        for (i, cell) in row.iter().enumerate().take(ncols) {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+
+    let mut out = String::new();
+    let border = |left: &str, fill: &str, sep: &str, right: &str, widths: &[usize]| -> String {
+        let mut line = String::from(left);
+        for (i, width) in widths.iter().enumerate() {
+            line.push_str(&fill.repeat(*width + 2));
+            line.push_str(if i + 1 == widths.len() { right } else { sep });
+        }
+        line
+    };
+
+    out.push_str(&border("┌", "─", "┬", "┐", &widths));
+    out.push('\n');
+    out.push_str(&format_table_row(columns, &widths));
+    out.push('\n');
+    out.push_str(&format_table_row(types, &widths));
+    out.push('\n');
+    out.push_str(&border("├", "─", "┼", "┤", &widths));
+    out.push('\n');
+    for row in rows {
+        out.push_str(&format_table_row(row, &widths));
+        out.push('\n');
+    }
+    out.push_str(&border("└", "─", "┴", "┘", &widths));
+    out
+}
+
+fn format_table_row(cells: &[String], widths: &[usize]) -> String {
+    let mut line = String::from("│");
+    for (i, width) in widths.iter().enumerate() {
+        let cell = cells.get(i).map(String::as_str).unwrap_or("");
+        line.push(' ');
+        line.push_str(cell);
+        if *width > cell.len() {
+            line.push_str(&" ".repeat(*width - cell.len()));
+        }
+        line.push(' ');
+        line.push('│');
+    }
+    line
+}
+
+fn decode_query_cell(
+    col: *mut ffi::ray_t,
+    typ: i8,
+    row: i64,
+    role: Option<DatomRole>,
+) -> Result<Value> {
+    match typ {
+        ffi::RAY_STR => {
+            let mut len = 0usize;
+            let ptr = unsafe { ffi::ray_str_vec_get(col, row, &mut len as *mut usize) };
+            if ptr.is_null() {
+                Ok(Value::Null)
+            } else {
+                let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+                Ok(json!(String::from_utf8_lossy(bytes).into_owned()))
+            }
+        }
+        ffi::RAY_SYM => {
+            let sym_id = unsafe { ffi::ray_vec_get_sym_id(col, row) };
+            Ok(json!(
+                sym_lookup(sym_id).unwrap_or_else(|_| sym_id.to_string())
+            ))
+        }
+        ffi::RAY_F32 | ffi::RAY_F64 => {
+            let value = unsafe { ffi::ray_vec_get_f64(col, row) };
+            Ok(json!(value))
+        }
+        ffi::RAY_BOOL
+        | ffi::RAY_U8
+        | ffi::RAY_I16
+        | ffi::RAY_I32
+        | ffi::RAY_I64
+        | ffi::RAY_DATE
+        | ffi::RAY_TIME
+        | ffi::RAY_TIMESTAMP => {
+            let value = unsafe { ffi::ray_vec_get_i64(col, row) };
+            decode_i64_query_cell(value, role)
+        }
+        _ => Ok(json!(format!("<{}>", type_name(typ)))),
+    }
+}
+
+fn decode_i64_query_cell(value: i64, role: Option<DatomRole>) -> Result<Value> {
+    match role {
+        Some(DatomRole::Entity) | Some(DatomRole::Value) => {
+            Ok(json!(decode_datom_to_string(value)?))
+        }
+        Some(DatomRole::Attribute) => Ok(json!(sym_lookup(value)?)),
+        None => {
+            if datom::kind(value) != datom::KIND_I64 {
+                Ok(json!(decode_datom_to_string(value)?))
+            } else {
+                Ok(json!(value))
+            }
+        }
+    }
+}
+
+fn tx_entity_id(tx_id: u64) -> String {
+    format!("tx/{}", tx_id)
+}
+
+fn branch_entity_id(branch_id: &str) -> String {
+    format!("branch/{}", branch_id)
+}
+
+fn string_num<T: std::fmt::Display>(value: T) -> String {
+    value.to_string()
+}
+
+fn push_datom_row(
+    e_col: &mut *mut ffi::ray_t,
+    a_col: &mut *mut ffi::ray_t,
+    v_col: &mut *mut ffi::ray_t,
+    entity: &str,
+    attribute: &str,
+    value: &str,
+) -> Result<()> {
+    let entity = encode_string_datom(entity);
+    let attribute = sym_intern(attribute);
+    let value = encode_string_datom(value);
+
+    unsafe {
+        *e_col = ffi::ray_vec_append(*e_col, &entity as *const i64 as *const _);
+        *a_col = ffi::ray_vec_append(*a_col, &attribute as *const i64 as *const _);
+        *v_col = ffi::ray_vec_append(*v_col, &value as *const i64 as *const _);
+    }
+
+    if (*e_col).is_null() || (*a_col).is_null() || (*v_col).is_null() {
+        bail!("failed to append datom row");
+    }
+
+    Ok(())
+}
+
+fn push_datom_row_with_encoded_value(
+    e_col: &mut *mut ffi::ray_t,
+    a_col: &mut *mut ffi::ray_t,
+    v_col: &mut *mut ffi::ray_t,
+    entity: &str,
+    attribute: &str,
+    encoded_value: i64,
+) -> Result<()> {
+    let entity = encode_string_datom(entity);
+    let attribute = sym_intern(attribute);
+
+    unsafe {
+        *e_col = ffi::ray_vec_append(*e_col, &entity as *const i64 as *const _);
+        *a_col = ffi::ray_vec_append(*a_col, &attribute as *const i64 as *const _);
+        *v_col = ffi::ray_vec_append(*v_col, &encoded_value as *const i64 as *const _);
+    }
+
+    if (*e_col).is_null() || (*a_col).is_null() || (*v_col).is_null() {
+        bail!("failed to append datom row");
+    }
+
+    Ok(())
+}
+
+pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
+    let facts = brain.current_facts();
+    let txs = brain.current_transactions();
+    let observations = brain.observations();
+    let beliefs = brain.current_beliefs();
+    let branches = brain.branches();
+    let mut row_count = facts.len();
+    for fact in &facts {
+        row_count += 6; // fact/predicate, fact/value, confidence, provenance, valid_from, created_by
+        if fact.valid_to.is_some() {
+            row_count += 1;
+        }
+        if fact.superseded_by_tx.is_some() {
+            row_count += 1;
+        }
+        if fact.revoked_by_tx.is_some() {
+            row_count += 1;
+        }
+    }
+    for tx in &txs {
+        row_count += 4; // tx/id, tx/time, tx/actor, tx/action
+        row_count += 1; // tx/branch
+        if tx.parent_tx_id.is_some() {
+            row_count += 1;
+        }
+        if tx.session.is_some() {
+            row_count += 1;
+        }
+        row_count += tx.refs.len();
+        if matches!(tx.action, TxAction::Merge) && tx.refs.len() >= 2 {
+            row_count += 2;
+        }
+    }
+    for obs in observations {
+        row_count += 7; // source_type, source_ref, content, created_at, confidence, tx, valid_from
+        if obs.valid_to.is_some() {
+            row_count += 1;
+        }
+        row_count += obs.tags.len();
+    }
+    for belief in &beliefs {
+        row_count += 6; // claim, status, confidence, created_by, valid_from, rationale
+        if belief.valid_to.is_some() {
+            row_count += 1;
+        }
+        row_count += belief.supported_by.len();
+    }
+    for branch in branches {
+        row_count += 4; // id, name, archived, created_by
+        if branch.parent_branch_id.is_some() {
+            row_count += 1;
+        }
+    }
+
     unsafe {
         let tbl = ffi::ray_table_new(3);
         if tbl.is_null() {
             bail!("failed to allocate datoms table");
         }
 
-        let mut e_col = ffi::ray_vec_new(ffi::RAY_I64, facts.len() as i64);
-        let mut a_col = ffi::ray_vec_new(ffi::RAY_SYM, facts.len() as i64);
-        let mut v_col = ffi::ray_vec_new(ffi::RAY_I64, facts.len() as i64);
+        let mut e_col = ffi::ray_vec_new(ffi::RAY_I64, row_count as i64);
+        let mut a_col = ffi::ray_vec_new(ffi::RAY_SYM, row_count as i64);
+        let mut v_col = ffi::ray_vec_new(ffi::RAY_I64, row_count as i64);
         if e_col.is_null() || a_col.is_null() || v_col.is_null() {
             if !e_col.is_null() {
                 ffi::ray_release(e_col);
@@ -224,24 +617,426 @@ pub fn build_datoms_table(facts: &[&Fact]) -> Result<RayObj> {
         }
 
         for fact in facts {
-            let entity = encode_string_datom(&fact.fact_id);
-            let attr = sym_intern(&fact.predicate);
-            let value = encode_string_datom(&fact.value);
-            e_col = ffi::ray_vec_append(e_col, &entity as *const i64 as *const _);
-            a_col = ffi::ray_vec_append(a_col, &attr as *const i64 as *const _);
-            v_col = ffi::ray_vec_append(v_col, &value as *const i64 as *const _);
-            if e_col.is_null() || a_col.is_null() || v_col.is_null() {
-                if !e_col.is_null() {
-                    ffi::ray_release(e_col);
+            if let Err(err) = (|| -> Result<()> {
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    &fact.predicate,
+                    &fact.value,
+                )?;
+                push_datom_row_with_encoded_value(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    system_schema::attrs::fact::PREDICATE,
+                    encode_symbol_datom(&fact.predicate),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    system_schema::attrs::fact::VALUE,
+                    &fact.value,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    system_schema::attrs::fact::CONFIDENCE,
+                    &string_num(fact.confidence),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    system_schema::attrs::fact::PROVENANCE,
+                    &fact.provenance,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    system_schema::attrs::fact::VALID_FROM,
+                    &fact.valid_from,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &fact.fact_id,
+                    system_schema::attrs::fact::CREATED_BY,
+                    &tx_entity_id(fact.created_by_tx),
+                )?;
+                if let Some(valid_to) = fact.valid_to.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &fact.fact_id,
+                        system_schema::attrs::fact::VALID_TO,
+                        valid_to,
+                    )?;
                 }
-                if !a_col.is_null() {
-                    ffi::ray_release(a_col);
+                if let Some(tx_id) = fact.superseded_by_tx {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &fact.fact_id,
+                        system_schema::attrs::fact::SUPERSEDED_BY,
+                        &tx_entity_id(tx_id),
+                    )?;
                 }
-                if !v_col.is_null() {
-                    ffi::ray_release(v_col);
+                if let Some(tx_id) = fact.revoked_by_tx {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &fact.fact_id,
+                        system_schema::attrs::fact::REVOKED_BY,
+                        &tx_entity_id(tx_id),
+                    )?;
                 }
+                Ok(())
+            })() {
+                ffi::ray_release(e_col);
+                ffi::ray_release(a_col);
+                ffi::ray_release(v_col);
                 ffi::ray_release(tbl);
-                bail!("failed to append datom row");
+                return Err(err);
+            }
+        }
+
+        for tx in txs {
+            let tx_entity = tx_entity_id(tx.tx_id);
+            let tx_id_value = tx.tx_id.to_string();
+            let action = tx.action.to_string();
+            if let Err(err) = (|| -> Result<()> {
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::ID,
+                    &tx_id_value,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::TIME,
+                    &tx.tx_time,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::ACTOR,
+                    &tx.actor,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::ACTION,
+                    &action,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::BRANCH,
+                    &tx.branch_id,
+                )?;
+                if let Some(parent_tx_id) = tx.parent_tx_id {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::PARENT,
+                        &tx_entity_id(parent_tx_id),
+                    )?;
+                }
+                if let Some(session) = tx.session.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::SESSION,
+                        session,
+                    )?;
+                }
+                for ref_id in &tx.refs {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::REF,
+                        ref_id,
+                    )?;
+                }
+                if matches!(tx.action, TxAction::Merge) && tx.refs.len() >= 2 {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::MERGE_SOURCE,
+                        &tx.refs[0],
+                    )?;
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::MERGE_TARGET,
+                        &tx.refs[1],
+                    )?;
+                }
+                Ok(())
+            })() {
+                ffi::ray_release(e_col);
+                ffi::ray_release(a_col);
+                ffi::ray_release(v_col);
+                ffi::ray_release(tbl);
+                return Err(err);
+            }
+        }
+
+        for obs in observations {
+            if let Err(err) = (|| -> Result<()> {
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::SOURCE_TYPE,
+                    &obs.source_type,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::SOURCE_REF,
+                    &obs.source_ref,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::CONTENT,
+                    &obs.content,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::CREATED_AT,
+                    &obs.created_at,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::CONFIDENCE,
+                    &string_num(obs.confidence),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::TX,
+                    &tx_entity_id(obs.tx_id),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &obs.obs_id,
+                    system_schema::attrs::observation::VALID_FROM,
+                    &obs.valid_from,
+                )?;
+                if let Some(valid_to) = obs.valid_to.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &obs.obs_id,
+                        system_schema::attrs::observation::VALID_TO,
+                        valid_to,
+                    )?;
+                }
+                for tag in &obs.tags {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &obs.obs_id,
+                        system_schema::attrs::observation::TAG,
+                        tag,
+                    )?;
+                }
+                Ok(())
+            })() {
+                ffi::ray_release(e_col);
+                ffi::ray_release(a_col);
+                ffi::ray_release(v_col);
+                ffi::ray_release(tbl);
+                return Err(err);
+            }
+        }
+
+        for belief in beliefs {
+            if let Err(err) = (|| -> Result<()> {
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &belief.belief_id,
+                    system_schema::attrs::belief::CLAIM_TEXT,
+                    &belief.claim_text,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &belief.belief_id,
+                    system_schema::attrs::belief::STATUS,
+                    &belief.status.to_string(),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &belief.belief_id,
+                    system_schema::attrs::belief::CONFIDENCE,
+                    &string_num(belief.confidence),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &belief.belief_id,
+                    system_schema::attrs::belief::CREATED_BY,
+                    &tx_entity_id(belief.created_by_tx),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &belief.belief_id,
+                    system_schema::attrs::belief::VALID_FROM,
+                    &belief.valid_from,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &belief.belief_id,
+                    system_schema::attrs::belief::RATIONALE,
+                    &belief.rationale,
+                )?;
+                if let Some(valid_to) = belief.valid_to.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &belief.belief_id,
+                        system_schema::attrs::belief::VALID_TO,
+                        valid_to,
+                    )?;
+                }
+                for support in &belief.supported_by {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &belief.belief_id,
+                        system_schema::attrs::belief::SUPPORTS,
+                        support,
+                    )?;
+                }
+                Ok(())
+            })() {
+                ffi::ray_release(e_col);
+                ffi::ray_release(a_col);
+                ffi::ray_release(v_col);
+                ffi::ray_release(tbl);
+                return Err(err);
+            }
+        }
+
+        for branch in branches {
+            let branch_entity = branch_entity_id(&branch.branch_id);
+            if let Err(err) = (|| -> Result<()> {
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &branch_entity,
+                    system_schema::attrs::branch::ID,
+                    &branch.branch_id,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &branch_entity,
+                    system_schema::attrs::branch::NAME,
+                    &branch.name,
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &branch_entity,
+                    system_schema::attrs::branch::ARCHIVED,
+                    if branch.archived { "true" } else { "false" },
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &branch_entity,
+                    system_schema::attrs::branch::CREATED_BY,
+                    &tx_entity_id(branch.created_tx_id),
+                )?;
+                if let Some(parent) = branch.parent_branch_id.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &branch_entity,
+                        system_schema::attrs::branch::PARENT,
+                        &branch_entity_id(parent),
+                    )?;
+                }
+                Ok(())
+            })() {
+                ffi::ray_release(e_col);
+                ffi::ray_release(a_col);
+                ffi::ray_release(v_col);
+                ffi::ray_release(tbl);
+                return Err(err);
             }
         }
 
@@ -404,7 +1199,11 @@ fn read_sym_col(tbl: *mut ffi::ray_t, col_idx: i64, nrows: i64) -> Result<Vec<St
     }
 }
 
-fn read_sym_nullable_col(tbl: *mut ffi::ray_t, col_idx: i64, nrows: i64) -> Result<Vec<Option<String>>> {
+fn read_sym_nullable_col(
+    tbl: *mut ffi::ray_t,
+    col_idx: i64,
+    nrows: i64,
+) -> Result<Vec<Option<String>>> {
     unsafe {
         let col = ffi::ray_table_get_col_idx(tbl, col_idx);
         let mut out = Vec::with_capacity(nrows as usize);
@@ -457,9 +1256,15 @@ pub fn build_fact_table(facts: &[Fact]) -> RayObj {
     let values: Vec<&str> = facts.iter().map(|f| f.value.as_str()).collect();
     let created_ats: Vec<&str> = facts.iter().map(|f| f.created_at.as_str()).collect();
     let created_by: Vec<i64> = facts.iter().map(|f| f.created_by_tx as i64).collect();
-    let superseded: Vec<i64> = facts.iter().map(|f| f.superseded_by_tx.unwrap_or(0) as i64).collect();
+    let superseded: Vec<i64> = facts
+        .iter()
+        .map(|f| f.superseded_by_tx.unwrap_or(0) as i64)
+        .collect();
     let superseded_nulls: Vec<bool> = facts.iter().map(|f| f.superseded_by_tx.is_none()).collect();
-    let revoked: Vec<i64> = facts.iter().map(|f| f.revoked_by_tx.unwrap_or(0) as i64).collect();
+    let revoked: Vec<i64> = facts
+        .iter()
+        .map(|f| f.revoked_by_tx.unwrap_or(0) as i64)
+        .collect();
     let revoked_nulls: Vec<bool> = facts.iter().map(|f| f.revoked_by_tx.is_none()).collect();
     let confidences: Vec<f64> = facts.iter().map(|f| f.confidence).collect();
     let provenances: Vec<&str> = facts.iter().map(|f| f.provenance.as_str()).collect();
@@ -524,13 +1329,19 @@ pub fn build_observation_table(observations: &[Observation]) -> RayObj {
     let mut b = TableBuilder::new(10);
 
     let obs_ids: Vec<&str> = observations.iter().map(|o| o.obs_id.as_str()).collect();
-    let source_types: Vec<&str> = observations.iter().map(|o| o.source_type.as_str()).collect();
+    let source_types: Vec<&str> = observations
+        .iter()
+        .map(|o| o.source_type.as_str())
+        .collect();
     let source_refs: Vec<&str> = observations.iter().map(|o| o.source_ref.as_str()).collect();
     let contents: Vec<&str> = observations.iter().map(|o| o.content.as_str()).collect();
     let created_ats: Vec<&str> = observations.iter().map(|o| o.created_at.as_str()).collect();
     let confidences: Vec<f64> = observations.iter().map(|o| o.confidence).collect();
     let tx_ids: Vec<i64> = observations.iter().map(|o| o.tx_id as i64).collect();
-    let tags: Vec<String> = observations.iter().map(|o| encode_string_vec(&o.tags)).collect();
+    let tags: Vec<String> = observations
+        .iter()
+        .map(|o| encode_string_vec(&o.tags))
+        .collect();
     let tags_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
     let valid_froms: Vec<&str> = observations.iter().map(|o| o.valid_from.as_str()).collect();
     let valid_tos: Vec<Option<&str>> = observations.iter().map(|o| o.valid_to.as_deref()).collect();
@@ -591,13 +1402,19 @@ pub fn build_belief_table(beliefs: &[Belief]) -> RayObj {
 
     let ids: Vec<&str> = beliefs.iter().map(|b| b.belief_id.as_str()).collect();
     let claims: Vec<&str> = beliefs.iter().map(|b| b.claim_text.as_str()).collect();
-    let statuses: Vec<&str> = beliefs.iter().map(|b| match b.status {
-        BeliefStatus::Active => "active",
-        BeliefStatus::Superseded => "superseded",
-        BeliefStatus::Revoked => "revoked",
-    }).collect();
+    let statuses: Vec<&str> = beliefs
+        .iter()
+        .map(|b| match b.status {
+            BeliefStatus::Active => "active",
+            BeliefStatus::Superseded => "superseded",
+            BeliefStatus::Revoked => "revoked",
+        })
+        .collect();
     let confidences: Vec<f64> = beliefs.iter().map(|b| b.confidence).collect();
-    let supported: Vec<String> = beliefs.iter().map(|b| encode_string_vec(&b.supported_by)).collect();
+    let supported: Vec<String> = beliefs
+        .iter()
+        .map(|b| encode_string_vec(&b.supported_by))
+        .collect();
     let supported_refs: Vec<&str> = supported.iter().map(|s| s.as_str()).collect();
     let created_by: Vec<i64> = beliefs.iter().map(|b| b.created_by_tx as i64).collect();
     let valid_froms: Vec<&str> = beliefs.iter().map(|b| b.valid_from.as_str()).collect();
@@ -663,18 +1480,24 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
     let tx_ids: Vec<i64> = txs.iter().map(|t| t.tx_id as i64).collect();
     let times: Vec<&str> = txs.iter().map(|t| t.tx_time.as_str()).collect();
     let actors: Vec<&str> = txs.iter().map(|t| t.actor.as_str()).collect();
-    let actions: Vec<&str> = txs.iter().map(|t| match t.action {
-        TxAction::AssertObservation => "assert-observation",
-        TxAction::AssertFact => "assert-fact",
-        TxAction::RetractFact => "retract-fact",
-        TxAction::ReviseBelief => "revise-belief",
-        TxAction::CreateBranch => "create-branch",
-        TxAction::Merge => "merge",
-    }).collect();
+    let actions: Vec<&str> = txs
+        .iter()
+        .map(|t| match t.action {
+            TxAction::AssertObservation => "assert-observation",
+            TxAction::AssertFact => "assert-fact",
+            TxAction::RetractFact => "retract-fact",
+            TxAction::ReviseBelief => "revise-belief",
+            TxAction::CreateBranch => "create-branch",
+            TxAction::Merge => "merge",
+        })
+        .collect();
     let refs: Vec<String> = txs.iter().map(|t| encode_string_vec(&t.refs)).collect();
     let refs_strs: Vec<&str> = refs.iter().map(|s| s.as_str()).collect();
     let notes: Vec<&str> = txs.iter().map(|t| t.note.as_str()).collect();
-    let parent_ids: Vec<i64> = txs.iter().map(|t| t.parent_tx_id.unwrap_or(0) as i64).collect();
+    let parent_ids: Vec<i64> = txs
+        .iter()
+        .map(|t| t.parent_tx_id.unwrap_or(0) as i64)
+        .collect();
     let parent_nulls: Vec<bool> = txs.iter().map(|t| t.parent_tx_id.is_none()).collect();
     let branches: Vec<&str> = txs.iter().map(|t| t.branch_id.as_str()).collect();
     let sessions: Vec<Option<&str>> = txs.iter().map(|t| t.session.as_deref()).collect();
@@ -746,12 +1569,15 @@ pub fn build_branch_table(branches: &[Branch]) -> RayObj {
 
     let ids: Vec<&str> = branches.iter().map(|b| b.branch_id.as_str()).collect();
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
-    let parents: Vec<Option<&str>> = branches.iter()
+    let parents: Vec<Option<&str>> = branches
+        .iter()
         .map(|b| b.parent_branch_id.as_deref())
         .collect();
     let created: Vec<i64> = branches.iter().map(|b| b.created_tx_id as i64).collect();
-    let archived: Vec<i64> = branches.iter().map(|b| if b.archived { 1 } else { 0 }).collect();
-
+    let archived: Vec<i64> = branches
+        .iter()
+        .map(|b| if b.archived { 1 } else { 0 })
+        .collect();
     b.add_sym_col("branch_id", &ids);
     b.add_sym_col("name", &names);
     b.add_sym_col_nullable("parent_branch_id", &parents);

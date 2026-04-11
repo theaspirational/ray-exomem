@@ -3,10 +3,12 @@ import { env } from '$env/dynamic/public';
 
 import type {
 	ExomemClusterSummary,
+	FactDetail,
 	ExomemGraphResponse,
 	ExomemLoggedEvent,
 	ExomemSchemaResponse,
 	ExomemStatus,
+	EvalResponse,
 	FactEntry,
 	ExomEntry,
 	RuleEntry
@@ -25,7 +27,7 @@ const DEFAULT_FETCH_TIMEOUT_MS = 60_000;
  * Browsers often reject aborted fetch with `TypeError: Failed to fetch` (not `AbortError`) — use
  * `signal.aborted` in catch, not only `e.name === 'AbortError'`.
  */
-function signalWithTimeout(ms: number, outer?: AbortSignal): {
+function signalWithTimeout(ms: number, outer?: AbortSignal | null): {
 	signal: AbortSignal;
 	clear: () => void;
 } {
@@ -121,7 +123,7 @@ export class ExomemLiveState {
 
 async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	let res: Response;
-	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS, init?.signal);
+	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS, init?.signal ?? null);
 	try {
 		res = await fetch(endpoint(path), { ...init, signal });
 		clear();
@@ -148,13 +150,20 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json();
 }
 
+const MUTATION_HEADERS: Record<string, string> = {
+	'Content-Type': 'application/json',
+	'X-Actor': 'ui',
+	'X-Session': 'exomem-web',
+	'X-Model': 'svelte'
+};
+
 async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	let res: Response;
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
 	try {
 		res = await fetch(endpoint(path), {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
+			headers: MUTATION_HEADERS,
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 			signal
 		});
@@ -171,13 +180,20 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	return res.json();
 }
 
+const EVAL_HEADERS: Record<string, string> = {
+	'Content-Type': 'text/plain',
+	'X-Actor': 'ui',
+	'X-Session': 'exomem-web',
+	'X-Model': 'svelte'
+};
+
 async function postText<T>(path: string, body: string): Promise<T> {
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
 	let res: Response;
 	try {
 		res = await fetch(endpoint(path), {
 			method: 'POST',
-			headers: { 'Content-Type': 'text/plain' },
+			headers: EVAL_HEADERS,
 			body,
 			signal
 		});
@@ -197,6 +213,12 @@ async function postText<T>(path: string, body: string): Promise<T> {
 
 export function fetchExomemStatus(exom = DEFAULT_EXOM): Promise<ExomemStatus> {
 	return readJson<ExomemStatus>(`api/status?exom=${encodeURIComponent(exom)}`);
+}
+
+export function fetchFactDetail(factId: string, exom = DEFAULT_EXOM): Promise<FactDetail> {
+	return readJson<FactDetail>(
+		`api/facts/${encodeURIComponent(factId)}?exom=${encodeURIComponent(exom)}`
+	);
 }
 
 export function fetchExomemSchema(
@@ -303,18 +325,10 @@ export function factoryReset(): Promise<{ ok: boolean; removed_exoms: string[]; 
 }
 
 export function retractFact(
-	predicate: string,
-	terms: unknown[],
+	factId: string,
 	exom = DEFAULT_EXOM
-): Promise<{ ok: boolean; retracted: number }> {
-	return postAction('api/actions/retract', { predicate, terms, exom });
-}
-
-export function dropRelation(
-	relation: string,
-	exom = DEFAULT_EXOM
-): Promise<{ ok: boolean; relation: string; tuples_removed: number }> {
-	return postAction('api/actions/drop-relation', { relation, exom });
+): Promise<{ ok: boolean; output?: string }> {
+	return retractFactById(factId, exom);
 }
 
 export function triggerEvaluate(exom = DEFAULT_EXOM): Promise<{
@@ -369,8 +383,15 @@ export async function exportBackupText(exom = DEFAULT_EXOM, signal?: AbortSignal
 export function importBackup(
 	source: string,
 	exom = DEFAULT_EXOM
-): Promise<{ ok: boolean; facts_added: number; rules_added: number; total_tuples: number }> {
-	return postText(`api/actions/import?exom=${encodeURIComponent(exom)}`, source);
+): Promise<EvalResponse> {
+	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, source);
+}
+
+export function runRayfall(
+	source: string,
+	exom = DEFAULT_EXOM
+): Promise<EvalResponse> {
+	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, source);
 }
 
 // ---------------------------------------------------------------------------
@@ -491,21 +512,21 @@ export function fetchExplain(
 }
 
 // ---------------------------------------------------------------------------
-// Fact CRUD — uses import/retract endpoints
+// Fact CRUD — Rayfall-first with structured bitemporal helper for valid-time
 // ---------------------------------------------------------------------------
 
-/**
- * Format a fact as a Rayfall s-expression for import.
- */
-export function formatFact(predicate: string, terms: string[]): string {
-	const value = terms.map((t) => `"${t.replace(/"/g, '\\"')}"`).join(' ');
-	return `(assert-fact "${predicate.replace(/"/g, '\\"')}" ${value})`;
+/** Rayfall line for eval/import: matches server export shape. */
+export function formatAssertFactLine(f: FactEntry, exom = DEFAULT_EXOM): string {
+	const fid = f.factId ?? f.predicate;
+	const val = f.terms.join(', ');
+	return `(assert-fact ${exom} "${fid.replace(/"/g, '\\"')}" '${f.predicate.replace(/'/g, "\\'")} "${val.replace(/"/g, '\\"')}")`;
 }
 
 export function assertFact(
 	predicate: string,
 	terms: string[],
 	options?: {
+		factId?: string;
 		validFrom?: string;
 		validTo?: string;
 		confidence?: number;
@@ -513,18 +534,36 @@ export function assertFact(
 	},
 	exom = DEFAULT_EXOM
 ): Promise<{ ok: boolean; fact_id?: string }> {
-	return postAction(`api/actions/assert-fact?exom=${encodeURIComponent(exom)}`, {
-		predicate,
-		value: terms.join(', '),
-		confidence: options?.confidence ?? 1.0,
-		provenance: options?.source ?? 'ui',
-		valid_from: options?.validFrom,
-		valid_to: options?.validTo
-	});
+	const fact_id = options?.factId?.trim() || (terms.length >= 2 ? terms[0]! : predicate);
+	const value = terms.length >= 2 ? terms.slice(1).join(', ') : (terms[0] ?? '');
+	if (options?.validFrom || options?.validTo) {
+		return postAction(`api/actions/assert-fact?exom=${encodeURIComponent(exom)}`, {
+			exom,
+			fact_id,
+			predicate,
+			value,
+			confidence: options?.confidence ?? 1.0,
+			source: options?.source ?? 'ui',
+			valid_from: options?.validFrom,
+			valid_to: options?.validTo
+		});
+	}
+	const line = formatAssertFactLine(
+		{
+			factId: fact_id,
+			predicate,
+			terms: [value],
+			kind: 'base',
+			confidence: options?.confidence ?? null,
+			source: options?.source ?? null
+		},
+		exom
+	);
+	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, line);
 }
 
 export async function updateFact(
-	oldFact: Pick<FactEntry, 'predicate' | 'terms'>,
+	oldFact: Pick<FactEntry, 'predicate' | 'terms' | 'factId'>,
 	newFact: {
 		predicate: string;
 		terms: string[];
@@ -532,9 +571,35 @@ export async function updateFact(
 		validTo?: string;
 	},
 	exom = DEFAULT_EXOM
-): Promise<{ ok: boolean; facts_added?: number; rules_added?: number; total_tuples?: number }> {
-	await retractFact(oldFact.predicate, oldFact.terms, exom);
-	return assertFact(newFact.predicate, newFact.terms, { validFrom: newFact.validFrom, validTo: newFact.validTo }, exom);
+): Promise<{ ok: boolean; fact_id?: string }> {
+	if (!oldFact.factId) {
+		throw new Error('Cannot edit a fact without factId (reload facts from the server)');
+	}
+	await retractFact(oldFact.factId, exom);
+	return assertFact(
+		newFact.predicate,
+		newFact.terms,
+		{
+			validFrom: newFact.validFrom,
+			validTo: newFact.validTo
+		},
+		exom
+	);
+}
+
+async function retractFactById(
+	factId: string,
+	exom = DEFAULT_EXOM
+): Promise<{ ok: boolean; output?: string }> {
+	const detail = await fetchFactDetail(factId, exom);
+	const tuple = detail.fact?.tuple;
+	if (!Array.isArray(tuple) || tuple.length < 3) {
+		throw new Error(`Fact ${factId} does not have a retractable tuple shape`);
+	}
+	const predicate = String(tuple[1] ?? '');
+	const value = String(tuple[2] ?? '');
+	const ray = `(retract-fact ${exom} "${factId.replace(/"/g, '\\"')}" '${predicate.replace(/'/g, "\\'")} "${value.replace(/"/g, '\\"')}")`;
+	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, ray);
 }
 
 /**
@@ -543,7 +608,7 @@ export async function updateFact(
 export function addRule(
 	ruleSource: string,
 	exom = DEFAULT_EXOM
-): Promise<{ ok: boolean; facts_added: number; rules_added: number; total_tuples: number }> {
+): Promise<{ ok: boolean; output?: string }> {
 	return importBackup(ruleSource, exom);
 }
 
@@ -651,13 +716,37 @@ export function parseFactsFromExport(text: string): FactEntry[] {
 
 	for (const line of lines) {
 		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith(';;') && !trimmed.includes('assert-fact')) continue;
+		if (!trimmed || (trimmed.startsWith(';;') && !trimmed.includes('assert-fact'))) continue;
 
-		// Match: (assert-fact ...) possibly followed by ;; @valid[from, to]
+		// Full form: (assert-fact exom "fact_id" 'predicate "value")
+		const full = trimmed.match(
+			/^\(assert-fact\s+\S+\s+"((?:[^"\\]|\\.)*)"\s+'(\S+)\s+"((?:[^"\\]|\\.)*)"/
+		);
+		if (full) {
+			let validFrom: string | null = null;
+			let validTo: string | null = null;
+			const validMatch = trimmed.match(/;;\s*@valid\[([^,]+),\s*([^\]]+)\]/);
+			if (validMatch) {
+				validFrom = validMatch[1].trim();
+				const to = validMatch[2].trim();
+				validTo = to === 'inf' ? null : to;
+			}
+			facts.push({
+				factId: full[1].replace(/\\"/g, '"'),
+				predicate: full[2],
+				terms: [full[3].replace(/\\"/g, '"')],
+				kind: 'base',
+				confidence: null,
+				source: null,
+				validFrom,
+				validTo
+			});
+			continue;
+		}
+
 		const factMatch = trimmed.match(/^\(assert-fact\s+(.*)\)/);
 		if (factMatch) {
 			const argsStr = factMatch[1];
-			// Extract all double-quoted strings
 			const strings: string[] = [];
 			const re = /"((?:[^"\\]|\\.)*)"/g;
 			let m;
@@ -665,7 +754,6 @@ export function parseFactsFromExport(text: string): FactEntry[] {
 				strings.push(m[1].replace(/\\"/g, '"'));
 			}
 			if (strings.length >= 2) {
-				// Parse validity annotation: ;; @valid[2024-01-01T00:00:00Z, inf]
 				let validFrom: string | null = null;
 				let validTo: string | null = null;
 				const validMatch = trimmed.match(/;;\s*@valid\[([^,]+),\s*([^\]]+)\]/);
@@ -720,11 +808,118 @@ export interface MergeBranchResult {
 	tx_id: number;
 }
 
+export interface BranchViewRow {
+	branch_entity: string;
+	branch_id: string;
+	name: string;
+	archived: string;
+	created_tx: string;
+}
+
+export interface MergeViewRow {
+	tx: string;
+	source: string;
+	target: string;
+	actor: string;
+	when: string;
+}
+
+export interface TxViewRow {
+	tx: string;
+	id: string;
+	actor: string;
+	action: string;
+	when: string;
+	branch: string;
+}
+
+function decodeStringCell(value: unknown): string {
+	return typeof value === 'string' ? value : String(value ?? '');
+}
+
+export async function fetchBranchRows(exom = DEFAULT_EXOM): Promise<BranchViewRow[]> {
+	const result = await runRayfall(
+		`(query ${exom} (find ?branch ?id ?name ?archived ?createdTx) (where (branch-row ?branch ?id ?name ?archived ?createdTx)))`,
+		exom
+	);
+	return (result.rows ?? [])
+		.filter((row) => row.length >= 5)
+		.map((row) => ({
+			branch_entity: decodeStringCell(row[0]),
+			branch_id: decodeStringCell(row[1]),
+			name: decodeStringCell(row[2]),
+			archived: decodeStringCell(row[3]),
+			created_tx: decodeStringCell(row[4])
+		}));
+}
+
+export async function fetchMergeRows(exom = DEFAULT_EXOM): Promise<MergeViewRow[]> {
+	const result = await runRayfall(
+		`(query ${exom} (find ?tx ?source ?target ?actor ?when) (where (merge-row ?tx ?source ?target ?actor ?when)))`,
+		exom
+	);
+	return (result.rows ?? [])
+		.filter((row) => row.length >= 5)
+		.map((row) => ({
+			tx: decodeStringCell(row[0]),
+			source: decodeStringCell(row[1]),
+			target: decodeStringCell(row[2]),
+			actor: decodeStringCell(row[3]),
+			when: decodeStringCell(row[4])
+		}));
+}
+
+export async function fetchTxRows(exom = DEFAULT_EXOM): Promise<TxViewRow[]> {
+	const result = await runRayfall(
+		`(query ${exom} (find ?tx ?id ?actor ?action ?when ?branch) (where (tx-row ?tx ?id ?actor ?action ?when ?branch)))`,
+		exom
+	);
+	return (result.rows ?? [])
+		.filter((row) => row.length >= 6)
+		.map((row) => ({
+			tx: decodeStringCell(row[0]),
+			id: decodeStringCell(row[1]),
+			actor: decodeStringCell(row[2]),
+			action: decodeStringCell(row[3]),
+			when: decodeStringCell(row[4]),
+			branch: decodeStringCell(row[5])
+		}));
+}
+
+export interface FactAttributeRow {
+	attribute: string;
+	value: string;
+}
+
+export async function fetchFactAttributeRows(
+	factId: string,
+	exom = DEFAULT_EXOM
+): Promise<FactAttributeRow[]> {
+	const result = await runRayfall(
+		`(query ${exom} (find ?fact ?a ?v) (where (fact-row ?fact ?pred ?value) (?fact ?a ?v)))`,
+		exom
+	);
+	return (result.rows ?? [])
+		.filter((row) => row.length >= 3 && decodeStringCell(row[0]) === factId)
+		.map((row) => ({
+			attribute: decodeStringCell(row[1]),
+			value: decodeStringCell(row[2])
+		}));
+}
+
 async function deleteRequest(path: string): Promise<void> {
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
 	let res: Response;
 	try {
-		res = await fetch(endpoint(path), { method: 'DELETE', signal });
+		res = await fetch(endpoint(path), {
+			method: 'DELETE',
+			headers: {
+				'X-Actor': 'ui',
+				'X-Session': 'exomem-web',
+				'X-Model': 'svelte'
+			},
+			signal
+		});
 		clear();
 	} catch (e) {
 		clear();
@@ -753,7 +948,10 @@ export async function createBranch(
 }
 
 export async function switchBranch(branchId: string, exom = DEFAULT_EXOM): Promise<void> {
-	await postText(`api/branches/${encodeURIComponent(branchId)}/switch?exom=${encodeURIComponent(exom)}`, '');
+	await postText(
+		`api/branches/${encodeURIComponent(branchId)}/switch?exom=${encodeURIComponent(exom)}`,
+		''
+	);
 }
 
 export async function fetchBranchDiff(

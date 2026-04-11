@@ -16,7 +16,10 @@ fn is_rayfall_symbol_name(name: &str) -> bool {
     }
     chars.all(|ch| {
         ch.is_ascii_alphanumeric()
-            || matches!(ch, '_' | '.' | '-' | '!' | '?' | '+' | '*' | '/' | '%' | '<' | '>' | '=' | '&' | '|')
+            || matches!(
+                ch,
+                '_' | '.' | '-' | '!' | '?' | '+' | '*' | '/' | '%' | '<' | '>' | '=' | '&' | '|'
+            )
     })
 }
 
@@ -37,7 +40,10 @@ impl ExomDir {
         std::fs::create_dir_all(root.join("exoms"))
             .with_context(|| format!("failed to create {}/exoms", root.display()))?;
 
-        let mut dir = Self { root, recovery_mode: false };
+        let mut dir = Self {
+            root,
+            recovery_mode: false,
+        };
 
         if !storage::sym_load(&dir.sym_path())? {
             eprintln!(

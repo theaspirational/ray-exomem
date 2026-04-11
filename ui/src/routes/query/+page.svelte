@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import {
 		Play,
 		Trash2,
@@ -15,8 +16,9 @@
 
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
-	import { importBackup, exportBackupText } from '$lib/exomem.svelte';
+	import { exportBackupText, runRayfall } from '$lib/exomem.svelte';
 	import { app } from '$lib/stores.svelte';
+	import type { EvalResponse } from '$lib/types';
 
 	// ---------------------------------------------------------------------------
 	// State
@@ -24,17 +26,13 @@
 
 	let queryText = $state('');
 	let executing = $state(false);
-	let result = $state<{
-		ok: boolean;
-		facts_added: number;
-		rules_added: number;
-		total_tuples: number;
-	} | null>(null);
+	let result = $state<EvalResponse | null>(null);
 	let error = $state<string | null>(null);
 	let history = $state<Array<{ text: string; timestamp: string; success: boolean }>>([]);
 	let exomPreview = $state('');
 	let showPreview = $state(false);
 	let loadingPreview = $state(false);
+	let appliedDraft = $state<string | null>(null);
 
 	const hasQuery = $derived(queryText.trim().length > 0);
 	const historyCount = $derived(history.length);
@@ -43,20 +41,31 @@
 	// Example queries
 	// ---------------------------------------------------------------------------
 
-	const examples = [
+	const examples = $derived([
 		{
-			label: 'Assert a fact',
-			text: `(assert-fact ${app.selectedExom} "bob" 'works_at "acme")`
+			label: 'Logical facts',
+			text: `(query ${app.selectedExom} (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))`
 		},
 		{
-			label: 'Add a rule',
-			text: `(rule ${app.selectedExom} (colleague ?x ?y) (works_at ?x ?z) (works_at ?y ?z))`
+			label: 'Fact with tx',
+			text: `(query ${app.selectedExom} (find ?fact ?pred ?value ?prov ?tx ?actor ?when) (where (fact-row ?fact ?pred ?value) (?fact 'fact/provenance ?prov) (?fact 'fact/created_by ?tx) (?tx 'tx/actor ?actor) (?tx 'tx/time ?when)))`
 		},
 		{
-			label: 'Arithmetic',
-			text: '(+ 21 21)'
+			label: 'Built-in views',
+			text: `(query ${app.selectedExom} (find ?tx ?id ?actor ?action ?when ?branch) (where (tx-row ?tx ?id ?actor ?action ?when ?branch)))`
 		}
-	];
+	]);
+
+	const resultHasTable = $derived(
+		!!result?.columns && !!result?.rows && result.columns.length > 0
+	);
+
+	$effect(() => {
+		const draft = page.url.searchParams.get('draft');
+		if (!draft || draft === appliedDraft) return;
+		queryText = draft;
+		appliedDraft = draft;
+	});
 
 	// ---------------------------------------------------------------------------
 	// Actions
@@ -71,7 +80,7 @@
 		result = null;
 
 		try {
-			const res = await importBackup(text, app.selectedExom);
+			const res = await runRayfall(text, app.selectedExom);
 			result = res;
 			history = [
 				{ text, timestamp: new Date().toLocaleTimeString(), success: true },
@@ -134,6 +143,12 @@
 			execute();
 		}
 	}
+
+	function displayCell(value: unknown): string {
+		if (value == null) return 'null';
+		if (typeof value === 'string') return value;
+		return JSON.stringify(value);
+	}
 </script>
 
 <div class="flex h-full flex-col lg:flex-row">
@@ -169,7 +184,7 @@
 				<textarea
 					class="w-full resize-none rounded-lg border border-border/60 bg-muted/30 px-4 py-3.5 font-mono text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/30"
 					rows="10"
-					placeholder=";; Rayfall list-style syntax&#10;(assert-fact main &quot;alice&quot; 'role &quot;engineer&quot;)&#10;&#10;;; Add a rule&#10;(rule main (colleague ?x ?y) (role ?x ?r) (role ?y ?r))"
+					placeholder=";; Datalog-native Rayfall&#10;(query main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))&#10;&#10;;; Assert a durable fact&#10;(assert-fact main &quot;user/editor&quot; 'preference &quot;vim&quot;)"
 					bind:value={queryText}
 					onkeydown={handleKeydown}
 					disabled={executing}
@@ -209,7 +224,7 @@
 			</div>
 
 			<p class="text-[0.65rem] text-muted-foreground/60">
-				Press <kbd class="rounded border border-border/60 bg-muted/50 px-1 py-0.5 font-mono text-[0.6rem]">Ctrl+Enter</kbd> to execute
+				Press <kbd class="rounded border border-border/60 bg-muted/50 px-1 py-0.5 font-mono text-[0.6rem]">Ctrl+Enter</kbd> to execute. Query results return decoded rows when the engine yields a table.
 			</p>
 		</section>
 
@@ -220,13 +235,49 @@
 					<CircleCheck class="size-4 shrink-0 text-fact-base" />
 					<div class="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm">
 						<span class="font-medium text-fact-base">Executed successfully</span>
-						<div class="flex items-center gap-3 text-xs text-muted-foreground">
-							<span>{result.facts_added} facts added</span>
-							<span>{result.rules_added} rules added</span>
-							<span>{result.total_tuples} total tuples</span>
-						</div>
+						{#if result.mutation_count != null}
+							<Badge variant="outline" class="h-5 px-2 text-[0.65rem]">mutations {result.mutation_count}</Badge>
+						{/if}
+						{#if result.columns}
+							<Badge variant="secondary" class="h-5 px-2 text-[0.65rem]">{result.rows?.length ?? 0} rows</Badge>
+						{/if}
 					</div>
 				</div>
+
+				{#if resultHasTable}
+					<div class="overflow-x-auto rounded-lg border border-border/60">
+						<table class="w-full text-sm">
+							<thead>
+								<tr class="border-b border-border/40 bg-muted/30">
+									{#each result.columns ?? [] as col, i (col)}
+										<th class="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+											<div class="flex flex-col gap-0.5">
+												<span class="font-mono text-foreground">{col}</span>
+												<span class="text-[0.65rem]">{result.types?.[i] ?? result.raw_types?.[i] ?? 'value'}</span>
+											</div>
+										</th>
+									{/each}
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-border/30">
+								{#each result.rows ?? [] as row, idx (idx)}
+									<tr class="hover:bg-muted/20">
+										{#each row as cell, cellIdx (cellIdx)}
+											<td class="px-3 py-2 align-top font-mono text-xs text-foreground/90">{displayCell(cell)}</td>
+										{/each}
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+
+				{#if result.output}
+					<div class="rounded-lg border border-border/60 bg-muted/20">
+						<div class="border-b border-border/40 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Engine output</div>
+						<pre class="max-h-48 overflow-auto px-4 py-3 font-mono text-xs leading-relaxed text-muted-foreground">{result.output}</pre>
+					</div>
+				{/if}
 			</section>
 		{/if}
 

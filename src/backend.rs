@@ -36,7 +36,7 @@ impl RayforceEngine {
         }
     }
 
-    pub fn eval(&self, source: &str) -> Result<String> {
+    pub fn eval_raw(&self, source: &str) -> Result<RayObj> {
         let c_source = CString::new(source).context("source contains interior NUL byte")?;
 
         unsafe {
@@ -56,9 +56,14 @@ impl RayforceEngine {
                 return Err(anyhow!("ray_eval_str returned a null result"));
             }
 
-            let formatted = ffi::ray_fmt(raw, 2);
+            RayObj::from_raw(raw)
+        }
+    }
+
+    pub fn format_obj(&self, obj: &RayObj) -> Result<String> {
+        unsafe {
+            let formatted = ffi::ray_fmt(obj.as_ptr(), 2);
             if formatted.is_null() {
-                ffi::ray_release(raw);
                 return Err(anyhow!("ray_fmt returned a null result"));
             }
 
@@ -72,8 +77,6 @@ impl RayforceEngine {
             };
 
             ffi::ray_release(formatted);
-            ffi::ray_release(raw);
-
             let trimmed = output.trim_start();
             if trimmed
                 .get(..6)
@@ -85,6 +88,11 @@ impl RayforceEngine {
 
             Ok(output)
         }
+    }
+
+    pub fn eval(&self, source: &str) -> Result<String> {
+        let raw = self.eval_raw(source)?;
+        self.format_obj(&raw)
     }
 
     pub fn bind_named_db(&self, sym_id: i64, table: &RayObj) -> Result<()> {
@@ -116,7 +124,10 @@ impl RayforceEngine {
         }
         let err = unsafe { ffi::ray_lang_init() };
         if err != ffi::RAY_OK {
-            return Err(anyhow!("ray_lang_init failed after ray_env_destroy (code {})", err));
+            return Err(anyhow!(
+                "ray_lang_init failed after ray_env_destroy (code {})",
+                err
+            ));
         }
         Ok(())
     }

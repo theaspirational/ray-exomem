@@ -21,6 +21,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import {
 		createExom,
+		fetchExomemStatus,
 		manageExom,
 		mergeExoms,
 		exportBackup,
@@ -28,7 +29,7 @@
 		factoryReset
 	} from '$lib/exomem.svelte';
 	import { app } from '$lib/stores.svelte';
-	import type { ExomEntry } from '$lib/types';
+	import type { ExomEntry, ExomemStatus } from '$lib/types';
 
 	// ---------------------------------------------------------------------------
 	// State
@@ -76,6 +77,7 @@
 
 	// Busy states for individual actions
 	let busyAction = $state<string | null>(null);
+	let statusByExom = $state<Record<string, ExomemStatus>>({});
 
 	// ---------------------------------------------------------------------------
 	// Derived
@@ -83,6 +85,10 @@
 
 	const activeExoms = $derived(app.exoms.filter((e) => !e.archived));
 	const archivedExoms = $derived(app.exoms.filter((e) => e.archived));
+	const visibleFactTotal = $derived(
+		Object.values(statusByExom).reduce((sum, status) => sum + status.stats.facts, 0)
+	);
+	const selectedStatus = $derived(statusByExom[app.selectedExom] ?? null);
 
 	// ---------------------------------------------------------------------------
 	// Helpers
@@ -110,6 +116,25 @@
 		}, 4000);
 	}
 
+	async function refreshStatuses() {
+		const names = app.exoms.map((exom) => exom.name);
+		const entries = await Promise.all(
+			names.map(async (name) => {
+				try {
+					const status = await fetchExomemStatus(name);
+					return [name, status] as const;
+				} catch {
+					return [name, null] as const;
+				}
+			})
+		);
+		const next: Record<string, ExomemStatus> = {};
+		for (const [name, status] of entries) {
+			if (status) next[name] = status;
+		}
+		statusByExom = next;
+	}
+
 	// ---------------------------------------------------------------------------
 	// Actions
 	// ---------------------------------------------------------------------------
@@ -120,6 +145,7 @@
 		try {
 			await createExom(createName.trim(), createDescription.trim(), createCopyFrom || undefined);
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Exom "${createName.trim()}" created`, 'success');
 			createName = '';
 			createDescription = '';
@@ -144,6 +170,7 @@
 				app.switchExom(renameValue.trim());
 			}
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Renamed "${oldName}" to "${renameValue.trim()}"`, 'success');
 			renamingExom = null;
 		} catch (e) {
@@ -176,6 +203,7 @@
 				}
 			}
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Archived "${name}"`, 'success');
 		} catch (e) {
 			flash(e instanceof Error ? e.message : String(e), 'error');
@@ -189,6 +217,7 @@
 		try {
 			await manageExom(name, 'unarchive');
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Restored "${name}"`, 'success');
 		} catch (e) {
 			flash(e instanceof Error ? e.message : String(e), 'error');
@@ -208,6 +237,7 @@
 				}
 			}
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Deleted "${name}"`, 'success');
 			confirmDeleteExom = null;
 		} catch (e) {
@@ -223,6 +253,7 @@
 		try {
 			await mergeExoms(mergeSources, mergeTarget.trim(), mergeDescription.trim(), mergeStrategy);
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Merged into "${mergeTarget.trim()}"`, 'success');
 			mergeSources = [];
 			mergeTarget = '';
@@ -249,6 +280,7 @@
 		try {
 			await wipeExom(app.selectedExom);
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Wiped "${app.selectedExom}" — all data and history removed`, 'success');
 			confirmClear = false;
 		} catch (e) {
@@ -263,6 +295,7 @@
 		try {
 			await wipeExom(name);
 			await app.refreshExoms();
+			await refreshStatuses();
 			flash(`Wiped "${name}" — all data and history removed`, 'success');
 			confirmClearExom = null;
 		} catch (e) {
@@ -277,6 +310,7 @@
 		try {
 			const result = await factoryReset();
 			await app.refreshExoms();
+			await refreshStatuses();
 			app.switchExom('main');
 			flash(`Factory reset complete — removed ${result.removed_exoms.length} exom(s)`, 'success');
 			confirmFactoryReset = false;
@@ -297,7 +331,14 @@
 	// ---------------------------------------------------------------------------
 
 	onMount(() => {
-		app.refreshExoms();
+		void app.refreshExoms().then(() => refreshStatuses());
+	});
+
+	$effect(() => {
+		app.exoms;
+		if (app.exoms.length > 0) {
+			void refreshStatuses();
+		}
 	});
 </script>
 
@@ -343,6 +384,29 @@
 				<Plus class="size-4" />
 				New Exom
 			</Button>
+		</div>
+	</div>
+
+	<div class="grid gap-3 xl:grid-cols-4">
+		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Active exoms</p>
+			<p class="mt-1 text-lg font-semibold">{activeExoms.length}</p>
+			<p class="mt-1 text-xs text-muted-foreground">Non-archived knowledge spaces.</p>
+		</div>
+		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Visible facts</p>
+			<p class="mt-1 text-lg font-semibold">{visibleFactTotal}</p>
+			<p class="mt-1 text-xs text-muted-foreground">Summed visible fact counts across loaded exoms.</p>
+		</div>
+		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Selected branch</p>
+			<p class="mt-1 font-mono text-lg font-semibold">{selectedStatus?.current_branch ?? 'main'}</p>
+			<p class="mt-1 text-xs text-muted-foreground">Current branch for <span class="font-mono">{app.selectedExom}</span>.</p>
+		</div>
+		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">User predicates</p>
+			<p class="mt-1 text-lg font-semibold">{selectedStatus?.schema?.user_predicates.length ?? 0}</p>
+			<p class="mt-1 text-xs text-muted-foreground">Directly asserted predicate vocabulary in the selected exom.</p>
 		</div>
 	</div>
 
@@ -561,10 +625,20 @@
 
 				<!-- Description + date -->
 				{#if renamingExom !== exom.name}
-					<div class="flex items-center justify-between text-xs text-muted-foreground">
-						<span class="truncate">{exom.description || 'No description'}</span>
-						<span class="shrink-0">{formatDate(exom.created_at)}</span>
-					</div>
+						<div class="flex items-center justify-between text-xs text-muted-foreground">
+							<span class="truncate">{exom.description || 'No description'}</span>
+							<span class="shrink-0">{formatDate(exom.created_at)}</span>
+						</div>
+
+						{#if statusByExom[exom.name]}
+							{@const status = statusByExom[exom.name]}
+							<div class="flex flex-wrap gap-1.5">
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px]">{status.stats.facts} facts</Badge>
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px]">{status.schema?.user_predicates.length ?? 0} predicates</Badge>
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px]">branch {status.current_branch ?? 'main'}</Badge>
+								<Badge variant="outline" class="h-4 px-1.5 text-[10px]">{status.stats.sym_entries ?? 0} symbols</Badge>
+							</div>
+						{/if}
 				{/if}
 
 				<!-- Delete confirmation -->

@@ -2,10 +2,15 @@
 	import { onMount } from 'svelte';
 	import {
 		Activity,
+		Check,
 		CircleAlert,
+		Copy,
+		Cpu,
 		Database,
 		GitBranchPlus,
+		KeyRound,
 		Play,
+		Route,
 		RefreshCw
 	} from '@lucide/svelte';
 
@@ -16,6 +21,7 @@
 		fetchExomemLogs,
 		fetchExomemSchema,
 		fetchExomemStatus,
+		fetchTxRows,
 		triggerEvaluate
 	} from '$lib/exomem.svelte';
 	import { app } from '$lib/stores.svelte';
@@ -23,17 +29,21 @@
 		ExomemClusterSummary,
 		ExomemLoggedEvent,
 		ExomemSchemaResponse,
-		ExomemStatus
+		ExomemStatus,
 	} from '$lib/types';
+	import type { TxViewRow } from '$lib/exomem.svelte';
 
 	let status = $state<ExomemStatus | null>(null);
 	let schema = $state<ExomemSchemaResponse | null>(null);
 	let clusters = $state<ExomemClusterSummary[]>([]);
 	let logs = $state<ExomemLoggedEvent[]>([]);
+	let txRows = $state<TxViewRow[]>([]);
 	let loading = $state(true);
 	let refreshing = $state(false);
 	let errorMessage = $state<string | null>(null);
 	let actionBusy = $state(false);
+	let copiedView = $state<string | null>(null);
+	let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const activityFeed = $derived(
 		app.live.events.length > 0 ? app.live.events : logs
@@ -45,16 +55,30 @@
 					{
 						label: 'Active facts',
 						value: status.stats.facts,
-						sub: `${status.stats.relations} predicates`,
+						sub: `${status.schema?.user_predicates.length ?? 0} user predicates`,
 						icon: Database,
 						color: 'text-fact-base'
 					},
 					{
-						label: 'Derived facts',
-						value: status.stats.derived_tuples,
-						sub: `${status.stats.directives} rules`,
+						label: 'Derived views',
+						value: status.schema?.builtin_view_count ?? status.stats.derived_tuples,
+						sub: `${status.stats.rules?.count ?? status.stats.directives} stored rules`,
 						icon: GitBranchPlus,
 						color: 'text-fact-derived'
+					},
+					{
+						label: 'System attrs',
+						value: status.schema?.system_attribute_count ?? 0,
+						sub: `${status.schema?.coordination_attribute_count ?? 0} coordination attrs`,
+						icon: Cpu,
+						color: 'text-rule-accent'
+					},
+					{
+						label: 'Symbol entries',
+						value: status.stats.sym_entries ?? 0,
+						sub: `branch ${status.current_branch ?? 'main'}`,
+						icon: KeyRound,
+						color: 'text-primary'
 					}
 				]
 			: []
@@ -89,10 +113,46 @@
 		topRelations.length > 0 ? topRelations[0].cardinality : 1
 	);
 
+	const builtinViews = $derived(schema?.ontology?.builtin_views.slice(0, 6) ?? []);
+	const userPredicates = $derived(status?.schema?.user_predicates ?? []);
+	const recentTxRows = $derived(
+		txRows
+			.slice()
+			.sort((a, b) => {
+				const ai = Number.parseInt(a.id.replace(/^tx\//, ''), 10);
+				const bi = Number.parseInt(b.id.replace(/^tx\//, ''), 10);
+				if (!Number.isNaN(ai) && !Number.isNaN(bi)) return bi - ai;
+				return b.when.localeCompare(a.when);
+			})
+			.slice(0, 12)
+	);
+
+	function varsForArity(arity: number): string[] {
+		return Array.from({ length: arity }, (_, i) => `?v${i + 1}`);
+	}
+
+	function builtinViewQuery(view: NonNullable<ExomemSchemaResponse['ontology']>['builtin_views'][number]): string {
+		const vars = varsForArity(view.arity);
+		return `(query ${app.selectedExom} (find ${vars.join(' ')}) (where (${view.name} ${vars.join(' ')})))`;
+	}
+
+	async function copyBuiltinView(view: NonNullable<ExomemSchemaResponse['ontology']>['builtin_views'][number]) {
+		if (!navigator.clipboard) return;
+		await navigator.clipboard.writeText(builtinViewQuery(view));
+		copiedView = view.name;
+		if (copyTimer) clearTimeout(copyTimer);
+		copyTimer = setTimeout(() => {
+			copiedView = null;
+		}, 1600);
+	}
+
 	onMount(() => {
 		void refreshAll();
 		const interval = window.setInterval(() => void refreshAll({ silent: true }), 15_000);
-		return () => window.clearInterval(interval);
+		return () => {
+			window.clearInterval(interval);
+			if (copyTimer) clearTimeout(copyTimer);
+		};
 	});
 
 	async function refreshAll({ silent = false }: { silent?: boolean } = {}) {
@@ -101,21 +161,24 @@
 
 		try {
 			const exom = app.selectedExom;
-			const [s, sc, cl, lg] = await Promise.all([
+			const [s, sc, cl, lg, tx] = await Promise.all([
 				fetchExomemStatus(exom),
 				fetchExomemSchema(exom),
 				fetchExomemClusters(exom),
-				fetchExomemLogs(exom)
+				fetchExomemLogs(exom),
+				fetchTxRows(exom)
 			]);
 			status = s;
 			app.serverUptimeSec = s.server.uptime_sec;
 			schema = sc;
 			clusters = cl;
 			logs = lg;
+			txRows = tx;
 			app.live.connect();
 		} catch (error) {
 			app.live.disconnect();
 			app.serverUptimeSec = null;
+			txRows = [];
 			errorMessage =
 				error instanceof Error ? error.message : 'Unable to reach Exomem server.';
 		} finally {
@@ -225,7 +288,7 @@
 	{/if}
 
 	<!-- KPI cards -->
-	<section class="grid gap-3 sm:grid-cols-2">
+	<section class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
 		{#if statusCards.length > 0}
 			{#each statusCards as card (card.label)}
 				{@const Icon = card.icon}
@@ -251,6 +314,80 @@
 			{/each}
 		{/if}
 	</section>
+
+	<div class="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+		<section class="flex flex-col gap-3 rounded-lg border border-border/60 bg-card p-4">
+			<div class="flex items-center justify-between gap-3">
+				<div>
+					<h2 class="text-sm font-medium text-muted-foreground">Datalog Model</h2>
+					<p class="mt-1 text-sm text-foreground">
+						The UI is reading the same substrate the daemon exposes: user facts, built-in views, and system attributes.
+					</p>
+				</div>
+				<Route class="size-4 text-muted-foreground" />
+			</div>
+			<div class="grid gap-3 sm:grid-cols-3">
+				<div class="rounded-md border border-border/50 bg-muted/20 p-3">
+					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">User predicates</p>
+					<p class="mt-1 text-lg font-semibold">{userPredicates.length}</p>
+					<p class="mt-1 text-xs text-muted-foreground">Stable predicates you assert directly.</p>
+				</div>
+				<div class="rounded-md border border-border/50 bg-muted/20 p-3">
+					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Built-in views</p>
+					<p class="mt-1 text-lg font-semibold">{schema?.ontology?.builtin_views.length ?? 0}</p>
+					<p class="mt-1 text-xs text-muted-foreground">Derived views like <span class="font-mono">fact-row</span> and <span class="font-mono">tx-row</span>.</p>
+				</div>
+				<div class="rounded-md border border-border/50 bg-muted/20 p-3">
+					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">System attrs</p>
+					<p class="mt-1 text-lg font-semibold">{schema?.ontology?.system_attributes.length ?? 0}</p>
+					<p class="mt-1 text-xs text-muted-foreground">Queryable metadata such as <span class="font-mono">fact/provenance</span> and <span class="font-mono">tx/actor</span>.</p>
+				</div>
+			</div>
+		</section>
+
+		<section class="flex flex-col gap-3 rounded-lg border border-border/60 bg-card p-4">
+			<div class="flex items-center justify-between">
+				<h2 class="text-sm font-medium text-muted-foreground">Built-in Views</h2>
+				{#if schema?.ontology}
+					<span class="text-xs text-muted-foreground">{schema.ontology.builtin_views.length} total</span>
+				{/if}
+			</div>
+			{#if builtinViews.length > 0}
+				<div class="flex flex-wrap gap-2">
+					{#each builtinViews as view (view.name)}
+						<div class="rounded-md border border-border/50 bg-muted/20 px-2.5 py-2">
+							<div class="flex items-start justify-between gap-2">
+								<div class="flex items-center gap-2">
+									<span class="font-mono text-xs text-foreground">{view.name}</span>
+									<Badge variant="outline" class="h-4 px-1.5 text-[0.6rem]">arity {view.arity}</Badge>
+								</div>
+								<Button
+									variant="ghost"
+									size="sm"
+									class="h-6 px-2 text-[0.65rem]"
+									onclick={() => copyBuiltinView(view)}
+								>
+									{#if copiedView === view.name}
+										<Check class="mr-1 size-3" />
+										Copied
+									{:else}
+										<Copy class="mr-1 size-3" />
+										Query
+									{/if}
+								</Button>
+							</div>
+							<p class="mt-1 max-w-[20rem] text-[0.7rem] leading-relaxed text-muted-foreground">{view.description}</p>
+							<div class="mt-2 rounded border border-border/40 bg-background/60 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-muted-foreground">
+								{builtinViewQuery(view)}
+							</div>
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<p class="text-sm text-muted-foreground">{loading ? 'Loading built-in views...' : 'No ontology data yet.'}</p>
+			{/if}
+		</section>
+	</div>
 
 	<div class="grid gap-6 xl:grid-cols-[1fr_1.2fr]">
 		<!-- Relations breakdown -->
@@ -292,37 +429,37 @@
 			</div>
 		</section>
 
-		<!-- Activity stream -->
+		<!-- Transaction stream -->
 		<section class="flex flex-col gap-3">
 			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-medium text-muted-foreground">Transaction log</h2>
-				<span class="text-xs text-muted-foreground">{activityFeed.length} transactions</span>
+				<h2 class="text-sm font-medium text-muted-foreground">Recent Transactions</h2>
+				<span class="text-xs text-muted-foreground">{recentTxRows.length} visible rows</span>
 			</div>
 			<div class="max-h-[28rem] overflow-y-auto rounded-lg border border-border/60 thin-scrollbar">
-				{#if activityFeed.length === 0}
+				{#if recentTxRows.length === 0}
 					<div class="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center text-sm text-muted-foreground">
 						<Activity class="size-6 opacity-30" />
-						<p>{loading ? 'Loading transactions...' : 'No transactions yet. Facts will appear here as the exom grows.'}</p>
+						<p>{loading ? 'Loading transactions...' : 'No tx rows yet. Facts will appear here as the exom grows.'}</p>
 					</div>
 				{:else}
 					<div class="divide-y divide-border/40">
-						{#each activityFeed.slice(0, 30) as event (event.id)}
+						{#each recentTxRows as row (row.tx + row.id)}
 							<div
 								class="flex items-start gap-3 border-l-2 border-transparent px-3 py-2.5 pl-2.5 transition-colors hover:bg-muted/20"
-								class:border-l-primary={event.type.toLowerCase() === 'query'}
-								class:border-l-fact-base={event.type.toLowerCase().startsWith('assert')}
-								class:border-l-contra={event.type.toLowerCase().startsWith('retract')}
-								class:border-l-fact-derived={event.type.toLowerCase() === 'evaluate'}
-								class:border-l-rule-accent={event.type.toLowerCase() === 'load'}
+								class:border-l-primary={row.action === 'query'}
+								class:border-l-fact-base={row.action.startsWith('assert')}
+								class:border-l-contra={row.action.startsWith('retract')}
+								class:border-l-fact-derived={row.action === 'merge-branch'}
+								class:border-l-rule-accent={row.action.startsWith('branch')}
 							>
-								<span class="mt-0.5 min-w-[5.5rem] shrink-0 font-mono text-[0.65rem] font-medium uppercase tracking-wide {eventColor(event.type)}">{event.type}</span>
+								<span class="mt-0.5 min-w-[5.5rem] shrink-0 font-mono text-[0.65rem] font-medium uppercase tracking-wide {eventColor(row.action)}">{row.action}</span>
 								<div class="flex min-w-0 flex-1 flex-col gap-0.5">
-									<p class="text-sm leading-snug">{eventSummary(event)}</p>
-									<span class="font-mono text-[0.6rem] text-muted-foreground/70">{formatEventTime(event.timestamp)}</span>
+									<p class="text-sm leading-snug">
+										<span class="font-mono">{row.tx}</span> by <span class="font-medium">{row.actor}</span> on <span class="font-mono">{row.branch}</span>
+									</p>
+									<span class="font-mono text-[0.6rem] text-muted-foreground/70">{formatEventTime(row.when)}</span>
 								</div>
-								{#if event.duration_ms != null}
-									<span class="shrink-0 font-mono text-[0.6rem] text-muted-foreground">{event.duration_ms}ms</span>
-								{/if}
+								<span class="shrink-0 font-mono text-[0.6rem] text-muted-foreground">{row.id}</span>
 							</div>
 						{/each}
 					</div>
@@ -330,6 +467,33 @@
 			</div>
 		</section>
 	</div>
+
+	<section class="flex flex-col gap-3">
+		<div class="flex items-center justify-between">
+			<h2 class="text-sm font-medium text-muted-foreground">Event Stream</h2>
+			<span class="text-xs text-muted-foreground">{activityFeed.length} events</span>
+		</div>
+		<div class="max-h-64 overflow-y-auto rounded-lg border border-border/60 thin-scrollbar">
+			{#if activityFeed.length === 0}
+				<div class="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center text-sm text-muted-foreground">
+					<Activity class="size-6 opacity-30" />
+					<p>{loading ? 'Loading events...' : 'No events yet.'}</p>
+				</div>
+			{:else}
+				<div class="divide-y divide-border/40">
+					{#each activityFeed.slice(0, 20) as event (event.id)}
+						<div class="flex items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/20">
+							<span class="mt-0.5 min-w-[5.5rem] shrink-0 font-mono text-[0.65rem] font-medium uppercase tracking-wide {eventColor(event.type)}">{event.type}</span>
+							<div class="flex min-w-0 flex-1 flex-col gap-0.5">
+								<p class="text-sm leading-snug">{eventSummary(event)}</p>
+								<span class="font-mono text-[0.6rem] text-muted-foreground/70">{formatEventTime(event.timestamp)}</span>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	</section>
 
 	<!-- Clusters summary -->
 	{#if sortedClusters.length > 0}

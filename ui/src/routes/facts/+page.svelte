@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { base } from '$app/paths';
 	import { SvelteSet } from 'svelte/reactivity';
 	import {
+		ArrowRightSquare,
 		Check,
 		CircleAlert,
 		Filter,
 		Loader2,
-		Minus,
 		Pencil,
 		Plus,
 		RefreshCw,
@@ -22,7 +23,7 @@
 		assertFact,
 		exportBackupText,
 		fetchExomemSchema,
-		formatFact,
+		formatAssertFactLine,
 		parseFactsFromExport,
 		retractFact,
 		schemaToFacts,
@@ -51,8 +52,9 @@
 
 	// Add fact panel
 	let showAddPanel = $state(false);
+	let newFactId = $state('');
 	let newPredicate = $state('');
-	let newTerms = $state<string[]>(['']);
+	let newValue = $state('');
 	let newIntervalFrom = $state('');
 	let newIntervalTo = $state('');
 	let submitting = $state(false);
@@ -72,7 +74,10 @@
 	// ---------------------------------------------------------------------------
 
 	function factKey(f: FactEntry): string {
-		return `${f.predicate}(${f.terms.join(',')})${f.validFrom ? `@[${f.validFrom},${f.validTo ?? 'inf'}]` : ''}`;
+		const core = f.factId
+			? `${f.factId}:${f.predicate}:${f.terms.join(',')}`
+			: `${f.predicate}(${f.terms.join(',')})`;
+		return `${core}${f.validFrom ? `@[${f.validFrom},${f.validTo ?? 'inf'}]` : ''}`;
 	}
 
 	const predicateNames = $derived(
@@ -121,7 +126,7 @@
 
 	function openEditFact(fact: FactEntry) {
 		editFact = fact;
-		editRawText = formatFact(fact.predicate, fact.terms);
+		editRawText = formatAssertFactLine(fact, app.selectedExom);
 		editError = null;
 	}
 
@@ -159,41 +164,27 @@
 
 		try {
 			const exom = app.selectedExom;
-			const [dlText, schemaRes] = await Promise.all([
+			const [exportText, schemaRes] = await Promise.all([
 				exportBackupText(exom, signal),
 				fetchExomemSchema(exom, signal)
 			]);
 			if (seq !== loadSeq) return;
 
 			schema = schemaRes;
+			const builtinViewNames = new Set(schemaRes.ontology?.builtin_views.map((view) => view.name) ?? []);
 
-			// Parse facts from export, then enrich with kind from schema
-			const parsedFacts = parseFactsFromExport(dlText);
-			const schemaFacts = schemaToFacts(schemaRes);
-
-			// Build a set of derived predicates for kind enrichment
-			const derivedPredicates = new Set(
-				schemaRes.relations
-					.filter((r) => r.kind === 'derived')
-					.map((r) => r.name)
+			const baseFacts = parseFactsFromExport(exportText);
+			const schemaFacts = schemaToFacts(schemaRes).filter(
+				(f) => f.kind === 'derived' && !builtinViewNames.has(f.predicate)
 			);
-
-			// Merge: use parsed facts as base, add any schema-only derived facts
-			const parsedKeys = new Set(parsedFacts.map(factKey));
-			const enriched = parsedFacts.map((f) => ({
-				...f,
-				kind: derivedPredicates.has(f.predicate) ? 'derived' as const : 'base' as const
-			}));
-
-			// Add derived facts from schema that weren't in the export
+			const baseKeys = new Set(baseFacts.map(factKey));
+			const merged = [...baseFacts];
 			for (const sf of schemaFacts) {
-				if (sf.kind === 'derived' && !parsedKeys.has(factKey(sf))) {
-					enriched.push(sf);
-				}
+				if (!baseKeys.has(factKey(sf))) merged.push(sf);
 			}
 
 			if (seq !== loadSeq) return;
-			facts = enriched;
+			facts = merged;
 		} catch (error) {
 			if (error instanceof Error && error.name === 'AbortError') return;
 			if (seq !== loadSeq) return;
@@ -238,10 +229,15 @@
 	}
 
 	async function handleDeleteFact(fact: FactEntry) {
+		if (fact.kind === 'derived' || !fact.factId) {
+			errorMessage = 'Only base facts with a server fact id can be deleted.';
+			deleteConfirmKey = null;
+			return;
+		}
 		const key = factKey(fact);
 		deleting = key;
 		try {
-			await retractFact(fact.predicate, fact.terms, app.selectedExom);
+			await retractFact(fact.factId, app.selectedExom);
 			facts = facts.filter((f) => factKey(f) !== key);
 			selectedIds.delete(key);
 			deleteConfirmKey = null;
@@ -265,6 +261,7 @@
 			const oldFact = editFact;
 			await updateFact(
 				{
+					factId: oldFact.factId,
 					predicate: oldFact.predicate,
 					terms: oldFact.terms,
 				},
@@ -296,7 +293,12 @@
 		deleting = '__bulk__';
 		try {
 			await Promise.all(
-				toDelete.map((f) => retractFact(f.predicate, f.terms, app.selectedExom))
+				toDelete.map((f) => {
+					if (f.kind === 'derived' || !f.factId) {
+						throw new Error('Cannot delete derived facts in bulk');
+					}
+					return retractFact(f.factId, app.selectedExom);
+				})
 			);
 			const deletedKeys = new Set(toDelete.map(factKey));
 			facts = facts.filter((f) => !deletedKeys.has(factKey(f)));
@@ -309,20 +311,21 @@
 	}
 
 	async function handleAddFact() {
-		if (!newPredicate.trim() || newTerms.every((t) => !t.trim())) return;
+		if (!newPredicate.trim() || !newValue.trim()) return;
 		submitting = true;
 		errorMessage = null;
 
 		try {
-			const terms = newTerms.map((t) => t.trim()).filter(Boolean);
-			const options: { validFrom?: string; validTo?: string } = {};
+			const options: { factId?: string; validFrom?: string; validTo?: string } = {};
 			if (newIntervalFrom) options.validFrom = newIntervalFrom;
 			if (newIntervalTo) options.validTo = newIntervalTo;
-			await assertFact(newPredicate.trim(), terms, options, app.selectedExom);
+			if (newFactId.trim()) options.factId = newFactId.trim();
+			await assertFact(newPredicate.trim(), [newValue], options, app.selectedExom);
 
 			// Reset form
+			newFactId = '';
 			newPredicate = '';
-			newTerms = [''];
+			newValue = '';
 			newIntervalFrom = '';
 			newIntervalTo = '';
 			showAddPanel = false;
@@ -336,18 +339,6 @@
 		}
 	}
 
-	function addTermField() {
-		newTerms = [...newTerms, ''];
-	}
-
-	function removeTermField(index: number) {
-		if (newTerms.length <= 1) return;
-		newTerms = newTerms.filter((_, i) => i !== index);
-	}
-
-	function updateTerm(index: number, value: string) {
-		newTerms = newTerms.map((t, i) => (i === index ? value : t));
-	}
 </script>
 
 <div class="flex flex-col gap-4 p-4 sm:p-6 lg:p-8">
@@ -358,7 +349,7 @@
 			<p class="text-sm text-muted-foreground">
 				{filteredFacts.length} of {facts.length} facts in
 				<span class="font-medium text-foreground">{app.selectedExom}</span>
-				— base facts are directly asserted, derived facts are inferred from rules.
+				— this page focuses on durable base facts and user-facing derived relations. Built-in system views stay in Query Console and Schema.
 			</p>
 		</div>
 		<div class="flex flex-wrap items-center gap-2">
@@ -377,6 +368,26 @@
 			</Button>
 		</div>
 	</div>
+
+	{#if schema}
+		<div class="grid gap-3 sm:grid-cols-3">
+			<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+				<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">User predicates</p>
+				<p class="mt-1 text-lg font-semibold">{schema.ontology?.user_predicates.length ?? 0}</p>
+				<p class="mt-1 text-xs text-muted-foreground">Directly asserted predicates visible in exports and CRUD flows.</p>
+			</div>
+			<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+				<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Built-in views</p>
+				<p class="mt-1 text-lg font-semibold">{schema.ontology?.builtin_views.length ?? 0}</p>
+				<p class="mt-1 text-xs text-muted-foreground">System-derived views like <span class="font-mono">fact-row</span> and <span class="font-mono">tx-row</span>.</p>
+			</div>
+			<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
+				<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">System attrs</p>
+				<p class="mt-1 text-lg font-semibold">{schema.ontology?.system_attributes.length ?? 0}</p>
+				<p class="mt-1 text-xs text-muted-foreground">Queryable metadata such as provenance, tx actor, valid-time, and branch state.</p>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Error banner -->
 	{#if errorMessage}
@@ -398,7 +409,17 @@
 	{#if showAddPanel}
 		<div class="rounded-lg border border-border/60 bg-card p-4">
 			<h3 class="mb-3 text-sm font-medium">Assert Fact</h3>
-			<div class="grid gap-3 sm:grid-cols-[1fr_2fr]">
+			<div class="grid gap-3 sm:grid-cols-[1fr_1fr]">
+				<div>
+					<label for="new-fact-id" class="mb-1 block text-xs text-muted-foreground">Fact ID (optional but recommended)</label>
+					<Input
+						id="new-fact-id"
+						placeholder="user/editor"
+						class="font-mono text-sm"
+						value={newFactId}
+						oninput={(e: Event) => { newFactId = (e.target as HTMLInputElement).value; }}
+					/>
+				</div>
 				<div>
 					<label for="new-predicate" class="mb-1 block text-xs text-muted-foreground">Predicate</label>
 					<Input
@@ -409,31 +430,20 @@
 						oninput={(e: Event) => { newPredicate = (e.target as HTMLInputElement).value; }}
 					/>
 				</div>
-				<div>
-					<span class="mb-1 block text-xs text-muted-foreground">Terms</span>
-					<div class="flex flex-col gap-1.5">
-						{#each newTerms as term, i (i)}
-							<div class="flex items-center gap-1.5">
-								<Input
-									placeholder="term {i + 1}"
-									class="font-mono text-sm"
-									value={term}
-									oninput={(e: Event) => updateTerm(i, (e.target as HTMLInputElement).value)}
-								/>
-								{#if newTerms.length > 1}
-									<Button variant="ghost" size="icon-sm" onclick={() => removeTermField(i)}>
-										<Minus class="size-3.5" />
-									</Button>
-								{/if}
-								{#if i === newTerms.length - 1}
-									<Button variant="ghost" size="icon-sm" onclick={addTermField}>
-										<Plus class="size-3.5" />
-									</Button>
-								{/if}
-							</div>
-						{/each}
-					</div>
-				</div>
+			</div>
+
+			<div class="mt-3">
+				<label for="new-value" class="mb-1 block text-xs text-muted-foreground">Value</label>
+				<Input
+					id="new-value"
+					placeholder="vim"
+					class="font-mono text-sm"
+					value={newValue}
+					oninput={(e: Event) => { newValue = (e.target as HTMLInputElement).value; }}
+				/>
+				<p class="mt-1 text-xs text-muted-foreground">
+					The durable write model is <span class="font-mono">fact_id + predicate + value</span>. Use a stable fact ID when the same claim will be revised later.
+				</p>
 			</div>
 
 			<div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
@@ -458,7 +468,7 @@
 					/>
 				</div>
 				<div class="flex items-end gap-2">
-					<Button size="sm" onclick={handleAddFact} disabled={submitting || !newPredicate.trim()}>
+					<Button size="sm" onclick={handleAddFact} disabled={submitting || !newPredicate.trim() || !newValue.trim()}>
 						{#if submitting}
 							<Loader2 data-icon="inline-start" class="size-3.5 animate-spin" />
 							Adding...
@@ -517,7 +527,7 @@
 								{editDraft.fact.validFrom ? `${editDraft.fact.validFrom} → ${editDraft.fact.validTo ?? 'open'}` : '—'}
 							</div>
 							<div class="rounded border border-border/40 bg-background px-2 py-1.5 text-[11px] text-muted-foreground">
-								{formatFact(editDraft.fact.predicate, editDraft.fact.terms)}
+								{formatAssertFactLine(editDraft.fact, app.selectedExom)}
 							</div>
 						</div>
 					{:else}
@@ -695,6 +705,15 @@
 					<td class="px-3 py-1.5">
 						{#if fact.kind === 'base'}
 							<div class="flex items-center justify-end gap-1">
+								{#if fact.factId}
+									<a
+										class="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
+										href={`${base}/facts/${encodeURIComponent(fact.factId)}`}
+										title="Fact detail and history"
+									>
+										<ArrowRightSquare class="size-3.5" />
+									</a>
+								{/if}
 								<button
 									class="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
 									onclick={() => openEditFact(fact)}

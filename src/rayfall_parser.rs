@@ -19,8 +19,16 @@ pub enum FormKind {
     RetractFact,
     Rule,
     Query,
+    InExom,
     /// Anything else — pass through to ray_eval_str
     Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatomRole {
+    Entity,
+    Attribute,
+    Value,
 }
 
 /// Split source into top-level forms.
@@ -110,6 +118,7 @@ fn classify_form(form: &str) -> FormKind {
         "retract-fact" => FormKind::RetractFact,
         "rule" => FormKind::Rule,
         "query" => FormKind::Query,
+        "in-exom" => FormKind::InExom,
         _ => FormKind::Other,
     }
 }
@@ -222,23 +231,193 @@ fn unescape(s: &str) -> String {
     out
 }
 
-/// Rewrite `(query ...)` to insert `(rules ...)` before the closing `)` of the outer form.
-pub fn rewrite_query_with_rules(form_source: &str, rule_inline_bodies: &[String]) -> String {
-    if rule_inline_bodies.is_empty() {
-        return form_source.to_string();
-    }
-    let trimmed = form_source.trim_end();
-    let Some(without_close) = trimmed.strip_suffix(')') else {
-        return form_source.to_string();
+/// Rewrite `(query ...)` to attach `(rules ...)` structurally via the Rayfall AST.
+pub fn rewrite_query_with_rules(
+    form_source: &str,
+    rule_inline_bodies: &[String],
+) -> Result<String> {
+    let expr = crate::rayfall_ast::parse_one(form_source)?;
+    let lowered = crate::rayfall_ast::lower_top_level(
+        &expr,
+        crate::rayfall_ast::LoweringOptions {
+            default_query_exom: None,
+            default_rule_exom: None,
+        },
+    )?;
+    let [crate::rayfall_ast::CanonicalForm::Query(query)] = lowered.as_slice() else {
+        bail!("expected exactly one lowered query form");
     };
-    let mut result = without_close.to_string();
-    result.push_str(" (rules");
-    for rule in rule_inline_bodies {
-        result.push(' ');
-        result.push_str(rule);
+    crate::rayfall_ast::append_rules_to_query(query, rule_inline_bodies)
+}
+
+pub fn datom_query_projection_roles(query_source: &str) -> Option<Vec<Option<DatomRole>>> {
+    let find_body = extract_clause_body(query_source, "find")?;
+    let find_vars: Vec<String> = tokenize_simple(find_body)
+        .into_iter()
+        .filter(|t| t.starts_with('?'))
+        .collect();
+    if find_vars.is_empty() {
+        return None;
     }
-    result.push_str("))");
-    result
+
+    let where_body = extract_clause_body(query_source, "where")?;
+    let atoms = top_level_lists(where_body);
+    if atoms.len() != 1 {
+        return None;
+    }
+    let atom = atoms[0].trim();
+    let atom_inner = atom.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let terms = tokenize_simple(atom_inner);
+    if terms.len() != 3 {
+        return None;
+    }
+
+    let mut out = vec![None; find_vars.len()];
+    for (i, var) in find_vars.iter().enumerate() {
+        if terms[0] == *var {
+            out[i] = Some(DatomRole::Entity);
+        } else if terms[1] == *var {
+            out[i] = Some(DatomRole::Attribute);
+        } else if terms[2] == *var {
+            out[i] = Some(DatomRole::Value);
+        }
+    }
+
+    if out.iter().any(Option::is_some) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn extract_clause_body<'a>(source: &'a str, keyword: &str) -> Option<&'a str> {
+    let pattern = format!("({keyword}");
+    let start = source.find(&pattern)?;
+    let bytes = source.as_bytes();
+    let mut i = start + pattern.len();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let body_start = i;
+    let mut depth = 1i32;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+        } else if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return source.get(body_start..i).map(str::trim);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn top_level_lists(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] != b'(' {
+            return Vec::new();
+        }
+        let start = i;
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if b == b'\\' {
+                    escape = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'"' {
+                in_string = true;
+            } else if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    if let Some(slice) = body.get(start..i) {
+                        out.push(slice);
+                    }
+                    break;
+                }
+                continue;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+fn tokenize_simple(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let bytes = source.as_bytes();
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    out.push(source[start..i].to_string());
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b')' {
+            i += 1;
+        }
+        out.push(source[start..i].to_string());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -261,5 +440,13 @@ mod tests {
         assert_eq!(e, "e");
         assert_eq!(p, "p");
         assert_eq!(v, "v");
+    }
+
+    #[test]
+    fn split_in_exom_form() {
+        let s = "(in-exom main (query (find ?x) (where (p ?x))))";
+        let f = split_forms(s);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, FormKind::InExom);
     }
 }
