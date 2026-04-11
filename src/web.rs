@@ -791,17 +791,41 @@ fn serve_from_disk(stream: &mut TcpStream, req: &Request, ui_dir: &Path, rel: &s
 // API router
 // ---------------------------------------------------------------------------
 
+/// Parse an exom address string (flat name or `::` / `/` separated path) and
+/// return the **last segment** as the flat brain key, or return a 400 error tuple.
+///
+/// Examples:
+///   "main"          → Ok("main")
+///   "work::main"    → Ok("main")
+///   "work/ath/main" → Ok("main")
+fn parse_exom_to_flat_name(raw: &str) -> Result<String, (u16, String)> {
+    let path: crate::path::TreePath = raw.parse().map_err(|e: crate::path::PathError| {
+        let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string())
+            .with_path(raw)
+            .into_response();
+        (s, b)
+    })?;
+    let flat = path.last().unwrap_or(DEFAULT_EXOM).to_string();
+    Ok(flat)
+}
+
 fn handle_api(
     stream: &mut TcpStream,
     req: &Request,
     api_path: &str,
     state: &ServerState,
 ) -> Result<()> {
-    let exom = req
+    let exom_raw = req
         .query
         .get("exom")
         .map(|s| s.as_str())
         .unwrap_or(DEFAULT_EXOM);
+
+    let exom = match parse_exom_to_flat_name(exom_raw) {
+        Ok(e) => e,
+        Err((status, body)) => return write_json_response(stream, status, &body),
+    };
+    let exom = exom.as_str();
 
     let ctx = if mutation_requires_actor(req.method.as_str(), api_path) {
         match require_mutation_context(req) {
@@ -1001,9 +1025,11 @@ fn require_mutation_context(req: &Request) -> Result<MutationContext, &'static s
 
 fn mutation_requires_actor(method: &str, api_path: &str) -> bool {
     // Task 4.2/4.3 scaffold endpoints carry actor in JSON body (not X-Actor header).
+    // Task 4.4: assert-fact also carries actor + branch + exom in JSON body.
     if method == "POST" && matches!(api_path,
         "/api/actions/init" | "/api/actions/exom-new" | "/api/actions/session-new" |
-        "/api/actions/session-join" | "/api/actions/branch-create" | "/api/actions/rename"
+        "/api/actions/session-join" | "/api/actions/branch-create" | "/api/actions/rename" |
+        "/api/actions/assert-fact"
     ) {
         return false;
     }
@@ -1395,6 +1421,10 @@ fn api_status(state: &ServerState, exom: &str) -> ApiResult {
         system_schema::build_exom_ontology(exom, &es.brain, &es.rules)
     };
 
+    let tree_root_display = server_tree_root(state).display().to_string();
+    let exom_path_display = state.exom_dir.as_ref()
+        .map(|ed| ed.exom_path(exom).display().to_string())
+        .unwrap_or_else(|| "in-memory".into());
     let status = serde_json::json!({
         "ok": true,
         "exom": exom,
@@ -1403,6 +1433,7 @@ fn api_status(state: &ServerState, exom: &str) -> ApiResult {
             "name": "ray-exomem",
             "version": crate::frontend_version(),
             "uptime_sec": uptime,
+            "tree_root": tree_root_display,
             "build": {
                 "git_sha": crate::build_git_sha(),
                 "built_unix": crate::build_unix_timestamp(),
@@ -1410,7 +1441,7 @@ fn api_status(state: &ServerState, exom: &str) -> ApiResult {
             }
         },
         "storage": {
-            "exom_path": state.exom_dir.as_ref().map(|ed| ed.exom_path(exom).display().to_string()).unwrap_or_else(|| "in-memory".into())
+            "exom_path": exom_path_display
         },
         "stats": {
             "relations": 3, // facts, observations, beliefs
@@ -1772,26 +1803,16 @@ fn api_logs(state: &ServerState, exom: &str) -> ApiResult {
     json_ok(&serde_json::json!({ "events": events }))
 }
 
-fn api_exoms(state: &ServerState) -> ApiResult {
-    let daemon = get_daemon(state);
-    let exom_list: Vec<_> = daemon
-        .exoms
-        .keys()
-        .map(|name| {
-            serde_json::json!({
-                "name": name,
-                "description": if name == DEFAULT_EXOM { "Default exom" } else { "" },
-                "created_at": 0,
-                "updated_at": 0,
-                "archived": false,
-                "archived_at": null
-            })
-        })
-        .collect();
-
-    json_ok(&serde_json::json!({
-        "exoms": exom_list
-    }))
+fn api_exoms(_state: &ServerState) -> ApiResult {
+    // Task 4.4: /api/exoms is removed. Use /api/tree instead.
+    Ok((
+        410,
+        serde_json::to_string(&serde_json::json!({
+            "error": "gone",
+            "message": "/api/exoms is removed; use /api/tree instead",
+        }))
+        .unwrap(),
+    ))
 }
 
 fn api_provenance(state: &ServerState, exom: &str) -> ApiResult {
@@ -2063,6 +2084,15 @@ fn api_export_json(state: &ServerState, exom: &str) -> ApiResult {
 
 #[derive(Deserialize)]
 struct AssertFactReq {
+    /// Path-based exom address (e.g. "work::main"). Falls back to query-string exom if absent.
+    #[serde(default)]
+    exom: Option<String>,
+    /// Actor performing the write. Required when exom is path-based (Task 4.4).
+    #[serde(default)]
+    actor: Option<String>,
+    /// Branch to write to. Defaults to "main".
+    #[serde(default)]
+    branch: Option<String>,
     fact_id: Option<String>,
     predicate: String,
     value: String,
@@ -2080,37 +2110,94 @@ fn default_confidence() -> f64 {
 
 fn api_assert_fact(
     state: &ServerState,
-    exom: &str,
+    exom_query: &str,
     body: &[u8],
     ctx: &MutationContext,
 ) -> ApiResult {
     let req: AssertFactReq =
         serde_json::from_slice(body).map_err(|e| anyhow!("invalid JSON: {}", e))?;
+
+    // Resolve exom: body field takes priority over query-string param.
+    let exom_raw = req.exom.as_deref().unwrap_or(exom_query);
+
+    // Parse as TreePath to validate the path and extract the flat brain key.
+    let exom_path: crate::path::TreePath = exom_raw.parse().map_err(|e: crate::path::PathError| {
+        anyhow!("bad exom path: {}", e)
+    })?;
+    let exom_flat = exom_path.last().unwrap_or(DEFAULT_EXOM).to_string();
+
+    // Task 4.4: actor is required in the body when exom is a path address.
+    // We do NOT fall back to X-Actor header for path-based writes because
+    // the actor must be explicit and auditable.
+    let actor_str: &str = match req.actor.as_deref().filter(|s| !s.is_empty()) {
+        Some(a) => a,
+        None => {
+            // No actor in body — reject immediately.
+            let (status, body) = crate::http_error::ApiError::from(
+                crate::brain::WriteError::ActorRequired,
+            ).into_response();
+            return Ok(json_response(status, &body));
+        }
+    };
+
+    let branch_str = req.branch.as_deref().unwrap_or("main");
+
+    // Task 4.4: run precheck_write if tree_root is available.
+    if state.tree_root.is_some() {
+        let tree_root = server_tree_root(state);
+        if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, branch_str, actor_str) {
+            let (status, body) = crate::http_error::ApiError::from(e).into_response();
+            return Ok(json_response(status, &body));
+        }
+    }
+
+    // Build a context with the resolved actor.
+    let write_ctx = MutationContext {
+        actor: actor_str.to_string(),
+        session: ctx.session.clone(),
+        model: ctx.model.clone(),
+    };
+
     let fact_id = req.fact_id.clone().unwrap_or_else(|| req.predicate.clone());
     let provenance = req
         .source
         .as_deref()
         .or(req.provenance.as_deref())
         .unwrap_or("api");
+
+    let predicate = req.predicate.clone();
+    let value = req.value.clone();
+
     let tx_id = mutate_exom_brain(
         state,
-        exom,
+        &exom_flat,
         "assert_fact",
-        Some(ctx.actor.as_str()),
-        Some(req.predicate.as_str()),
+        Some(actor_str),
+        Some(predicate.as_str()),
         |ex| {
             ex.brain.assert_fact(
                 &fact_id,
-                &req.predicate,
-                &req.value,
+                &predicate,
+                &value,
                 req.confidence,
                 provenance,
                 req.valid_from.as_deref(),
                 req.valid_to.as_deref(),
-                ctx,
+                &write_ctx,
             )
         },
     )?;
+
+    // Task 4.4: mirror session-meta predicates to exom.json.
+    if state.tree_root.is_some()
+        && matches!(predicate.as_str(), "session/label" | "session/closed_at" | "session/archived_at")
+    {
+        let tree_root = server_tree_root(state);
+        if let Err(e) = crate::brain::mirror_session_meta_to_disk(&tree_root, &exom_path, &predicate, &value) {
+            eprintln!("[ray-exomem] mirror_session_meta_to_disk failed (best-effort): {}", e);
+        }
+    }
+
     json_ok(&serde_json::json!({
         "ok": true,
         "fact_id": fact_id,
@@ -3157,7 +3244,10 @@ fn write_json_response(stream: &mut TcpStream, status: u16, body: &str) -> Resul
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        409 => "Conflict",
+        410 => "Gone",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         _ => "Unknown",
     };
     write_response(

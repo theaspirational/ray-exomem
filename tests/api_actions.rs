@@ -61,6 +61,66 @@ fn branch_create_returns_501() {
     else { panic!("expected status error"); }
 }
 
+// ---------------------------------------------------------------------------
+// Task 4.4 tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn assert_fact_requires_actor() {
+    let d = TestDaemon::start();
+    ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path": "work"})).unwrap();
+    let err = ureq::post(&format!("{}/ray-exomem/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom": "work::main",
+            "predicate": "note/body",
+            "value": "hello",
+        })).unwrap_err();
+    if let ureq::Error::Status(status, r) = err {
+        assert_eq!(status, 400);
+        let body: serde_json::Value = r.into_json().unwrap();
+        assert_eq!(body["code"], "actor_required");
+    } else {
+        panic!("expected status error, got: {:?}", err);
+    }
+}
+
+#[test]
+fn api_exoms_is_gone() {
+    let d = TestDaemon::start();
+    let err = ureq::get(&format!("{}/ray-exomem/api/exoms", d.base_url))
+        .call().unwrap_err();
+    if let ureq::Error::Status(status, _) = err {
+        assert_eq!(status, 410);
+    } else {
+        panic!("expected status error");
+    }
+}
+
+#[test]
+fn assert_fact_with_actor_succeeds() {
+    let d = TestDaemon::start();
+    ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path": "work"})).unwrap();
+    let resp = ureq::post(&format!("{}/ray-exomem/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom": "work::main",
+            "branch": "main",
+            "actor": "me",
+            "predicate": "note/body",
+            "value": "hello",
+        })).unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[test]
+fn status_includes_tree_root() {
+    let d = TestDaemon::start();
+    let body: serde_json::Value = ureq::get(&format!("{}/ray-exomem/api/status", d.base_url))
+        .call().unwrap().into_json().unwrap();
+    assert!(body["server"]["tree_root"].is_string(), "server.tree_root missing: {}", body);
+}
+
 #[test]
 #[ignore] // FIXME(nested-exoms-task-4.4): session-join deferred to Task 4.4
 fn session_join_claims_branch() {
