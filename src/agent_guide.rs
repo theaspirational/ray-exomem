@@ -240,6 +240,14 @@ fn full_guide_string() -> String {
     )
 }
 
+/// The agent doctrine markdown — served at `GET /api/guide` and rendered at `/guide` in the UI.
+static DOCTRINE: &str = include_str!("../docs/agent_guide.md");
+
+/// Return the agent doctrine as a static markdown string.
+pub fn doctrine() -> &'static str {
+    DOCTRINE
+}
+
 /// Render a section or the full guide.
 pub fn render(topic: GuideTopic) -> String {
     match topic {
