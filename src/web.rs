@@ -167,6 +167,9 @@ pub struct ServerState {
     pub exom_dir: Option<ExomDir>,
     pub start_time: Instant,
     pub sse_ring: Mutex<SseRing>,
+    /// Tree root directory for the nested-exoms layout (`<data-dir>/tree`).
+    /// Present when `--data-dir` was supplied; None for in-memory mode.
+    pub tree_root: Option<std::path::PathBuf>,
 }
 
 fn sse_push_mutation(
@@ -500,11 +503,16 @@ pub fn serve(
         std::process::exit(1);
     }
 
+    let tree_root = data_dir.as_ref().map(|d| d.join("tree"));
+    if let Some(ref tr) = tree_root {
+        std::fs::create_dir_all(tr).ok();
+    }
     let state = Arc::new(ServerState {
         daemon: Mutex::new(daemon),
         exom_dir,
         start_time: Instant::now(),
         sse_ring: Mutex::new(SseRing::new(512)),
+        tree_root,
     });
 
     if let Some(ref dir) = ui_dir {
@@ -792,7 +800,7 @@ fn handle_api(
 
     let result = match (req.method.as_str(), api_path) {
         ("GET", "/api/status") => api_status(state, exom),
-        ("GET", "/api/tree") => api_tree(req),
+        ("GET", "/api/tree") => api_tree(req, state),
         ("GET", "/api/schema") => api_schema(state, exom, &req.query),
         ("GET", "/api/graph") => api_graph(state, exom, &req.query),
         ("GET", "/api/clusters") => api_clusters(state, exom),
@@ -2834,8 +2842,13 @@ fn api_belief_support(state: &ServerState, exom: &str, belief_id: &str) -> ApiRe
 // Task 4.1 — GET /api/tree
 // ---------------------------------------------------------------------------
 
-fn api_tree(req: &Request) -> ApiResult {
-    let tree_root = crate::storage::tree_root();
+/// Get the tree root path from server state, falling back to the global default.
+fn server_tree_root(state: &ServerState) -> std::path::PathBuf {
+    state.tree_root.clone().unwrap_or_else(crate::storage::tree_root)
+}
+
+fn api_tree(req: &Request, state: &ServerState) -> ApiResult {
+    let tree_root = server_tree_root(state);
     let depth = req.query.get("depth").and_then(|s| s.parse::<usize>().ok());
     let opts = crate::tree::WalkOptions {
         depth: depth.or(Some(usize::MAX)),
@@ -2880,7 +2893,7 @@ fn api_action_init(req: &Request, state: &ServerState) -> ApiResult {
             return Ok(json_response(s, &b));
         }
     };
-    let tree_root = crate::storage::tree_root();
+    let tree_root = server_tree_root(state);
     match crate::scaffold::init_project(&tree_root, &path) {
         Ok(()) => {
             sse_push_tree_changed(state);
@@ -2904,7 +2917,7 @@ fn api_action_exom_new(req: &Request, state: &ServerState) -> ApiResult {
             return Ok(json_response(s, &b));
         }
     };
-    let tree_root = crate::storage::tree_root();
+    let tree_root = server_tree_root(state);
     match crate::scaffold::new_bare_exom(&tree_root, &path) {
         Ok(()) => {
             sse_push_tree_changed(state);
@@ -2946,7 +2959,7 @@ fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let tree_root = crate::storage::tree_root();
+    let tree_root = server_tree_root(state);
     match crate::brain::session_new(&tree_root, &project_path, session_type, &label, &actor, &agents) {
         Ok(session_path) => {
             sse_push_tree_changed(state);
@@ -2992,7 +3005,7 @@ fn api_action_rename(req: &Request, state: &ServerState) -> ApiResult {
             return Ok(json_response(s, &b));
         }
     };
-    let tree_root = crate::storage::tree_root();
+    let tree_root = server_tree_root(state);
     let disk = path.to_disk_path(&tree_root);
     // Reject renaming session exom ids — session ids are immutable.
     if crate::tree::classify(&disk) == crate::tree::NodeKind::Exom {
