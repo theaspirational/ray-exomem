@@ -12,6 +12,7 @@ pub mod rayfall_parser;
 pub mod rules;
 pub mod storage;
 pub mod system_schema;
+pub mod tree;
 pub mod web;
 
 use anyhow::{Context, Result};
