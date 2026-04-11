@@ -311,7 +311,7 @@ pub mod path;
 - [ ] **Step 4: Run the unit tests — they must all pass**
 
 Run: `cargo test -p ray-exomem path::tests`
-Expected: 6 tests pass.
+Expected: 8 tests pass (the 7 in the file above plus a `mixed_separator_round_trip` test added during review).
 
 - [ ] **Step 5: Commit**
 
