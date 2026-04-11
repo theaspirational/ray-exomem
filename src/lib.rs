@@ -6,6 +6,7 @@ pub mod context;
 pub mod datom;
 pub mod exom;
 pub mod ffi;
+pub mod path;
 pub mod rayfall_ast;
 pub mod rayfall_parser;
 pub mod rules;
