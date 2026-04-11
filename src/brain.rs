@@ -1517,6 +1517,32 @@ pub fn precheck_write(
     Ok(())
 }
 
+/// Mirror writes to `session/label`, `session/closed_at`, or
+/// `session/archived_at` into `exom.json` on disk.
+///
+/// Called by the HTTP layer (Task 4.4) after a successful assert-fact for
+/// those reserved predicates. Do NOT wire into the existing `assert_fact`
+/// entry point until Task 4.4 — callers must invoke this explicitly.
+pub fn mirror_session_meta_to_disk(
+    tree_root: &Path,
+    exom_path: &TreePath,
+    predicate: &str,
+    value: &str,
+) -> std::io::Result<()> {
+    let disk = exom_path.to_disk_path(tree_root);
+    let mut meta = exom::read_meta(&disk)?;
+    if let Some(sess) = meta.session.as_mut() {
+        match predicate {
+            "session/label"       => sess.label = value.to_string(),
+            "session/closed_at"   => sess.closed_at = Some(value.to_string()),
+            "session/archived_at" => sess.archived_at = Some(value.to_string()),
+            _ => return Ok(()),
+        }
+        exom::write_meta(&disk, &meta)?;
+    }
+    Ok(())
+}
+
 /// Create a session exom under `<project_path>/sessions/<id>` and write its
 /// `exom.json`. No splay-table writes — metadata only.
 pub fn session_new(
@@ -1589,6 +1615,16 @@ mod session_tests {
         assert!(segs[3].ends_with("_multi_agent_landing"));
         let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
         assert_eq!(meta.session.unwrap().agents, vec!["orchestrator", "agent_a", "agent_b"]);
+    }
+
+    #[test]
+    fn mirroring_updates_exom_json() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
+        let session = session_new(d.path(), &"work".parse().unwrap(), SessionType::Single, "old", "me", &[]).unwrap();
+        mirror_session_meta_to_disk(d.path(), &session, "session/label", "new").unwrap();
+        let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
+        assert_eq!(meta.session.unwrap().label, "new");
     }
 }
 
