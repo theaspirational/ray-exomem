@@ -32,7 +32,7 @@ impl TestDaemon {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut ready = false;
         while Instant::now() < deadline {
-            if let Ok(r) = ureq::get(&format!("{base_url}/api/status")).call() {
+            if let Ok(r) = ureq::get(&format!("{base_url}/ray-exomem/api/status")).call() {
                 if r.status() == 200 { ready = true; break; }
             }
             std::thread::sleep(Duration::from_millis(50));

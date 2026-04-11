@@ -17,6 +17,20 @@ fn rename_folder_cascades() {
 }
 
 #[test]
+fn rename_rejects_case_collision() {
+    let d = TestDaemon::start();
+    ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path":"work::foo"})).unwrap();
+    ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path":"work::bar"})).unwrap();
+    let err = ureq::post(&format!("{}/ray-exomem/api/actions/rename", d.base_url))
+        .send_json(json!({"path":"work::bar","new_segment":"FOO"}))
+        .unwrap_err();
+    if let ureq::Error::Status(s, _) = err { assert_eq!(s, 400); }
+    else { panic!("expected case-collision error"); }
+}
+
+#[test]
 fn rename_rejects_session_id() {
     let d = TestDaemon::start();
     ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))

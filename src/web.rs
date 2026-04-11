@@ -641,13 +641,43 @@ fn handle_connection(
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut buf = vec![0_u8; 131072];
-    let len = stream.read(&mut buf).context("failed to read request")?;
-    if len == 0 {
+    // Read until we have the full HTTP request (headers + body).
+    // A single stream.read() may return only part of the message on macOS loopback.
+    let mut buf = Vec::with_capacity(131072);
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut tmp).context("failed to read request")?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+
+        // Once we have the header section, check Content-Length so we know
+        // when the full body has arrived.
+        if let Some(header_end) = find_header_end(&buf) {
+            let header_str = String::from_utf8_lossy(&buf[..header_end]);
+            let mut content_length = 0usize;
+            for line in header_str.lines() {
+                if let Some(val) = line
+                    .strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+                {
+                    content_length = val.trim().parse().unwrap_or(0);
+                    break;
+                }
+            }
+            let body_start = header_end + 4;
+            if buf.len() >= body_start + content_length {
+                break;
+            }
+        }
+    }
+
+    if buf.is_empty() {
         return Ok(());
     }
 
-    let req = parse_request(&buf[..len])?;
+    let req = parse_request(&buf)?;
 
     // API routes
     if req.path.starts_with(API_PREFIX) || req.path == EVENTS_PATH {
@@ -2978,14 +3008,18 @@ fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
 fn api_action_session_join(_req: &Request, _state: &ServerState) -> ApiResult {
     // FIXME(nested-exoms-task-4.4): wire to brain branch ops — TOFU claim requires
     // branch splay table to be path-aware, which is deferred to Task 4.4.
-    let (s, b) = crate::http_error::ApiError::new("not_implemented", "session-join deferred to Task 4.4").into_response();
+    let (s, b) = crate::http_error::ApiError::new("not_implemented", "session-join deferred to Task 4.4")
+        .with_status(501)
+        .into_response();
     Ok(json_response(s, &b))
 }
 
 fn api_action_branch_create(_req: &Request, _state: &ServerState) -> ApiResult {
     // FIXME(nested-exoms-task-4.4): wire to brain branch ops — branch-create against
     // path-based exoms requires brain changes deferred to Task 4.4.
-    let (s, b) = crate::http_error::ApiError::new("not_implemented", "branch-create deferred to Task 4.4").into_response();
+    let (s, b) = crate::http_error::ApiError::new("not_implemented", "branch-create deferred to Task 4.4")
+        .with_status(501)
+        .into_response();
     Ok(json_response(s, &b))
 }
 

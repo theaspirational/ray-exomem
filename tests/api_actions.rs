@@ -44,6 +44,24 @@ fn exom_new_creates_bare_exom() {
 }
 
 #[test]
+fn session_join_returns_501() {
+    let d = TestDaemon::start();
+    let err = ureq::post(&format!("{}/ray-exomem/api/actions/session-join", d.base_url))
+        .send_json(json!({"session_path": "x", "actor": "y"})).unwrap_err();
+    if let ureq::Error::Status(s, _) = err { assert_eq!(s, 501); }
+    else { panic!("expected status error"); }
+}
+
+#[test]
+fn branch_create_returns_501() {
+    let d = TestDaemon::start();
+    let err = ureq::post(&format!("{}/ray-exomem/api/actions/branch-create", d.base_url))
+        .send_json(json!({"exom": "x", "branch": "y"})).unwrap_err();
+    if let ureq::Error::Status(s, _) = err { assert_eq!(s, 501); }
+    else { panic!("expected status error"); }
+}
+
+#[test]
 #[ignore] // FIXME(nested-exoms-task-4.4): session-join deferred to Task 4.4
 fn session_join_claims_branch() {
     let d = TestDaemon::start();

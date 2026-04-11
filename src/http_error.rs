@@ -8,21 +8,23 @@ pub struct ApiError {
     #[serde(skip_serializing_if = "Option::is_none")] pub actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub suggestion: Option<String>,
+    #[serde(skip)] status: u16,
 }
 
 impl ApiError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), path: None, actor: None, branch: None, suggestion: None }
+        Self { code, message: message.into(), path: None, actor: None, branch: None, suggestion: None, status: 400 }
     }
     pub fn with_path(mut self, p: impl Into<String>) -> Self { self.path = Some(p.into()); self }
     pub fn with_actor(mut self, a: impl Into<String>) -> Self { self.actor = Some(a.into()); self }
     pub fn with_branch(mut self, b: impl Into<String>) -> Self { self.branch = Some(b.into()); self }
     pub fn with_suggestion(mut self, s: impl Into<String>) -> Self { self.suggestion = Some(s.into()); self }
+    pub fn with_status(mut self, status: u16) -> Self { self.status = status; self }
 
     /// Convert to an HTTP (status, json-body) pair for the hand-rolled server.
     pub fn into_response(self) -> (u16, String) {
         let body = serde_json::to_string(&self).unwrap_or_else(|_| r#"{"code":"serialize_error","message":"failed to serialize error"}"#.to_string());
-        (400, body)
+        (self.status, body)
     }
 }
 

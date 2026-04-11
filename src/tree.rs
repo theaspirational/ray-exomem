@@ -163,12 +163,37 @@ pub fn rename_last_segment(
     crate::path::validate_segment(new_segment).map_err(|e| e.to_string())?;
     let parent = path.parent().unwrap_or_else(crate::path::TreePath::root);
     let src = path.to_disk_path(tree_root);
-    let dst = if parent.is_empty() {
-        tree_root.join(new_segment)
+    let parent_disk = if parent.is_empty() {
+        tree_root.to_path_buf()
     } else {
-        parent.to_disk_path(tree_root).join(new_segment)
+        parent.to_disk_path(tree_root)
     };
+    let dst = parent_disk.join(new_segment);
+
+    // Same-name same-case rename is a no-op; allow it.
+    if src == dst {
+        return if parent.is_empty() {
+            new_segment.parse().map_err(|e: crate::path::PathError| e.to_string())
+        } else {
+            parent.join(new_segment).map_err(|e| e.to_string())
+        };
+    }
+
     if dst.exists() { return Err(format!("target already exists: {}", dst.display())); }
+
+    // Case-insensitive collision check (necessary on macOS APFS).
+    let current_last = path.last().unwrap_or("");
+    if let Ok(entries) = std::fs::read_dir(&parent_disk) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str() {
+                if name_str.eq_ignore_ascii_case(new_segment) && name_str != current_last {
+                    return Err(format!("target already exists (case-insensitive): {}", entry.path().display()));
+                }
+            }
+        }
+    }
+
     std::fs::rename(&src, &dst).map_err(|e| e.to_string())?;
     if parent.is_empty() {
         new_segment.parse().map_err(|e: crate::path::PathError| e.to_string())
