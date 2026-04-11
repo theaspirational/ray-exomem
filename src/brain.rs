@@ -1496,8 +1496,12 @@ pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
     let branches_raw: Vec<Branch> = load_jsonl(&exom_disk.join("branch.jsonl"))
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    let fact_count = facts.len() as u64;
-    let last_tx = txs.last().map(|t| t.tx_time.clone());
+    let fact_count = facts.iter().filter(|f| f.revoked_by_tx.is_none()).count() as u64;
+    let last_tx = {
+        let mut sorted: Vec<&Tx> = txs.iter().collect();
+        sorted.sort_by_key(|t| t.tx_id);
+        sorted.last().map(|t| t.tx_time.clone())
+    };
 
     let mut branch_names: Vec<String> = branches_raw
         .iter()
@@ -1541,7 +1545,13 @@ pub fn precheck_write(
     if classify(&disk) != NodeKind::Exom {
         return Err(WriteError::NoSuchExom(exom_path.to_cli_string()));
     }
-    let meta = exom::read_meta(&disk)?;
+    let meta = match exom::read_meta(&disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(WriteError::NoSuchExom(exom_path.to_cli_string()));
+        }
+        Err(e) => return Err(WriteError::Io(e)),
+    };
     if let Some(s) = &meta.session {
         if s.closed_at.is_some() { return Err(WriteError::SessionClosed); }
     }
@@ -1596,6 +1606,16 @@ pub fn session_new(
     actor: &str,
     agents: &[String],
 ) -> Result<TreePath, crate::scaffold::ScaffoldError> {
+    if label.is_empty() || label.contains('/') || label.contains("::") || label.contains(' ') {
+        return Err(crate::scaffold::ScaffoldError::Path(
+            crate::path::PathError::InvalidSegment(label.to_string(), "label must be non-empty and free of '/', '::', or whitespace")
+        ));
+    }
+    if actor.is_empty() {
+        return Err(crate::scaffold::ScaffoldError::Path(
+            crate::path::PathError::InvalidSegment(actor.to_string(), "actor required")
+        ));
+    }
     // Project must exist and have sessions/ folder.
     let project_disk = project_path.to_disk_path(tree_root);
     if classify(&project_disk.join("main")) != NodeKind::Exom {
@@ -1666,8 +1686,26 @@ mod session_tests {
         crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
         let session = session_new(d.path(), &"work".parse().unwrap(), SessionType::Single, "old", "me", &[]).unwrap();
         mirror_session_meta_to_disk(d.path(), &session, "session/label", "new").unwrap();
+        mirror_session_meta_to_disk(d.path(), &session, "session/closed_at", "2026-04-12T00:00:00Z").unwrap();
+        mirror_session_meta_to_disk(d.path(), &session, "session/archived_at", "2026-04-12T01:00:00Z").unwrap();
         let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
-        assert_eq!(meta.session.unwrap().label, "new");
+        let s = meta.session.unwrap();
+        assert_eq!(s.label, "new");
+        assert_eq!(s.closed_at.as_deref(), Some("2026-04-12T00:00:00Z"));
+        assert_eq!(s.archived_at.as_deref(), Some("2026-04-12T01:00:00Z"));
+    }
+
+    #[test]
+    fn session_new_rejects_bad_label() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
+        let p: TreePath = "work".parse().unwrap();
+        assert!(session_new(d.path(), &p, SessionType::Single, "", "me", &[]).is_err());
+        assert!(session_new(d.path(), &p, SessionType::Single, "bad/name", "me", &[]).is_err());
+        assert!(session_new(d.path(), &p, SessionType::Single, "bad::name", "me", &[]).is_err());
+        assert!(session_new(d.path(), &p, SessionType::Single, "bad name", "me", &[]).is_err());
+        // empty actor
+        assert!(session_new(d.path(), &p, SessionType::Single, "ok", "", &[]).is_err());
     }
 }
 
