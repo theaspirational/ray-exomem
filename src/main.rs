@@ -1458,33 +1458,38 @@ fn main() {
         }
         Commands::Serve {
             bind,
-            ui_dir,
+            ui_dir: _,
             data_dir,
             no_persist,
         } => {
-            let root = resolve_ui_dir(ui_dir);
             let resolved_data_dir = if no_persist {
                 None
             } else {
                 Some(data_dir.unwrap_or_else(default_data_dir))
             };
-            if let Err(err) = ray_exomem::web::serve(root, bind, resolved_data_dir) {
+            let state = match ray_exomem::server::AppState::from_data_dir(resolved_data_dir) {
+                Ok(s) => s,
+                Err(err) => {
+                    eprintln!("error: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            eprintln!("[ray-exomem] Open http://{}:{}/ray-exomem/ in your browser", bind.ip(), bind.port());
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
                 eprintln!("error: {}", err);
                 std::process::exit(1);
             }
         }
         Commands::Daemon {
             bind,
-            ui_dir,
+            ui_dir: _,
             data_dir,
         } => {
             let data_dir = data_dir.unwrap_or_else(default_data_dir);
 
             // Stop any existing daemon
             stop_existing_daemon(&data_dir);
-
-            // Resolve UI dir before fork (needs cwd)
-            let root = resolve_ui_dir(ui_dir);
 
             // Fork into background
             unsafe {
@@ -1540,7 +1545,16 @@ fn main() {
                 });
             }
 
-            if let Err(err) = ray_exomem::web::serve(root, bind, Some(data_dir.clone())) {
+            let state = match ray_exomem::server::AppState::from_data_dir(Some(data_dir.clone())) {
+                Ok(s) => s,
+                Err(err) => {
+                    remove_pid(&data_dir);
+                    eprintln!("error: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
                 remove_pid(&data_dir);
                 eprintln!("error: {}", err);
                 std::process::exit(1);

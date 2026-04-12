@@ -978,7 +978,7 @@ fn parse_exom_to_slash_path(raw: &str) -> Result<String, (u16, String)> {
     let path: crate::path::TreePath = raw.parse().map_err(|e: crate::path::PathError| {
         let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string())
             .with_path(raw)
-            .into_response();
+            .into_http_pair();
         (s, b)
     })?;
     Ok(path.to_slash_string())
@@ -1383,7 +1383,7 @@ fn api_create_branch(
         if let Ok(exom_path) = exom.parse::<crate::path::TreePath>() {
             let tree_root = server_tree_root(state);
             if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
-                let (status, body) = crate::http_error::ApiError::from(e).into_response();
+                let (status, body) = crate::http_error::ApiError::from(e).into_http_pair();
                 return Ok(json_response(status, &body));
             }
         }
@@ -2344,7 +2344,7 @@ fn api_assert_fact(
             // No actor in body — reject immediately.
             let (status, body) = crate::http_error::ApiError::from(
                 crate::brain::WriteError::ActorRequired,
-            ).into_response();
+            ).into_http_pair();
             return Ok(json_response(status, &body));
         }
     };
@@ -2355,7 +2355,7 @@ fn api_assert_fact(
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(state);
         if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, branch_str, actor_str) {
-            let (status, body) = crate::http_error::ApiError::from(e).into_response();
+            let (status, body) = crate::http_error::ApiError::from(e).into_http_pair();
             return Ok(json_response(status, &body));
         }
     }
@@ -2515,7 +2515,7 @@ fn api_retract_all(state: &ServerState, exom: &str, ctx: &MutationContext) -> Ap
         if let Ok(exom_path) = exom.parse::<crate::path::TreePath>() {
             let tree_root = server_tree_root(state);
             if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
-                let (status, body) = crate::http_error::ApiError::from(e).into_response();
+                let (status, body) = crate::http_error::ApiError::from(e).into_http_pair();
                 return Ok(json_response(status, &body));
             }
         }
@@ -2565,7 +2565,7 @@ fn api_wipe(state: &ServerState, exom: &str, ctx: &MutationContext) -> ApiResult
         if let Ok(exom_path) = exom.parse::<crate::path::TreePath>() {
             let tree_root = server_tree_root(state);
             if let Err(e) = crate::brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
-                let (status, body) = crate::http_error::ApiError::from(e).into_response();
+                let (status, body) = crate::http_error::ApiError::from(e).into_http_pair();
                 return Ok(json_response(status, &body));
             }
         }
@@ -3168,7 +3168,7 @@ fn api_tree(req: &Request, state: &ServerState) -> ApiResult {
         Some(p) => match p.parse::<crate::path::TreePath>() {
             Ok(tp) => crate::tree::walk(&tree_root, &tp, &opts),
             Err(e) => {
-                let (status, body) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+                let (status, body) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
                 return Ok(json_response(status, &body));
             }
         },
@@ -3179,7 +3179,7 @@ fn api_tree(req: &Request, state: &ServerState) -> ApiResult {
             Ok((200, body))
         }
         Err(e) => {
-            let (status, body) = crate::http_error::ApiError::new("io", e.to_string()).into_response();
+            let (status, body) = crate::http_error::ApiError::new("io", e.to_string()).into_http_pair();
             Ok(json_response(status, &body))
         }
     }
@@ -3196,7 +3196,7 @@ fn api_action_init(req: &Request, state: &ServerState) -> ApiResult {
     let path: crate::path::TreePath = match path_str.parse() {
         Ok(p) => p,
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
@@ -3207,7 +3207,7 @@ fn api_action_init(req: &Request, state: &ServerState) -> ApiResult {
             json_ok(&serde_json::json!({"ok": true, "path": path.to_slash_string()}))
         }
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            let (s, b) = crate::http_error::ApiError::from(e).into_http_pair();
             Ok(json_response(s, &b))
         }
     }
@@ -3220,7 +3220,7 @@ fn api_action_exom_new(req: &Request, state: &ServerState) -> ApiResult {
     let path: crate::path::TreePath = match path_str.parse() {
         Ok(p) => p,
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
@@ -3231,7 +3231,7 @@ fn api_action_exom_new(req: &Request, state: &ServerState) -> ApiResult {
             json_ok(&serde_json::json!({"ok": true, "path": path.to_slash_string()}))
         }
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            let (s, b) = crate::http_error::ApiError::from(e).into_http_pair();
             Ok(json_response(s, &b))
         }
     }
@@ -3244,7 +3244,7 @@ fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
     let project_path: crate::path::TreePath = match project_path_str.parse() {
         Ok(p) => p,
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
@@ -3256,7 +3256,7 @@ fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
             let (s, b) = crate::http_error::ApiError::new(
                 "bad_session_type",
                 format!("unknown session type {:?}; use 'multi' or 'single'", other),
-            ).into_response();
+            ).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
@@ -3276,7 +3276,7 @@ fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
             }))
         }
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            let (s, b) = crate::http_error::ApiError::from(e).into_http_pair();
             Ok(json_response(s, &b))
         }
     }
@@ -3291,14 +3291,14 @@ fn api_action_session_join(req: &Request, state: &ServerState) -> ApiResult {
     let session_path: crate::path::TreePath = match session_path_str.parse() {
         Ok(p) => p,
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
     if actor.is_empty() {
         let (s, b) = crate::http_error::ApiError::new("actor_required", "actor required")
             .with_suggestion("pass actor in request body")
-            .into_response();
+            .into_http_pair();
         return Ok(json_response(s, &b));
     }
 
@@ -3311,7 +3311,7 @@ fn api_action_session_join(req: &Request, state: &ServerState) -> ApiResult {
             "branch": branch,
         })),
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            let (s, b) = crate::http_error::ApiError::from(e).into_http_pair();
             Ok(json_response(s, &b))
         }
     }
@@ -3329,19 +3329,19 @@ fn api_action_branch_create(req: &Request, state: &ServerState) -> ApiResult {
     let exom_path: crate::path::TreePath = match exom_path_str.parse() {
         Ok(p) => p,
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
     if branch_name.is_empty() {
         let (s, b) = crate::http_error::ApiError::new("branch_name_required", "branch_name required")
-            .into_response();
+            .into_http_pair();
         return Ok(json_response(s, &b));
     }
     if actor.is_empty() {
         let (s, b) = crate::http_error::ApiError::new("actor_required", "actor required")
             .with_suggestion("pass actor in request body")
-            .into_response();
+            .into_http_pair();
         return Ok(json_response(s, &b));
     }
     // HTTP-layer access control: only the session orchestrator may create branches.
@@ -3354,7 +3354,7 @@ fn api_action_branch_create(req: &Request, state: &ServerState) -> ApiResult {
             let (s, b) = crate::http_error::ApiError::new("no_such_exom",
                 format!("no such exom {exom_path_str}"))
                 .with_path(exom_path_str)
-                .into_response();
+                .into_http_pair();
             return Ok(json_response(s, &b));
         }
         Err(e) => return Err(anyhow::anyhow!("io: {}", e)),
@@ -3364,7 +3364,7 @@ fn api_action_branch_create(req: &Request, state: &ServerState) -> ApiResult {
             let (s, b) = crate::http_error::ApiError::new("not_orchestrator",
                 format!("only the session orchestrator ({}) may create branches", sess.initiated_by))
                 .with_actor(actor.clone())
-                .into_response();
+                .into_http_pair();
             return Ok(json_response(s, &b));
         }
     }
@@ -3379,7 +3379,7 @@ fn api_action_branch_create(req: &Request, state: &ServerState) -> ApiResult {
             }))
         }
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            let (s, b) = crate::http_error::ApiError::from(e).into_http_pair();
             Ok(json_response(s, &b))
         }
     }
@@ -3397,7 +3397,7 @@ fn api_action_rename(req: &Request, state: &ServerState) -> ApiResult {
     let path: crate::path::TreePath = match path_str.parse() {
         Ok(p) => p,
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_http_pair();
             return Ok(json_response(s, &b));
         }
     };
@@ -3410,7 +3410,7 @@ fn api_action_rename(req: &Request, state: &ServerState) -> ApiResult {
                 let (s, b) = crate::http_error::ApiError::new(
                     "session_id_immutable",
                     "cannot rename session id; use session/label to change the display label",
-                ).into_response();
+                ).into_http_pair();
                 return Ok(json_response(s, &b));
             }
         }
@@ -3421,7 +3421,7 @@ fn api_action_rename(req: &Request, state: &ServerState) -> ApiResult {
             json_ok(&serde_json::json!({"ok": true, "new_path": new_path.to_slash_string()}))
         }
         Err(e) => {
-            let (s, b) = crate::http_error::ApiError::new("rename_failed", e).into_response();
+            let (s, b) = crate::http_error::ApiError::new("rename_failed", e).into_http_pair();
             Ok(json_response(s, &b))
         }
     }

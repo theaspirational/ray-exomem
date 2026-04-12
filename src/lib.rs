@@ -12,6 +12,7 @@ pub mod rayfall_ast;
 pub mod rayfall_parser;
 pub mod rules;
 pub mod scaffold;
+pub mod server;
 pub mod storage;
 pub mod system_schema;
 pub mod tree;

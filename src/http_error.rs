@@ -22,9 +22,21 @@ impl ApiError {
     pub fn with_status(mut self, status: u16) -> Self { self.status = status; self }
 
     /// Convert to an HTTP (status, json-body) pair for the hand-rolled server.
-    pub fn into_response(self) -> (u16, String) {
+    pub fn into_http_pair(self) -> (u16, String) {
         let body = serde_json::to_string(&self).unwrap_or_else(|_| r#"{"code":"serialize_error","message":"failed to serialize error"}"#.to_string());
         (self.status, body)
+    }
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let status = match self.status {
+            410 => axum::http::StatusCode::GONE,
+            501 => axum::http::StatusCode::NOT_IMPLEMENTED,
+            400 => axum::http::StatusCode::BAD_REQUEST,
+            _ => axum::http::StatusCode::BAD_REQUEST,
+        };
+        (status, axum::Json(&self)).into_response()
     }
 }
 
