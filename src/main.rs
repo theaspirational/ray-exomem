@@ -313,7 +313,7 @@ enum Commands {
             Stop with: ray-exomem stop")]
     Daemon {
         /// Bind address for the server.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_BIND_ADDR)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_BIND_ADDR)]
         bind: SocketAddr,
 
         /// Directory containing the SvelteKit static build.
@@ -343,7 +343,7 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
         /// Exom used for `--branch` switch (query source still names its database).
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Attribution: sent as X-Actor (default: anonymous).
         #[arg(long)]
@@ -360,7 +360,7 @@ enum Commands {
     /// Foreground server (same UI + API as `daemon`; blocks the terminal). Prefer `daemon` for daily use.
     Serve {
         /// Bind address for the server.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_BIND_ADDR)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_BIND_ADDR)]
         bind: SocketAddr,
 
         /// Directory containing the SvelteKit static build.
@@ -383,7 +383,7 @@ enum Commands {
     /// Check daemon status and exom stats.
     Status {
         /// Target exom (default: "main").
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -416,7 +416,7 @@ enum Commands {
         #[arg(long)]
         valid_to: Option<String>,
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -437,7 +437,7 @@ enum Commands {
         /// Fact id to retract (same key used on upsert).
         fact_id: String,
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -456,7 +456,7 @@ enum Commands {
     /// List current facts in an exom.
     Facts {
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -465,7 +465,7 @@ enum Commands {
 
     /// Evaluate a Rayfall query against the daemon.
     Query {
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -494,7 +494,7 @@ enum Commands {
 
     /// Health and consistency checks (daemon, branches, query decode).
     Doctor {
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -504,7 +504,7 @@ enum Commands {
 
     /// Print JSON session contract for agents (exom, URL, branch, required headers).
     StartSession {
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -530,7 +530,7 @@ enum Commands {
         #[arg(long, default_value = "")]
         tags: String,
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -549,7 +549,7 @@ enum Commands {
     /// Export all data from an exom as lossless JSON (default) or human-readable Rayfall.
     Export {
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -564,7 +564,7 @@ enum Commands {
         /// Path to a .json backup file, or "-" for stdin.
         file: String,
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -581,7 +581,7 @@ enum Commands {
     /// Show recent transaction log.
     Log {
         /// Target exom.
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
@@ -598,7 +598,7 @@ enum Commands {
     Branch {
         #[command(subcommand)]
         command: BranchCommands,
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -608,7 +608,7 @@ enum Commands {
     Coord {
         #[command(subcommand)]
         command: CoordCommands,
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -627,7 +627,7 @@ enum Commands {
     /// Full history and touch log for a fact id (GET /api/facts/<id>).
     History {
         fact_id: String,
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -639,7 +639,7 @@ enum Commands {
     /// Explain a fact or predicate (GET /api/explain).
     Why {
         fact_id: String,
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -653,7 +653,7 @@ enum Commands {
         predicate: String,
         #[arg(long)]
         value: Option<String>,
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -669,7 +669,7 @@ enum Commands {
 
     /// Heuristic hygiene report over exported Rayfall facts.
     LintMemory {
-        #[arg(long, default_value = ray_exomem::web::DEFAULT_EXOM)]
+        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -949,7 +949,7 @@ fn apply_expand_query_exom(source: &str, exom: Option<&str>) -> Result<String> {
         form,
         ray_exomem::rayfall_ast::LoweringOptions {
             default_query_exom: Some(exom),
-            default_rule_exom: Some(ray_exomem::web::DEFAULT_EXOM),
+            default_rule_exom: Some(ray_exomem::server::DEFAULT_EXOM),
         },
     )?;
     match lowered.as_slice() {
@@ -3414,7 +3414,7 @@ mod tests {
                 data_dir,
                 no_persist,
             } => {
-                assert_eq!(bind.to_string(), ray_exomem::web::DEFAULT_BIND_ADDR);
+                assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
                 assert!(data_dir.is_none());
                 assert!(!no_persist);
@@ -3432,7 +3432,7 @@ mod tests {
                 ui_dir,
                 data_dir,
             } => {
-                assert_eq!(bind.to_string(), ray_exomem::web::DEFAULT_BIND_ADDR);
+                assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
                 assert!(data_dir.is_none());
             }

@@ -7,14 +7,36 @@ use std::{
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header, StatusCode, Uri},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
     routing::{delete, get, post},
     Json, Router,
 };
+use futures::StreamExt;
+use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
+
+// ---------------------------------------------------------------------------
+// Embedded UI
+// ---------------------------------------------------------------------------
+
+static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/build");
+
+// ---------------------------------------------------------------------------
+// Public constants (previously in web.rs)
+// ---------------------------------------------------------------------------
+
+pub const UI_MOUNT_PATH: &str = "/ray-exomem";
+pub const API_PREFIX: &str = "/ray-exomem/api/";
+pub const EVENTS_PATH: &str = "/ray-exomem/events";
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9780";
+pub const DEFAULT_EXOM: &str = "main";
 
 use crate::{
     backend::RayforceEngine,
@@ -69,7 +91,7 @@ impl AppState {
 
     /// Build AppState by loading a data directory (same logic as web::serve).
     pub fn from_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Arc<Self>> {
-        use crate::{exom::ExomDir, web::DEFAULT_EXOM};
+        use crate::exom::ExomDir;
 
         let engine = RayforceEngine::new()?;
         let mut exoms: HashMap<String, ExomState> = HashMap::new();
@@ -251,6 +273,64 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/start-session", post(api_start_session_gone))
 }
 
+// ---------------------------------------------------------------------------
+// SSE endpoint
+// ---------------------------------------------------------------------------
+
+async fn api_sse(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = state.sse_tx.subscribe();
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|r| async { r.ok() })
+        .map(|data| Ok(Event::default().data(data)));
+    Sse::new(stream)
+}
+
+// ---------------------------------------------------------------------------
+// SPA fallback
+// ---------------------------------------------------------------------------
+
+fn content_type_for_ext(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn spa_fallback(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    if let Some(file) = EMBEDDED_UI.get_file(path) {
+        let ct = content_type_for_ext(path);
+        return (StatusCode::OK, [(header::CONTENT_TYPE, ct)], file.contents()).into_response();
+    }
+
+    // SPA client-side routing fallback
+    if let Some(index) = EMBEDDED_UI.get_file("index.html") {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            index.contents(),
+        )
+            .into_response();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
+}
+
 pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -260,8 +340,11 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
     let app = Router::new()
         // Nested under /ray-exomem/api
         .nest("/ray-exomem/api", api_router())
+        // SSE event stream
+        .route("/sse", get(api_sse))
         // Compat shim: smoke test calls /api/status
         .route("/api/status", get(api_status))
+        .fallback(spa_fallback)
         .with_state(state)
         .layer(cors);
 
@@ -418,7 +501,7 @@ fn emit_tree_changed(state: &AppState) {
 // ---------------------------------------------------------------------------
 
 async fn api_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let exom = crate::web::DEFAULT_EXOM;
+    let exom = DEFAULT_EXOM;
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root_val = state.tree_root.as_deref();
     let sym_path_val = state.sym_path.as_deref();
@@ -803,7 +886,7 @@ async fn api_assert_fact(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AssertFactBody>,
 ) -> impl IntoResponse {
-    let exom_raw = req.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = req.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -919,7 +1002,7 @@ fn lower_query_request(
         &forms[0],
         LoweringOptions {
             default_query_exom: default_exom,
-            default_rule_exom: Some(crate::web::DEFAULT_EXOM),
+            default_rule_exom: Some(DEFAULT_EXOM),
         },
     )?;
     match lowered.as_slice() {
@@ -951,7 +1034,7 @@ fn lower_eval_forms(source: &str) -> anyhow::Result<Vec<EvalForm>> {
                     &form,
                     LoweringOptions {
                         default_query_exom: None,
-                        default_rule_exom: Some(crate::web::DEFAULT_EXOM),
+                        default_rule_exom: Some(DEFAULT_EXOM),
                     },
                 )?;
                 out.extend(lowered.into_iter().map(EvalForm::Canonical));
@@ -1340,7 +1423,7 @@ async fn api_facts_valid_at(
                 .into_response();
         }
     };
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1392,7 +1475,7 @@ async fn api_facts_bitemporal(
         )
             .into_response();
     }
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1430,7 +1513,7 @@ async fn api_fact_detail(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1518,7 +1601,7 @@ async fn api_list_branches(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1572,7 +1655,7 @@ async fn api_create_branch(
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
     };
 
-    let exom_raw = body.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = body.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1605,7 +1688,7 @@ async fn api_branch_detail(
     AxumPath(branch_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1657,7 +1740,7 @@ async fn api_delete_branch_handler(
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
     };
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1689,7 +1772,7 @@ async fn api_switch_branch_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("anonymous")
         .to_string();
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1725,7 +1808,7 @@ async fn api_branch_diff_handler(
     Query(q): Query<DiffQuery>,
 ) -> impl IntoResponse {
     let base = q.base.as_deref().unwrap_or("main");
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1784,7 +1867,7 @@ async fn api_merge_branch_handler(
         "manual" => MergePolicy::Manual,
         _ => return ApiError::new("bad_policy", "unknown merge policy").into_response(),
     };
-    let exom_raw = body.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = body.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1827,7 +1910,7 @@ async fn api_explain(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExplainQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1896,7 +1979,7 @@ async fn api_export(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -1944,7 +2027,7 @@ async fn api_export_json(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2005,7 +2088,7 @@ async fn api_import_json(
     }
 
     let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2075,7 +2158,7 @@ async fn api_retract_all(
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
     };
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2118,7 +2201,7 @@ async fn api_wipe(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2166,7 +2249,7 @@ async fn api_factory_reset(
     let old_names: Vec<String> = exoms.keys().cloned().collect();
     exoms.clear();
 
-    let default_exom = crate::web::DEFAULT_EXOM;
+    let default_exom = DEFAULT_EXOM;
     let new_es = ExomState {
         brain: Brain::new(),
         datoms: match storage::build_datoms_table(&Brain::new()) {
@@ -2206,7 +2289,7 @@ async fn api_schema(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SchemaQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2370,7 +2453,7 @@ async fn api_graph(
     State(state): State<Arc<AppState>>,
     Query(q): Query<GraphQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2414,7 +2497,7 @@ async fn api_clusters(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2448,7 +2531,7 @@ async fn api_cluster_detail_handler(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2485,7 +2568,7 @@ async fn api_logs(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2513,7 +2596,7 @@ async fn api_provenance(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2551,7 +2634,7 @@ async fn api_relation_graph(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2589,7 +2672,7 @@ async fn api_derived_handler(
     if pred_name.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing predicate"}))).into_response();
     }
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2632,7 +2715,7 @@ async fn api_belief_support_handler(
     AxumPath(belief_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
@@ -2688,7 +2771,7 @@ async fn api_exom_manage_handler(
 ) -> impl IntoResponse {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
     let action = payload["action"].as_str().unwrap_or("").to_string();
-    let default_exom = crate::web::DEFAULT_EXOM;
+    let default_exom = DEFAULT_EXOM;
     let mut exoms = state.exoms.lock().unwrap();
 
     match action.as_str() {
