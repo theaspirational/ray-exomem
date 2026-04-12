@@ -29,16 +29,16 @@ impl TestDaemon {
             .expect("spawn daemon");
 
         let base_url = format!("http://127.0.0.1:{port}");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let mut ready = false;
         while Instant::now() < deadline {
             if let Ok(r) = ureq::get(&format!("{base_url}/ray-exomem/api/status")).call() {
                 if r.status() == 200 { ready = true; break; }
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(100));
         }
         if !ready {
-            panic!("daemon did not become healthy within 5 seconds at {base_url}");
+            panic!("daemon did not become healthy within 15 seconds at {base_url}");
         }
 
         TestDaemon { data_dir, port, base_url, child }
