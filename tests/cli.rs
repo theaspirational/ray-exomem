@@ -183,7 +183,7 @@ fn guide_subcommand_prints_doctrine() {
 #[test]
 fn query_accepts_at_file() {
     let d = TestDaemon::start();
-    let url = format!("http://127.0.0.1:{}/ray-exomem", d.port);
+    let addr = format!("127.0.0.1:{}", d.port);
     // Write a .ray file with a valid query against the default "main" exom,
     // which is always present. The test exercises @file body reading.
     let ray_path = d.data_dir.path().join("q.ray");
@@ -197,11 +197,11 @@ fn query_accepts_at_file() {
         .args([
             "--data-dir",
             d.data_dir.path().to_str().unwrap(),
-            "--daemon-url",
-            &url,
             "query",
             "--exom",
             "main",
+            "--addr",
+            &addr,
             &arg,
         ])
         .output()

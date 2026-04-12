@@ -1271,18 +1271,6 @@ fn remove_pid(data_dir: &std::path::Path) {
     let _ = std::fs::remove_file(pid_path(data_dir));
 }
 
-fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> Option<PathBuf> {
-    ui_dir.map(|d| {
-        if d.is_absolute() {
-            d
-        } else {
-            std::env::current_dir()
-                .expect("failed to read current working directory")
-                .join(d)
-        }
-    })
-}
-
 /// Read a Rayfall body argument: `@path` reads a file, `-` reads stdin, anything else is literal.
 fn read_rayfall_arg(arg: &str) -> anyhow::Result<String> {
     if arg == "-" {

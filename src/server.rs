@@ -12,7 +12,7 @@ use axum::{
         sse::{Event, Sse},
         IntoResponse,
     },
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use futures::StreamExt;
@@ -1089,7 +1089,8 @@ fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomState>) {
 
 #[derive(Deserialize, Default)]
 struct QueryParams {
-    exom: Option<String>,
+    #[serde(rename = "exom")]
+    _exom: Option<String>,
 }
 
 async fn api_query_get(
@@ -1109,7 +1110,7 @@ async fn api_query_post(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let source = String::from_utf8_lossy(&body).into_owned();
-    let mut exoms = state.exoms.lock().unwrap();
+    let exoms = state.exoms.lock().unwrap();
     let expanded = match expand_query(&exoms, &state.engine, &source, None, "api/query") {
         Ok(e) => e,
         Err(err) => {
@@ -1199,11 +1200,6 @@ async fn api_expand_query(
 // POST /actions/eval
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, Default)]
-struct EvalActorHeader {
-    // actor may come from x-actor header or body — we allow both
-}
-
 async fn api_eval(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -1279,7 +1275,7 @@ async fn api_eval_inner(
                     es.brain.retract_fact_exact(&fact_id, &pred, &value, &ctx)?;
                     es.datoms = storage::build_datoms_table(&es.brain)?;
                     state.engine.bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
-                    if let Some(disk) = es.exom_disk.as_ref() {
+                    if let Some(_disk) = es.exom_disk.as_ref() {
                         es.brain.save()?;
                     }
                     let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
@@ -1836,7 +1832,7 @@ async fn api_delete_branch_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("anonymous")
         .to_string();
-    let ctx = MutationContext {
+    let _ctx = MutationContext {
         actor: actor.clone(),
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
@@ -2201,7 +2197,7 @@ async fn api_import_json(
         Err(e) => return ApiError::new("invalid_payload", format!("invalid JSON import payload: {}", e)).into_response(),
     };
 
-    let ctx = MutationContext {
+    let _ctx = MutationContext {
         actor: actor.clone(),
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
