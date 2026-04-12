@@ -469,7 +469,10 @@ enum Commands {
         exom: String,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
+        /// Rayfall query source (also accepts @<path> or -). Alternative: --request.
+        body: Option<String>,
         /// Rayfall query source; default lists visible logical facts via fact/predicate and fact/value.
+        /// Also accepts @<path> (read from file) or - (read from stdin).
         #[arg(long)]
         request: Option<String>,
         #[arg(long)]
@@ -482,6 +485,7 @@ enum Commands {
         exom: Option<String>,
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
+        /// Rayfall query; accepts @file or -.
         #[arg(long)]
         request: String,
         #[arg(long)]
@@ -1279,6 +1283,19 @@ fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> Option<PathBuf> {
     })
 }
 
+/// Read a Rayfall body argument: `@path` reads a file, `-` reads stdin, anything else is literal.
+fn read_rayfall_arg(arg: &str) -> anyhow::Result<String> {
+    if arg == "-" {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+        return Ok(s);
+    }
+    if let Some(path) = arg.strip_prefix('@') {
+        return Ok(std::fs::read_to_string(path)?);
+    }
+    Ok(arg.to_string())
+}
+
 /// Render a `TreeNode` as an ASCII tree string.
 fn render_tree(
     node: &ray_exomem::tree::TreeNode,
@@ -1692,17 +1709,31 @@ fn main() {
         Commands::Query {
             exom,
             addr,
+            body,
             request,
             json: q_json,
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
-            let source = if let Some(r) = request {
-                r
+            // Resolve the exom to a slash-path (supports :: notation).
+            let exom_slash = if let Ok(tp) = exom.parse::<ray_exomem::path::TreePath>() {
+                tp.to_slash_string()
             } else {
-                format!(
+                exom.clone()
+            };
+            // Priority: positional body > --request > default query.
+            let raw_source = body.or(request);
+            let source = match raw_source {
+                Some(ref raw) => match read_rayfall_arg(raw) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error reading query body: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => format!(
                     "(query {} (find ?fact ?pred ?value) (where (?fact 'fact/predicate ?pred) (?fact 'fact/value ?value)))",
-                    exom
-                )
+                    exom_slash
+                ),
             };
             let compact = json_stdout(global_json, q_json);
             let h = vec![("X-Actor", "cli-query")];
@@ -1737,6 +1768,13 @@ fn main() {
             json: eq_json,
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
+            let request = match read_rayfall_arg(&request) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error reading query body: {}", e);
+                    std::process::exit(1);
+                }
+            };
             let source = match apply_expand_query_exom(&request, exom.as_deref()) {
                 Ok(source) => source,
                 Err(e) => {

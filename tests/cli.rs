@@ -175,3 +175,40 @@ fn guide_subcommand_prints_doctrine() {
     assert!(s.contains("agent guide"), "stdout: {}", s);
     assert!(s.contains("Multi-line commands"), "stdout: {}", s);
 }
+
+// ============================================================
+// Task 5.5 — Rayfall @file / - stdin support
+// ============================================================
+
+#[test]
+fn query_accepts_at_file() {
+    let d = TestDaemon::start();
+    let url = format!("http://127.0.0.1:{}/ray-exomem", d.port);
+    // Write a .ray file with a valid query against the default "main" exom,
+    // which is always present. The test exercises @file body reading.
+    let ray_path = d.data_dir.path().join("q.ray");
+    std::fs::write(
+        &ray_path,
+        "(query main (find ?f ?p ?v) (where (?f 'fact/predicate ?p) (?f 'fact/value ?v)))",
+    )
+    .unwrap();
+    let arg = format!("@{}", ray_path.display());
+    let out = Command::new(env!("CARGO_BIN_EXE_ray-exomem"))
+        .args([
+            "--data-dir",
+            d.data_dir.path().to_str().unwrap(),
+            "--daemon-url",
+            &url,
+            "query",
+            "--exom",
+            "main",
+            &arg,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
