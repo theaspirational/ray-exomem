@@ -91,37 +91,34 @@ impl AppState {
 
     /// Build AppState by loading a data directory (same logic as web::serve).
     pub fn from_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Arc<Self>> {
-        use crate::exom::ExomDir;
-
         let engine = RayforceEngine::new()?;
         let mut exoms: HashMap<String, ExomState> = HashMap::new();
         let (tree_root, sym_path) = match data_dir {
             Some(ref root) => {
-                let ed = ExomDir::open(root.clone())?;
-                let sym = ed.sym_path();
+                let sym = root.join("sym");
+                if !storage::sym_load(&sym)? {
+                    eprintln!(
+                        "[ray-exomem] WARNING: symbol table incompatible (binary upgrade?). \
+                         Recovering from JSONL sidecars: {}",
+                        root.display()
+                    );
+                    if sym.exists() {
+                        let _ = std::fs::remove_file(&sym);
+                    }
+                    let sym_lk = root.join("sym.lk");
+                    if sym_lk.exists() {
+                        let _ = std::fs::remove_file(&sym_lk);
+                    }
+                }
                 let tree_dir = root.join("tree");
-                if tree_dir.exists() {
+                std::fs::create_dir_all(&tree_dir).ok();
+                load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
+                if exoms.is_empty() {
+                    let default_path: crate::path::TreePath = "main".parse().unwrap();
+                    let _ = crate::scaffold::new_bare_exom(&tree_dir, &default_path);
                     load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
                 }
-                // Load legacy flat exoms.
-                for name in ed.list_exoms()? {
-                    if exoms.contains_key(&name) {
-                        continue;
-                    }
-                    eprintln!("[ray-exomem] loading flat exom '{}'", name);
-                    if let Ok(es) = load_flat_exom(&ed, &name) {
-                        exoms.insert(name, es);
-                    }
-                }
-                if exoms.is_empty() {
-                    ed.create_exom(DEFAULT_EXOM)?;
-                    if let Ok(es) = load_flat_exom(&ed, DEFAULT_EXOM) {
-                        exoms.insert(DEFAULT_EXOM.to_string(), es);
-                    }
-                }
-                let tree_root = root.join("tree");
-                std::fs::create_dir_all(&tree_root).ok();
-                (Some(tree_root), Some(sym))
+                (Some(tree_dir), Some(sym))
             }
             None => {
                 exoms.insert(DEFAULT_EXOM.to_string(), ExomState {
@@ -187,31 +184,6 @@ fn load_exom_from_tree_path_inner(
     load_exom_from_tree_path(exom_disk, sym_path, slash_key)
 }
 
-fn load_flat_exom(ed: &crate::exom::ExomDir, name: &str) -> anyhow::Result<ExomState> {
-    let brain = {
-        let b = Brain::open_exom(&ed.exom_path(name), &ed.sym_path())?;
-        b.ensure_jsonl_sidecars()?;
-        b
-    };
-    let datoms = storage::build_datoms_table(&brain)?;
-    let rules_p = ed.exom_path(name).join("rules.ray");
-    let rules = if rules_p.exists() {
-        let src = std::fs::read_to_string(&rules_p)?;
-        let mut out = Vec::new();
-        for line in src.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            out.push(crate::rules::parse_rule_line(
-                line,
-                context::MutationContext::default(),
-                String::new(),
-            )?);
-        }
-        out
-    } else {
-        Vec::new()
-    };
-    Ok(ExomState { brain, datoms, rules, exom_disk: None })
-}
-
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -268,8 +240,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // Derived / beliefs
         .route("/derived/{pred}", get(api_derived_handler))
         .route("/beliefs/{id}/support", get(api_belief_support_handler))
-        // Exom manage (legacy)
-        .route("/exoms/{name}/manage", post(api_exom_manage_handler))
+        // Exom manage (removed)
+        .route("/exoms/{name}/manage", post(api_exoms_gone))
         // Old start-session compat → 410
         .route("/actions/start-session", post(api_start_session_gone))
 }
@@ -2887,62 +2859,6 @@ async fn api_belief_support_handler(
         "supported_by_unresolved": unresolved,
     }))
     .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// POST /exoms/:name/manage (legacy)
-// ---------------------------------------------------------------------------
-
-async fn api_exom_manage_handler(
-    State(state): State<Arc<AppState>>,
-    AxumPath(name): AxumPath<String>,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
-    let action = payload["action"].as_str().unwrap_or("").to_string();
-    let default_exom = DEFAULT_EXOM;
-    let mut exoms = state.exoms.lock().unwrap();
-
-    match action.as_str() {
-        "delete" => {
-            if name == default_exom {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "cannot delete the default exom"}))).into_response();
-            }
-            if exoms.remove(&name).is_some() {
-                reconcile_engine(&state, &exoms);
-                Json(serde_json::json!({"ok": true, "deleted": name})).into_response()
-            } else {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("exom '{}' not found", name)}))).into_response()
-            }
-        }
-        "rename" => {
-            let new_name = payload["new_name"].as_str().unwrap_or("").to_string();
-            if new_name.is_empty() {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "new_name is required"}))).into_response();
-            }
-            if name == default_exom {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "cannot rename the default exom"}))).into_response();
-            }
-            if exoms.contains_key(new_name.as_str()) {
-                return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("exom '{}' already exists", new_name)}))).into_response();
-            }
-            if let Some(es) = exoms.remove(&name) {
-                exoms.insert(new_name.clone(), es);
-                reconcile_engine(&state, &exoms);
-                Json(serde_json::json!({"ok": true, "old_name": name, "new_name": new_name})).into_response()
-            } else {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("exom '{}' not found", name)}))).into_response()
-            }
-        }
-        "archive" => {
-            if exoms.contains_key(&name) {
-                Json(serde_json::json!({"ok": true, "archived": name})).into_response()
-            } else {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("exom '{}' not found", name)}))).into_response()
-            }
-        }
-        _ => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("unknown action '{}'", action)}))).into_response(),
-    }
 }
 
 // ---------------------------------------------------------------------------
