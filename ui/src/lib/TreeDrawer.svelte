@@ -228,7 +228,13 @@
 			{/snippet}
 
 			{#if root.kind === 'folder'}
-				{@render treeNodes(root.children, 0)}
+				{#if root.children.length === 0}
+					<p class="px-1 py-3 text-[11px] leading-relaxed text-zinc-500">
+						Empty tree — run <span class="font-mono text-zinc-400">ray-exomem init</span> to create a project.
+					</p>
+				{:else}
+					{@render treeNodes(root.children, 0)}
+				{/if}
 			{:else}
 				<p class="px-1 py-2 text-[11px] text-zinc-500">Unexpected tree root (not a folder).</p>
 			{/if}

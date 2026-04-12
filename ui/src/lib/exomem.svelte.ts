@@ -152,18 +152,28 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json();
 }
 
-/** Matches server TOFU / `TopBar` — used for mutation `X-Actor` and assert-fact body. */
+/** Matches server TOFU / `TopBar` — used for mutation `X-Actor` and assert-fact body. Empty when unset. */
 export function getRayExomemActor(): string {
-	if (!browser) return 'ui';
-	return localStorage.getItem('ray-exomem-actor')?.trim() || 'ui';
+	if (!browser) return '';
+	return localStorage.getItem('ray-exomem-actor')?.trim() ?? '';
+}
+
+function actorHeaders(): Record<string, string> {
+	const actor = getRayExomemActor();
+	if (!actor) {
+		throw new Error('Actor identity is not set. Choose an actor name in the prompt dialog.');
+	}
+	return {
+		'X-Actor': actor,
+		'X-Session': 'exomem-web',
+		'X-Model': 'svelte'
+	};
 }
 
 function mutationHeaders(): Record<string, string> {
 	return {
 		'Content-Type': 'application/json',
-		'X-Actor': getRayExomemActor(),
-		'X-Session': 'exomem-web',
-		'X-Model': 'svelte'
+		...actorHeaders()
 	};
 }
 
@@ -190,12 +200,12 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	return res.json();
 }
 
-const EVAL_HEADERS: Record<string, string> = {
-	'Content-Type': 'text/plain',
-	'X-Actor': 'ui',
-	'X-Session': 'exomem-web',
-	'X-Model': 'svelte'
-};
+function evalHeaders(): Record<string, string> {
+	return {
+		'Content-Type': 'text/plain',
+		...actorHeaders()
+	};
+}
 
 async function postText<T>(path: string, body: string): Promise<T> {
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
@@ -203,7 +213,7 @@ async function postText<T>(path: string, body: string): Promise<T> {
 	try {
 		res = await fetch(endpoint(path), {
 			method: 'POST',
-			headers: EVAL_HEADERS,
+			headers: evalHeaders(),
 			body,
 			signal
 		});
@@ -440,11 +450,15 @@ export function apiSessionNew(body: {
 	actor?: string;
 	agents?: string[];
 }): Promise<{ ok: boolean; session_path: string }> {
+	const actor = body.actor ?? getRayExomemActor();
+	if (!actor) {
+		return Promise.reject(new Error('Actor identity is not set. Choose an actor name in the prompt dialog.'));
+	}
 	return postAction('api/actions/session-new', {
 		project_path: body.project_path,
 		type: body.type,
 		label: body.label,
-		actor: body.actor ?? 'ui',
+		actor,
 		agents: body.agents ?? []
 	});
 }
@@ -1069,11 +1083,7 @@ async function deleteRequest(path: string): Promise<void> {
 	try {
 		res = await fetch(endpoint(path), {
 			method: 'DELETE',
-			headers: {
-				'X-Actor': 'ui',
-				'X-Session': 'exomem-web',
-				'X-Model': 'svelte'
-			},
+			headers: actorHeaders(),
 			signal
 		});
 		clear();

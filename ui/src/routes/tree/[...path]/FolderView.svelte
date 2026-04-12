@@ -8,6 +8,7 @@
 	import { Card } from '$lib/components/ui/card/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import {
 		apiInitFolder,
 		apiNewBareExom,
@@ -49,51 +50,57 @@
 		goto(`${base}/tree/${p}`);
 	}
 
-	async function doInit() {
-		busy = true;
-		try {
-			await apiInitFolder(fieldInit.trim());
-			toast.success('Initialized');
-			openInit = false;
-			goto(`${base}/tree/${fieldInit.replace(/^\//, '')}`, { invalidateAll: true });
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Init failed');
-		} finally {
-			busy = false;
-		}
+	function doInit() {
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				await apiInitFolder(fieldInit.trim());
+				toast.success('Initialized');
+				openInit = false;
+				goto(`${base}/tree/${fieldInit.replace(/^\//, '')}`, { invalidateAll: true });
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Init failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 
-	async function doExom() {
-		busy = true;
-		try {
-			await apiNewBareExom(fieldExom.trim());
-			toast.success('Exom created');
-			openExom = false;
-			goto(`${base}/tree/${fieldExom.replace(/^\//, '')}`, { invalidateAll: true });
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Create failed');
-		} finally {
-			busy = false;
-		}
+	function doExom() {
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				await apiNewBareExom(fieldExom.trim());
+				toast.success('Exom created');
+				openExom = false;
+				goto(`${base}/tree/${fieldExom.replace(/^\//, '')}`, { invalidateAll: true });
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Create failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 
-	async function doSession() {
-		busy = true;
-		try {
-			const r = await apiSessionNew({
-				project_path: fieldProjectPath.trim(),
-				type: 'multi',
-				label: fieldSessionLabel.trim()
-			});
-			toast.success('Session created');
-			openSession = false;
-			const sp = r.session_path.replace(/^\//, '');
-			goto(`${base}/tree/${sp}`, { invalidateAll: true });
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Session failed');
-		} finally {
-			busy = false;
-		}
+	function doSession() {
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				const r = await apiSessionNew({
+					project_path: fieldProjectPath.trim(),
+					type: 'multi',
+					label: fieldSessionLabel.trim()
+				});
+				toast.success('Session created');
+				openSession = false;
+				const sp = r.session_path.replace(/^\//, '');
+				goto(`${base}/tree/${sp}`, { invalidateAll: true });
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Session failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 </script>
 
@@ -105,7 +112,7 @@
 	</div>
 
 	{#if sortedChildren.length === 0}
-		<p class="text-sm text-zinc-500">This folder is empty.</p>
+		<p class="text-sm text-zinc-500">No children</p>
 	{:else}
 		<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
 			{#each sortedChildren as ch (ch.path)}

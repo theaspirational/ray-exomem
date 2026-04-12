@@ -64,5 +64,7 @@
 		{:else if node.kind === 'exom'}
 			<ExomView {node} />
 		{/if}
+	{:else}
+		<p class="text-sm text-zinc-500">Nothing to show for this path.</p>
 	{/if}
 </div>

@@ -1,10 +1,11 @@
 <script lang="ts">
-	import { Loader2 } from '@lucide/svelte';
+	import { Loader2, RefreshCw } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import { apiRename, fetchTree, type TreeNode } from '$lib/exomem.svelte';
 	import { parent, segments } from '$lib/path.svelte';
 
@@ -23,6 +24,8 @@
 	let newSegment = $state('');
 	let loading = $state(false);
 	let subtree = $state<TreeNode | null>(null);
+	let subtreeErr = $state<string | null>(null);
+	let subtreeRetry = $state(0);
 	let busy = $state(false);
 
 	const FIFTEEN_MS = 15 * 60 * 1000;
@@ -93,9 +96,12 @@
 	$effect(() => {
 		if (!open || !path) {
 			subtree = null;
+			subtreeErr = null;
 			return;
 		}
+		subtreeRetry;
 		loading = true;
+		subtreeErr = null;
 		const ac = new AbortController();
 		const p = path;
 		void fetchTree(p, {
@@ -110,7 +116,7 @@
 			})
 			.catch((e) => {
 				subtree = null;
-				toast.error(e instanceof Error ? e.message : 'Failed to load subtree');
+				subtreeErr = e instanceof Error ? e.message : 'Failed to load subtree';
 			})
 			.finally(() => {
 				loading = false;
@@ -127,21 +133,23 @@
 		}
 	});
 
-	async function confirm() {
+	function confirm() {
 		const seg = newSegment.trim();
 		if (!seg || !path) return;
-		busy = true;
-		try {
-			await apiRename(path, seg);
-			toast.success('Renamed');
-			onConfirm(seg);
-			open = false;
-			onClose();
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Rename failed');
-		} finally {
-			busy = false;
-		}
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				await apiRename(path, seg);
+				toast.success('Renamed');
+				onConfirm(seg);
+				open = false;
+				onClose();
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Rename failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 </script>
 
@@ -174,6 +182,19 @@
 				<div class="flex items-center gap-2 text-sm text-zinc-500">
 					<Loader2 class="size-4 animate-spin" />
 					Loading affected paths…
+				</div>
+			{:else if subtreeErr}
+				<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+					<p>{subtreeErr}</p>
+					<Button
+						variant="outline"
+						size="sm"
+						class="w-fit border-red-800/60 text-red-100"
+						onclick={() => subtreeRetry++}
+					>
+						<RefreshCw class="mr-1 size-3" />
+						Retry
+					</Button>
 				</div>
 			{:else if previewRowsAll.length > 0}
 				<div>

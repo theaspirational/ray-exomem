@@ -29,6 +29,7 @@
 		schemaToFacts,
 		updateFact
 	} from '$lib/exomem.svelte';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import { app } from '$lib/stores.svelte';
 	import type { ExomemSchemaResponse, FactEntry } from '$lib/types';
 
@@ -228,115 +229,123 @@
 		deleteConfirmKey = null;
 	}
 
-	async function handleDeleteFact(fact: FactEntry) {
+	function handleDeleteFact(fact: FactEntry) {
 		if (fact.kind === 'derived' || !fact.factId) {
 			errorMessage = 'Only base facts with a server fact id can be deleted.';
 			deleteConfirmKey = null;
 			return;
 		}
 		const key = factKey(fact);
-		deleting = key;
-		try {
-			await retractFact(fact.factId, app.selectedExom);
-			facts = facts.filter((f) => factKey(f) !== key);
-			selectedIds.delete(key);
-			deleteConfirmKey = null;
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Delete failed.';
-		} finally {
-			deleting = null;
-		}
+		actorPrompt.run(async () => {
+			deleting = key;
+			try {
+				await retractFact(fact.factId!, app.selectedExom);
+				facts = facts.filter((f) => factKey(f) !== key);
+				selectedIds.delete(key);
+				deleteConfirmKey = null;
+			} catch (error) {
+				errorMessage = error instanceof Error ? error.message : 'Delete failed.';
+			} finally {
+				deleting = null;
+			}
+		});
 	}
 
-	async function handleSaveEdit() {
+	function handleSaveEdit() {
 		if (!editFact) return;
 		const draft = parseDraftFact(editRawText);
 		if (!draft.fact) {
 			editError = draft.error;
 			return;
 		}
-		editing = true;
-		editError = null;
-		try {
-			const oldFact = editFact;
-			await updateFact(
-				{
-					factId: oldFact.factId,
-					predicate: oldFact.predicate,
-					terms: oldFact.terms,
-				},
-				{
-					predicate: draft.fact.predicate,
-					terms: draft.fact.terms,
-					validFrom: draft.fact.validFrom ?? undefined,
-					validTo: draft.fact.validTo ?? undefined,
-				},
-				app.selectedExom
-			);
-			facts = facts
-				.filter((f) => factKey(f) !== factKey(oldFact))
-				.concat({
-					...draft.fact,
-					kind: draft.fact.kind
-				});
-			cancelEditFact();
-			await loadFacts();
-		} catch (error) {
-			editError = error instanceof Error ? error.message : 'Edit failed.';
-		} finally {
-			editing = false;
-		}
+		const oldFact = editFact;
+		actorPrompt.run(async () => {
+			editing = true;
+			editError = null;
+			try {
+				await updateFact(
+					{
+						factId: oldFact.factId,
+						predicate: oldFact.predicate,
+						terms: oldFact.terms,
+					},
+					{
+						predicate: draft.fact!.predicate,
+						terms: draft.fact!.terms,
+						validFrom: draft.fact!.validFrom ?? undefined,
+						validTo: draft.fact!.validTo ?? undefined,
+					},
+					app.selectedExom
+				);
+				facts = facts
+					.filter((f) => factKey(f) !== factKey(oldFact))
+					.concat({
+						...draft.fact!,
+						kind: draft.fact!.kind
+					});
+				cancelEditFact();
+				await loadFacts();
+			} catch (error) {
+				editError = error instanceof Error ? error.message : 'Edit failed.';
+			} finally {
+				editing = false;
+			}
+		});
 	}
 
-	async function handleDeleteSelected() {
+	function handleDeleteSelected() {
 		const toDelete = facts.filter((f) => selectedIds.has(factKey(f)));
-		deleting = '__bulk__';
-		try {
-			await Promise.all(
-				toDelete.map((f) => {
-					if (f.kind === 'derived' || !f.factId) {
-						throw new Error('Cannot delete derived facts in bulk');
-					}
-					return retractFact(f.factId, app.selectedExom);
-				})
-			);
-			const deletedKeys = new Set(toDelete.map(factKey));
-			facts = facts.filter((f) => !deletedKeys.has(factKey(f)));
-			selectedIds.clear();
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Bulk delete failed.';
-		} finally {
-			deleting = null;
-		}
+		actorPrompt.run(async () => {
+			deleting = '__bulk__';
+			try {
+				await Promise.all(
+					toDelete.map((f) => {
+						if (f.kind === 'derived' || !f.factId) {
+							throw new Error('Cannot delete derived facts in bulk');
+						}
+						return retractFact(f.factId, app.selectedExom);
+					})
+				);
+				const deletedKeys = new Set(toDelete.map(factKey));
+				facts = facts.filter((f) => !deletedKeys.has(factKey(f)));
+				selectedIds.clear();
+			} catch (error) {
+				errorMessage = error instanceof Error ? error.message : 'Bulk delete failed.';
+			} finally {
+				deleting = null;
+			}
+		});
 	}
 
-	async function handleAddFact() {
+	function handleAddFact() {
 		if (!newPredicate.trim() || !newValue.trim()) return;
-		submitting = true;
-		errorMessage = null;
+		actorPrompt.run(async () => {
+			submitting = true;
+			errorMessage = null;
 
-		try {
-			const options: { factId?: string; validFrom?: string; validTo?: string } = {};
-			if (newIntervalFrom) options.validFrom = newIntervalFrom;
-			if (newIntervalTo) options.validTo = newIntervalTo;
-			if (newFactId.trim()) options.factId = newFactId.trim();
-			await assertFact(newPredicate.trim(), [newValue], options, app.selectedExom);
+			try {
+				const options: { factId?: string; validFrom?: string; validTo?: string } = {};
+				if (newIntervalFrom) options.validFrom = newIntervalFrom;
+				if (newIntervalTo) options.validTo = newIntervalTo;
+				if (newFactId.trim()) options.factId = newFactId.trim();
+				await assertFact(newPredicate.trim(), [newValue], options, app.selectedExom);
 
-			// Reset form
-			newFactId = '';
-			newPredicate = '';
-			newValue = '';
-			newIntervalFrom = '';
-			newIntervalTo = '';
-			showAddPanel = false;
+				// Reset form
+				newFactId = '';
+				newPredicate = '';
+				newValue = '';
+				newIntervalFrom = '';
+				newIntervalTo = '';
+				showAddPanel = false;
 
-			// Reload
-			await loadFacts();
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : 'Failed to add fact.';
-		} finally {
-			submitting = false;
-		}
+				// Reload
+				await loadFacts();
+			} catch (error) {
+				errorMessage = error instanceof Error ? error.message : 'Failed to add fact.';
+			} finally {
+				submitting = false;
+			}
+		});
 	}
 
 </script>

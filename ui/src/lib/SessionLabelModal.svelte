@@ -4,6 +4,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import { apiAssertSessionLabel } from '$lib/exomem.svelte';
 
 	let {
@@ -28,20 +29,22 @@
 		if (open) value = currentLabel;
 	});
 
-	async function submit() {
+	function submit() {
 		const v = value.trim();
 		if (!v || !sessionPath) return;
-		busy = true;
-		try {
-			await apiAssertSessionLabel(sessionPath, v);
-			toast.success('Label updated');
-			open = false;
-			onClose();
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Update failed');
-		} finally {
-			busy = false;
-		}
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				await apiAssertSessionLabel(sessionPath, v);
+				toast.success('Label updated');
+				open = false;
+				onClose();
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Update failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 </script>
 

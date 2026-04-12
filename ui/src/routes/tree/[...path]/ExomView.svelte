@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import { page } from '$app/state';
-	import { GitBranch, Loader2 } from '@lucide/svelte';
+	import { GitBranch, Loader2, RefreshCw } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Separator } from '$lib/components/ui/separator/index.js';
@@ -42,10 +42,13 @@
 	let factsErr = $state<string | null>(null);
 
 	let unarchiveBusy = $state(false);
+	let factsRetry = $state(0);
+	let branchesRetry = $state(0);
 
 	$effect(() => {
 		node.path;
 		tab;
+		branchesRetry;
 		if (tab !== 'branches') return;
 		let cancelled = false;
 		branchesLoading = true;
@@ -69,6 +72,7 @@
 		node.path;
 		tab;
 		sessionModes;
+		factsRetry;
 		if (tab !== 'facts' || sessionModes) return;
 		let cancelled = false;
 		factsLoading = true;
@@ -88,17 +92,19 @@
 		};
 	});
 
-	async function onUnarchive() {
-		unarchiveBusy = true;
-		try {
-			await unarchiveSessionExom(node.path);
-			toast.success('Session unarchived');
-			await invalidateAll();
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Unarchive failed');
-		} finally {
-			unarchiveBusy = false;
-		}
+	function onUnarchive() {
+		actorPrompt.run(async () => {
+			unarchiveBusy = true;
+			try {
+				await unarchiveSessionExom(node.path);
+				toast.success('Session unarchived');
+				await invalidateAll();
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Unarchive failed');
+			} finally {
+				unarchiveBusy = false;
+			}
+		});
 	}
 
 	const kindLabel = $derived(
@@ -161,9 +167,23 @@
 			{#if sessionModes}
 				<SessionFactsPanel exomPath={node.path} />
 			{:else if factsErr}
-				<p class="text-sm text-red-300">{factsErr}</p>
+				<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+					<p>{factsErr}</p>
+					<Button
+						variant="outline"
+						size="sm"
+						class="w-fit border-red-800/60 text-red-100"
+						onclick={() => {
+							factsErr = null;
+							factsRetry++;
+						}}
+					>
+						<RefreshCw class="mr-1 size-3" />
+						Retry
+					</Button>
+				</div>
 			{:else}
-				<FactsDataTable facts={facts} loading={factsLoading} />
+				<FactsDataTable facts={facts} loading={factsLoading} emptyMessage="No facts yet" />
 			{/if}
 		</Tabs.Content>
 
@@ -173,9 +193,23 @@
 					<Loader2 class="size-4 animate-spin" /> Loading branches…
 				</p>
 			{:else if branchesErr}
-				<p class="text-sm text-red-300">{branchesErr}</p>
+				<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+					<p>{branchesErr}</p>
+					<Button
+						variant="outline"
+						size="sm"
+						class="w-fit border-red-800/60 text-red-100"
+						onclick={() => {
+							branchesErr = null;
+							branchesRetry++;
+						}}
+					>
+						<RefreshCw class="mr-1 size-3" />
+						Retry
+					</Button>
+				</div>
 			{:else if branches.length === 0}
-				<p class="text-sm text-zinc-500">No branches.</p>
+				<p class="text-sm text-zinc-500">No branches</p>
 			{:else}
 				<ul class="space-y-2">
 					{#each branches as b (b.branch_id)}

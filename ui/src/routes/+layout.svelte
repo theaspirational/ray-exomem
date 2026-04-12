@@ -4,6 +4,7 @@
 	import { onMount } from 'svelte';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import { Toaster } from '$lib/components/ui/sonner/index.js';
+	import ActorIdentityDialog from '$lib/ActorIdentityDialog.svelte';
 	import CommandPalette from '$lib/CommandPalette.svelte';
 	import Drawer from '$lib/Drawer.svelte';
 	import TopBar from '$lib/TopBar.svelte';
@@ -56,5 +57,6 @@
 	</div>
 	<StatusBar />
 	<CommandPalette bind:open={commandOpen} />
+	<ActorIdentityDialog />
 	<Toaster richColors position="bottom-right" />
 </div>

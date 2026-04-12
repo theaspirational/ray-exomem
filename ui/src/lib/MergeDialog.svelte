@@ -2,6 +2,7 @@
 	import { Loader2, X } from '@lucide/svelte';
 
 	import { Button } from '$lib/components/ui/button';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import { fetchExomemStatus, mergeBranch } from '$lib/exomem.svelte';
 
 	interface Props {
@@ -29,22 +30,24 @@
 		})();
 	});
 
-	async function runMerge() {
-		busy = true;
-		resultMessage = null;
-		errorMessage = null;
-		try {
-			const r = await mergeBranch(sourceBranch, policy, exom);
-			if (r.conflicts.length > 0) {
-				resultMessage = `Merge completed with ${r.conflicts.length} conflict(s) (manual policy may leave conflicts unresolved). Tx ${r.tx_id}.`;
-			} else {
-				resultMessage = `Merged ${r.added.length} fact(s). Tx ${r.tx_id}.`;
+	function runMerge() {
+		actorPrompt.run(async () => {
+			busy = true;
+			resultMessage = null;
+			errorMessage = null;
+			try {
+				const r = await mergeBranch(sourceBranch, policy, exom);
+				if (r.conflicts.length > 0) {
+					resultMessage = `Merge completed with ${r.conflicts.length} conflict(s) (manual policy may leave conflicts unresolved). Tx ${r.tx_id}.`;
+				} else {
+					resultMessage = `Merged ${r.added.length} fact(s). Tx ${r.tx_id}.`;
+				}
+			} catch (e) {
+				errorMessage = e instanceof Error ? e.message : String(e);
+			} finally {
+				busy = false;
 			}
-		} catch (e) {
-			errorMessage = e instanceof Error ? e.message : String(e);
-		} finally {
-			busy = false;
-		}
+		});
 	}
 </script>
 

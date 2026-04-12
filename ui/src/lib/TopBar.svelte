@@ -4,6 +4,7 @@
 	import { page } from '$app/state';
 	import { ChevronRight } from '@lucide/svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 
 	let actor = $state('—');
 
@@ -22,8 +23,20 @@
 		return ['tree', ...rest.split('/').filter(Boolean)];
 	});
 
+	/** Middle ellipsis when there are many segments (keeps the bar from overflowing). */
+	const BREADCRUMB_MAX = 20;
+	const HEAD_TAIL = 8;
+	const displayCrumbs = $derived.by((): { segments: string[]; keyPrefix: string } => {
+		const c = crumbs;
+		if (c.length <= BREADCRUMB_MAX) return { segments: c, keyPrefix: 'full' };
+		const head = c.slice(0, HEAD_TAIL);
+		const tail = c.slice(-HEAD_TAIL);
+		return { segments: [...head, '…', ...tail], keyPrefix: 'trunc' };
+	});
+
 	$effect(() => {
 		if (!browser) return;
+		actorPrompt.refreshSignal;
 		actor = localStorage.getItem('ray-exomem-actor')?.trim() || '—';
 	});
 </script>
@@ -31,13 +44,21 @@
 <header
 	class="sticky top-0 z-20 flex h-11 shrink-0 items-center border-b border-zinc-700 bg-zinc-900 px-3 font-sans text-zinc-100"
 >
-	<div class="min-w-0 flex-1">
-		<nav class="flex min-w-0 flex-wrap items-center gap-1 text-xs" aria-label="Path breadcrumb">
-			{#each crumbs as seg, i (i + seg)}
+	<div class="min-w-0 flex-1 overflow-hidden">
+		<nav
+			class="flex min-w-0 flex-nowrap items-center gap-1 overflow-hidden text-xs"
+			aria-label="Path breadcrumb"
+			title={crumbs.join(' / ')}
+		>
+			{#each displayCrumbs.segments as seg, i (`${displayCrumbs.keyPrefix}-${i}-${seg}`)}
 				{#if i > 0}
 					<ChevronRight class="size-3.5 shrink-0 text-zinc-500" aria-hidden="true" />
 				{/if}
-				<span class="truncate font-mono text-[11px] text-zinc-200">{seg}</span>
+				<span
+					class="min-w-0 shrink font-mono text-[11px] text-zinc-200 {seg === '…'
+						? 'shrink-0 text-zinc-500'
+						: 'truncate'}"
+				>{seg}</span>
 			{/each}
 		</nav>
 	</div>

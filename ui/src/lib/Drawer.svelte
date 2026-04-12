@@ -10,6 +10,7 @@
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import { Sheet, SheetContent, SheetHeader, SheetTitle } from '$lib/components/ui/sheet/index.js';
 	import { Tooltip, TooltipContent, TooltipTrigger } from '$lib/components/ui/tooltip/index.js';
+	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import {
 		apiInitFolder,
 		apiNewBareExom,
@@ -52,54 +53,60 @@
 
 	let busy = $state(false);
 
-	async function doInit() {
-		busy = true;
-		try {
-			await apiInitFolder(treeModals.initPath.trim());
-			toast.success('Initialized');
-			treeModals.initOpen = false;
-			treeModals.bumpTree();
-			void goto(`${base}/tree/${treeModals.initPath.replace(/^\//, '')}`, { invalidateAll: true });
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Init failed');
-		} finally {
-			busy = false;
-		}
+	function doInit() {
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				await apiInitFolder(treeModals.initPath.trim());
+				toast.success('Initialized');
+				treeModals.initOpen = false;
+				treeModals.bumpTree();
+				void goto(`${base}/tree/${treeModals.initPath.replace(/^\//, '')}`, { invalidateAll: true });
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Init failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 
-	async function doExom() {
-		busy = true;
-		try {
-			await apiNewBareExom(treeModals.exomPathField.trim());
-			toast.success('Exom created');
-			treeModals.exomOpen = false;
-			treeModals.bumpTree();
-			void goto(`${base}/tree/${treeModals.exomPathField.replace(/^\//, '')}`, { invalidateAll: true });
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Create failed');
-		} finally {
-			busy = false;
-		}
+	function doExom() {
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				await apiNewBareExom(treeModals.exomPathField.trim());
+				toast.success('Exom created');
+				treeModals.exomOpen = false;
+				treeModals.bumpTree();
+				void goto(`${base}/tree/${treeModals.exomPathField.replace(/^\//, '')}`, { invalidateAll: true });
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Create failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 
-	async function doSession() {
-		busy = true;
-		try {
-			const r = await apiSessionNew({
-				project_path: treeModals.sessionProjectPath.trim(),
-				type: 'multi',
-				label: treeModals.sessionLabelField.trim()
-			});
-			toast.success('Session created');
-			treeModals.sessionOpen = false;
-			treeModals.bumpTree();
-			const sp = r.session_path.replace(/^\//, '');
-			void goto(`${base}/tree/${sp}`, { invalidateAll: true });
-		} catch (e) {
-			toast.error(e instanceof Error ? e.message : 'Session failed');
-		} finally {
-			busy = false;
-		}
+	function doSession() {
+		actorPrompt.run(async () => {
+			busy = true;
+			try {
+				const r = await apiSessionNew({
+					project_path: treeModals.sessionProjectPath.trim(),
+					type: 'multi',
+					label: treeModals.sessionLabelField.trim()
+				});
+				toast.success('Session created');
+				treeModals.sessionOpen = false;
+				treeModals.bumpTree();
+				const sp = r.session_path.replace(/^\//, '');
+				void goto(`${base}/tree/${sp}`, { invalidateAll: true });
+			} catch (e) {
+				toast.error(e instanceof Error ? e.message : 'Session failed');
+			} finally {
+				busy = false;
+			}
+		});
 	}
 
 	function onRenameConfirm(newSegment: string) {

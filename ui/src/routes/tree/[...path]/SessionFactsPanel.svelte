@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { Loader2 } from '@lucide/svelte';
+	import { Loader2, RefreshCw } from '@lucide/svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
@@ -36,18 +36,26 @@
 	let mode = $state<Mode>(readMode());
 	let branches = $state<BranchRow[]>([]);
 	let branchesLoading = $state(true);
+	let branchesErr = $state<string | null>(null);
+	let branchesRetry = $state(0);
 	let selectedBranch = $state<string>('');
 
 	let branchFilter = $state<Record<string, boolean>>({});
 
 	let switcherFacts = $state<ListedFact[]>([]);
 	let switcherLoading = $state(false);
+	let switcherErr = $state<string | null>(null);
+	let switcherRetry = $state(0);
 
 	let kanbanFacts = $state<Record<string, ListedFact[]>>({});
 	let kanbanLoading = $state(false);
+	let kanbanErr = $state<string | null>(null);
+	let kanbanRetry = $state(0);
 
 	let timelineFacts = $state<ListedFact[]>([]);
 	let timelineLoading = $state(false);
+	let timelineErr = $state<string | null>(null);
+	let timelineRetry = $state(0);
 
 	function pushQuery(updates: Record<string, string | null | undefined>) {
 		const u = new URL(page.url.href);
@@ -68,8 +76,10 @@
 
 	$effect(() => {
 		exomPath;
+		branchesRetry;
 		let cancelled = false;
 		branchesLoading = true;
+		branchesErr = null;
 		fetchBranches(exomPath)
 			.then((rows) => {
 				if (cancelled) return;
@@ -85,6 +95,11 @@
 					selectedBranch = want;
 				} else if (!selectedBranch || !names.includes(selectedBranch)) {
 					selectedBranch = names[0] ?? '';
+				}
+			})
+			.catch((e: unknown) => {
+				if (!cancelled) {
+					branchesErr = e instanceof Error ? e.message : 'Failed to load branches';
 				}
 			})
 			.finally(() => {
@@ -109,12 +124,19 @@
 		exomPath;
 		mode;
 		selectedBranch;
+		switcherRetry;
 		if (mode !== 'switcher' || !selectedBranch) return;
 		let cancelled = false;
 		switcherLoading = true;
+		switcherErr = null;
 		fetchFactsList(exomPath, { branch: selectedBranch })
 			.then((rows) => {
 				if (!cancelled) switcherFacts = rows;
+			})
+			.catch((e: unknown) => {
+				if (!cancelled) {
+					switcherErr = e instanceof Error ? e.message : 'Failed to load facts';
+				}
 			})
 			.finally(() => {
 				if (!cancelled) switcherLoading = false;
@@ -128,9 +150,11 @@
 		exomPath;
 		mode;
 		branches;
+		kanbanRetry;
 		if (mode !== 'kanban' || branches.length === 0) return;
 		let cancelled = false;
 		kanbanLoading = true;
+		kanbanErr = null;
 		Promise.all(branches.map((b) => fetchFactsList(exomPath, { branch: b.name })))
 			.then((rowsList) => {
 				if (cancelled) return;
@@ -139,6 +163,11 @@
 					next[b.name] = rowsList[i] ?? [];
 				});
 				kanbanFacts = next;
+			})
+			.catch((e: unknown) => {
+				if (!cancelled) {
+					kanbanErr = e instanceof Error ? e.message : 'Failed to load facts';
+				}
 			})
 			.finally(() => {
 				if (!cancelled) kanbanLoading = false;
@@ -151,12 +180,19 @@
 	$effect(() => {
 		exomPath;
 		mode;
+		timelineRetry;
 		if (mode !== 'timeline') return;
 		let cancelled = false;
 		timelineLoading = true;
+		timelineErr = null;
 		fetchFactsList(exomPath, { allBranches: true })
 			.then((rows) => {
 				if (!cancelled) timelineFacts = rows;
+			})
+			.catch((e: unknown) => {
+				if (!cancelled) {
+					timelineErr = e instanceof Error ? e.message : 'Failed to load facts';
+				}
 			})
 			.finally(() => {
 				if (!cancelled) timelineLoading = false;
@@ -194,8 +230,24 @@
 		<p class="flex items-center gap-2 text-sm text-zinc-500">
 			<Loader2 class="size-4 animate-spin" /> Loading branches…
 		</p>
+	{:else if branchesErr}
+		<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+			<p>{branchesErr}</p>
+			<Button
+				variant="outline"
+				size="sm"
+				class="w-fit border-red-800/60 text-red-100"
+				onclick={() => {
+					branchesErr = null;
+					branchesRetry++;
+				}}
+			>
+				<RefreshCw class="mr-1 size-3" />
+				Retry
+			</Button>
+		</div>
 	{:else if branches.length === 0}
-		<p class="text-sm text-zinc-500">No branches for this session.</p>
+		<p class="text-sm text-zinc-500">No branches</p>
 	{:else if mode === 'switcher'}
 		<div class="flex flex-wrap gap-2">
 			{#each branches as b (b.branch_id)}
@@ -210,13 +262,47 @@
 			{/each}
 		</div>
 		{#if selectedBranch}
-			<FactsDataTable facts={switcherFacts} loading={switcherLoading} />
+			{#if switcherErr}
+				<div class="mt-2 flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+					<p>{switcherErr}</p>
+					<Button
+						variant="outline"
+						size="sm"
+						class="w-fit border-red-800/60 text-red-100"
+						onclick={() => {
+							switcherErr = null;
+							switcherRetry++;
+						}}
+					>
+						<RefreshCw class="mr-1 size-3" />
+						Retry
+					</Button>
+				</div>
+			{:else}
+				<FactsDataTable facts={switcherFacts} loading={switcherLoading} emptyMessage="No facts yet" />
+			{/if}
 		{/if}
 	{:else if mode === 'kanban'}
 		{#if kanbanLoading}
 			<p class="flex items-center gap-2 text-sm text-zinc-500">
-				<Loader2 class="size-4 animate-spin" /> Loading branches…
+				<Loader2 class="size-4 animate-spin" /> Loading facts…
 			</p>
+		{:else if kanbanErr}
+			<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+				<p>{kanbanErr}</p>
+				<Button
+					variant="outline"
+					size="sm"
+					class="w-fit border-red-800/60 text-red-100"
+					onclick={() => {
+						kanbanErr = null;
+						kanbanRetry++;
+					}}
+				>
+					<RefreshCw class="mr-1 size-3" />
+					Retry
+				</Button>
+			</div>
 		{:else}
 			<div class="flex min-h-[280px] flex-row gap-3 overflow-x-auto pb-2">
 				{#each branches as b (b.branch_id)}
@@ -237,7 +323,7 @@
 								{/each}
 							</ul>
 							{#if (kanbanFacts[b.name] ?? []).length === 0}
-								<p class="text-xs text-zinc-600">No facts</p>
+								<p class="text-xs text-zinc-500">No facts yet</p>
 							{/if}
 						</ScrollArea>
 					</div>
@@ -259,7 +345,25 @@
 			{/each}
 		</div>
 		{#if timelineLoading}
-			<p class="text-sm text-zinc-500">Loading timeline…</p>
+			<p class="flex items-center gap-2 text-sm text-zinc-500">
+				<Loader2 class="size-4 animate-spin" /> Loading timeline…
+			</p>
+		{:else if timelineErr}
+			<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+				<p>{timelineErr}</p>
+				<Button
+					variant="outline"
+					size="sm"
+					class="w-fit border-red-800/60 text-red-100"
+					onclick={() => {
+						timelineErr = null;
+						timelineRetry++;
+					}}
+				>
+					<RefreshCw class="mr-1 size-3" />
+					Retry
+				</Button>
+			</div>
 		{:else}
 			<div class="space-y-1">
 				{#each timelineVisible as f (f.fact_id + (f.tx_time ?? ''))}
@@ -279,7 +383,7 @@
 					</div>
 				{/each}
 				{#if timelineVisible.length === 0}
-					<p class="text-sm text-zinc-500">No facts for the selected branches.</p>
+					<p class="text-sm text-zinc-500">No facts yet</p>
 				{/if}
 			</div>
 		{/if}

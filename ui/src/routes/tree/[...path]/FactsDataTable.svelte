@@ -1,11 +1,12 @@
 <script lang="ts">
+	import { Loader2 } from '@lucide/svelte';
 	import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
 	import type { ListedFact } from '$lib/exomem.svelte';
 
 	let {
 		facts,
 		loading,
-		emptyMessage = 'No facts yet.'
+		emptyMessage = 'No facts yet'
 	}: {
 		facts: ListedFact[];
 		loading: boolean;
@@ -19,7 +20,10 @@
 </script>
 
 {#if loading}
-	<p class="text-sm text-zinc-500">Loading facts…</p>
+	<p class="flex items-center gap-2 text-sm text-zinc-500">
+		<Loader2 class="size-4 animate-spin text-zinc-400" aria-hidden="true" />
+		Loading facts…
+	</p>
 {:else if facts.length === 0}
 	<p class="text-sm text-zinc-500">{emptyMessage}</p>
 {:else}

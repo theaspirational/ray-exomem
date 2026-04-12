@@ -1,12 +1,16 @@
 <script lang="ts">
+	import { Loader2, RefreshCw } from '@lucide/svelte';
 	import { marked } from 'marked';
+	import { Button } from '$lib/components/ui/button/index.js';
 	import { fetchGuideMarkdown } from '$lib/exomem.svelte';
 
 	let html = $state('');
 	let loading = $state(true);
 	let err = $state<string | null>(null);
+	let loadToken = $state(0);
 
 	$effect(() => {
+		loadToken;
 		loading = true;
 		err = null;
 		const ac = new AbortController();
@@ -29,9 +33,23 @@
 	<h1 class="mb-6 font-sans text-lg font-semibold text-zinc-100">Guide</h1>
 
 	{#if loading}
-		<p class="text-sm text-zinc-500">Loading…</p>
+		<p class="flex items-center gap-2 text-sm text-zinc-500">
+			<Loader2 class="size-4 animate-spin text-zinc-400" aria-hidden="true" />
+			Loading…
+		</p>
 	{:else if err}
-		<p class="text-sm text-red-300">{err}</p>
+		<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+			<p>{err}</p>
+			<Button
+				variant="outline"
+				size="sm"
+				class="w-fit border-red-800/60 text-red-100"
+				onclick={() => loadToken++}
+			>
+				<RefreshCw class="mr-1 size-3" />
+				Retry
+			</Button>
+		</div>
 	{:else}
 		<article class="guide-md max-w-3xl font-sans">
 			<!-- API-served markdown is trusted (same origin daemon). -->
