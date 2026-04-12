@@ -311,7 +311,8 @@ fn content_type_for_ext(path: &str) -> &'static str {
 }
 
 async fn spa_fallback(uri: Uri) -> impl IntoResponse {
-    let path = uri.path().trim_start_matches('/');
+    let raw = uri.path().trim_start_matches('/');
+    let path = raw.strip_prefix("ray-exomem/").unwrap_or(raw);
     let path = if path.is_empty() { "index.html" } else { path };
 
     if let Some(file) = EMBEDDED_UI.get_file(path) {
