@@ -3,6 +3,7 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { Separator } from '$lib/components/ui/separator/index.js';
+	import { Toaster } from '$lib/components/ui/sonner/index.js';
 	import Drawer from '$lib/Drawer.svelte';
 	import TopBar from '$lib/TopBar.svelte';
 	import StatusBar from '$lib/StatusBar.svelte';
@@ -43,4 +44,5 @@
 		</div>
 	</div>
 	<StatusBar />
+	<Toaster richColors position="bottom-right" />
 </div>

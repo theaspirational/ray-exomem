@@ -305,6 +305,47 @@ export async function fetchExoms(): Promise<ExomEntry[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Tree (nested exoms)
+// ---------------------------------------------------------------------------
+
+export type TreeNode =
+	| { kind: 'folder'; name: string; path: string; children: TreeNode[] }
+	| {
+			kind: 'exom';
+			name: string;
+			path: string;
+			exom_kind: string;
+			fact_count: number;
+			current_branch: string;
+			last_tx: string | null;
+			branches: string[] | null;
+			archived: boolean;
+			closed: boolean;
+			session: any | null;
+	  };
+
+/**
+ * Folder/exom tree from `GET /api/tree`. Uses the same base URL as other API calls (daemon on 9780 in dev).
+ * Query flags use `true` (server expects string "true", not "1").
+ */
+export async function fetchTree(
+	path?: string,
+	opts: {
+		depth?: number;
+		branches?: boolean;
+		archived?: boolean;
+		signal?: AbortSignal;
+	} = {}
+): Promise<TreeNode> {
+	const qs = new URLSearchParams();
+	if (path) qs.set('path', path);
+	if (opts.depth != null) qs.set('depth', String(opts.depth));
+	if (opts.branches) qs.set('branches', 'true');
+	if (opts.archived) qs.set('archived', 'true');
+	return readJson<TreeNode>(`api/tree?${qs}`, opts.signal ? { signal: opts.signal } : undefined);
+}
+
+// ---------------------------------------------------------------------------
 // Database Actions
 // ---------------------------------------------------------------------------
 

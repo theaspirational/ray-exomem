@@ -1,13 +1,26 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
+	import { page } from '$app/state';
 	import { Search, Settings, TreePine } from '@lucide/svelte';
 	import { Sheet, SheetContent, SheetHeader, SheetTitle } from '$lib/components/ui/sheet/index.js';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import { Tooltip, TooltipContent, TooltipTrigger } from '$lib/components/ui/tooltip/index.js';
+	import TreeDrawer from '$lib/TreeDrawer.svelte';
 
 	type Panel = 'tree' | 'search' | 'settings';
 
 	let sheetOpen = $state(false);
 	let panel = $state<Panel>('tree');
+
+	const currentTreePath = $derived.by((): string => {
+		let pathname = String(page.url.pathname);
+		if (base && pathname.startsWith(base)) {
+			pathname = pathname.slice(base.length) || '/';
+		}
+		if (!pathname.startsWith('/tree')) return '';
+		return pathname.slice('/tree'.length).replace(/^\/+/, '');
+	});
 
 	function openTree() {
 		panel = 'tree';
@@ -85,7 +98,7 @@
 	<SheetContent
 		side="left"
 		showCloseButton={true}
-		class="w-[min(100vw,22rem)] border-r border-zinc-700 bg-zinc-900 text-zinc-100 sm:max-w-md"
+		class="h-full min-h-0 w-[min(100vw,22rem)] border-r border-zinc-700 bg-zinc-900 text-zinc-100 sm:max-w-md"
 	>
 		<SheetHeader>
 			<SheetTitle class="font-sans text-zinc-100">
@@ -99,9 +112,12 @@
 			</SheetTitle>
 		</SheetHeader>
 		<Separator class="bg-zinc-700" />
-		<div class="min-h-0 flex-1 overflow-y-auto px-1 py-2 font-sans text-sm text-zinc-300">
-			{#if panel === 'tree'}
-				<p class="font-mono text-xs text-zinc-400">Tree placeholder — Phase 8 fills this</p>
+		<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-1 py-2 font-sans text-sm text-zinc-300">
+			{#if sheetOpen && panel === 'tree'}
+				<TreeDrawer
+					currentPath={currentTreePath}
+					onNavigate={(path) => goto(`${base}/tree/${path.replace(/^\/+/, '')}`)}
+				/>
 			{:else if panel === 'search'}
 				<p class="text-zinc-400">Search placeholder — Phase 8 fills this</p>
 			{:else}
