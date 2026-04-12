@@ -128,9 +128,9 @@
 				<button
 					type="button"
 					class="flex size-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-					onclick={openTree}
 					aria-label="Open tree"
 					{...props}
+					onclick={openTree}
 				>
 					<TreePine class="size-4" />
 				</button>
@@ -145,9 +145,9 @@
 				<button
 					type="button"
 					class="flex size-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-					onclick={openSearch}
 					aria-label="Open search"
 					{...props}
+					onclick={openSearch}
 				>
 					<Search class="size-4" />
 				</button>
@@ -162,9 +162,9 @@
 				<button
 					type="button"
 					class="flex size-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-					onclick={openSettings}
 					aria-label="Open settings"
 					{...props}
+					onclick={openSettings}
 				>
 					<Settings class="size-4" />
 				</button>

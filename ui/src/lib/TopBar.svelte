@@ -34,6 +34,24 @@
 		return { segments: [...head, '…', ...tail], keyPrefix: 'trunc' };
 	});
 
+	/** Map display segment index to href, or null for ellipsis / non-navigable. */
+	function crumbHrefFor(displayIdx: number, seg: string): string | null {
+		if (seg === '…') return null;
+		const c = crumbs;
+		let idx: number;
+		if (c.length <= BREADCRUMB_MAX) {
+			idx = displayIdx;
+		} else if (displayIdx < HEAD_TAIL) {
+			idx = displayIdx;
+		} else if (displayIdx === HEAD_TAIL) {
+			return null;
+		} else {
+			idx = c.length - HEAD_TAIL + (displayIdx - HEAD_TAIL - 1);
+		}
+		const pathSuffix = c.slice(1, idx + 1).join('/');
+		return `${base}/tree/${pathSuffix}`;
+	}
+
 	$effect(() => {
 		if (!browser) return;
 		actorPrompt.refreshSignal;
@@ -54,11 +72,19 @@
 				{#if i > 0}
 					<ChevronRight class="size-3.5 shrink-0 text-zinc-500" aria-hidden="true" />
 				{/if}
-				<span
-					class="min-w-0 shrink font-mono text-[11px] text-zinc-200 {seg === '…'
-						? 'shrink-0 text-zinc-500'
-						: 'truncate'}"
-				>{seg}</span>
+				{@const href = crumbHrefFor(i, seg)}
+				{#if href === null}
+					<span
+						class="min-w-0 shrink font-mono text-[11px] text-zinc-200 {seg === '…'
+							? 'shrink-0 text-zinc-500'
+							: 'truncate'}"
+					>{seg}</span>
+				{:else}
+					<a
+						href={href}
+						class="min-w-0 shrink truncate font-mono text-[11px] text-zinc-200 underline-offset-2 hover:underline"
+					>{seg}</a>
+				{/if}
 			{/each}
 		</nav>
 	</div>
