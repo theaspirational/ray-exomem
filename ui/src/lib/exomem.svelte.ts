@@ -1,6 +1,8 @@
 import { browser } from '$app/environment';
 import { env } from '$env/dynamic/public';
 
+import { toCli } from '$lib/path.svelte';
+
 import type {
 	ExomemClusterSummary,
 	FactDetail,
@@ -150,12 +152,20 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json();
 }
 
-const MUTATION_HEADERS: Record<string, string> = {
-	'Content-Type': 'application/json',
-	'X-Actor': 'ui',
-	'X-Session': 'exomem-web',
-	'X-Model': 'svelte'
-};
+/** Matches server TOFU / `TopBar` — used for mutation `X-Actor` and assert-fact body. */
+export function getRayExomemActor(): string {
+	if (!browser) return 'ui';
+	return localStorage.getItem('ray-exomem-actor')?.trim() || 'ui';
+}
+
+function mutationHeaders(): Record<string, string> {
+	return {
+		'Content-Type': 'application/json',
+		'X-Actor': getRayExomemActor(),
+		'X-Session': 'exomem-web',
+		'X-Model': 'svelte'
+	};
+}
 
 async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	let res: Response;
@@ -163,7 +173,7 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	try {
 		res = await fetch(endpoint(path), {
 			method: 'POST',
-			headers: MUTATION_HEADERS,
+			headers: mutationHeaders(),
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 			signal
 		});
@@ -336,6 +346,7 @@ export async function fetchTree(
 		depth?: number;
 		branches?: boolean;
 		archived?: boolean;
+		activity?: boolean;
 		signal?: AbortSignal;
 	} = {}
 ): Promise<TreeNode> {
@@ -344,7 +355,45 @@ export async function fetchTree(
 	if (opts.depth != null) qs.set('depth', String(opts.depth));
 	if (opts.branches) qs.set('branches', 'true');
 	if (opts.archived) qs.set('archived', 'true');
+	if (opts.activity) qs.set('activity', 'true');
 	return readJson<TreeNode>(`api/tree?${qs}`, opts.signal ? { signal: opts.signal } : undefined);
+}
+
+/** `path` is slash form; `path` in JSON body uses CLI `::` form per server `TreePath` parser. */
+export function apiRename(pathSlash: string, newSegment: string): Promise<{ ok: boolean; new_path?: string }> {
+	return postAction('api/actions/rename', {
+		path: toCli(pathSlash),
+		new_segment: newSegment.trim()
+	});
+}
+
+export function apiAssertSessionLabel(sessionPathSlash: string, label: string): Promise<{ ok: boolean }> {
+	return postAction('api/actions/assert-fact', {
+		exom: toCli(sessionPathSlash),
+		branch: 'main',
+		actor: getRayExomemActor(),
+		predicate: 'session/label',
+		value: label.trim()
+	});
+}
+
+export async function fetchGuideMarkdown(signal?: AbortSignal): Promise<string> {
+	const url = endpoint('api/guide');
+	const { signal: merged, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS, signal);
+	let res: Response;
+	try {
+		res = await fetch(url, { signal: merged });
+		clear();
+	} catch (e) {
+		clear();
+		if (merged.aborted) {
+			if (signal?.aborted) throw e instanceof Error ? e : new Error('Aborted');
+			throw new Error(fetchTimedOutMessage());
+		}
+		throw e instanceof Error ? e : new Error(String(e));
+	}
+	if (!res.ok) throw new Error(`Guide failed: ${res.status} ${res.statusText}`);
+	return res.text();
 }
 
 /** One row from `GET /api/facts?exom=` (slash path). */

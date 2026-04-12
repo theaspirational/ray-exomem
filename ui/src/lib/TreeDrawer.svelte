@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import {
 		ChevronRight,
 		Circle,
@@ -23,13 +22,16 @@
 		ContextMenuItem,
 		ContextMenuTrigger
 	} from '$lib/components/ui/context-menu/index.js';
-	import { fetchTree, type TreeNode } from '$lib/exomem.svelte';
+	import { fetchTree, type TreeExom, type TreeNode } from '$lib/exomem.svelte';
+	import { treeModals } from '$lib/treeModals.svelte';
 
 	let {
 		currentPath = '',
+		refreshSignal = 0,
 		onNavigate
 	}: {
 		currentPath?: string;
+		refreshSignal?: number;
 		onNavigate: (path: string) => void;
 	} = $props();
 
@@ -60,7 +62,8 @@
 		}
 	}
 
-	onMount(() => {
+	$effect(() => {
+		refreshSignal;
 		void loadTree();
 	});
 
@@ -77,6 +80,11 @@
 	function isPathSelected(path: string): boolean {
 		if (!currentPath) return false;
 		return path === currentPath || currentPath.startsWith(`${path}/`);
+	}
+
+	function labelForSession(node: TreeExom): string {
+		const s = node.session as { label?: string } | null | undefined;
+		return s?.label?.trim() || node.name;
 	}
 </script>
 
@@ -147,19 +155,20 @@
 								<ContextMenuContent class="border-zinc-700 bg-zinc-900 text-zinc-100">
 									<ContextMenuItem
 										class="text-xs focus:bg-zinc-800"
-										onclick={notImplemented}
+										onclick={() => treeModals.openInit(node.path)}
 									>Init here</ContextMenuItem>
 									<ContextMenuItem
 										class="text-xs focus:bg-zinc-800"
-										onclick={notImplemented}
+										onclick={() =>
+											treeModals.openNewExom(node.path ? `${node.path}/notes` : 'notes')}
 									>New exom</ContextMenuItem>
 									<ContextMenuItem
 										class="text-xs focus:bg-zinc-800"
-										onclick={notImplemented}
+										onclick={() => treeModals.openNewSession(node.path)}
 									>New session</ContextMenuItem>
 									<ContextMenuItem
 										class="text-xs focus:bg-zinc-800"
-										onclick={notImplemented}
+										onclick={() => treeModals.openRename(node.path)}
 									>Rename</ContextMenuItem>
 								</ContextMenuContent>
 							</ContextMenu>
@@ -194,9 +203,14 @@
 									{#if node.exom_kind !== 'session'}
 										<ContextMenuItem
 											class="text-xs focus:bg-zinc-800"
-											onclick={notImplemented}
+											onclick={() => treeModals.openRename(node.path)}
 										>Rename</ContextMenuItem>
 									{:else}
+										<ContextMenuItem
+											class="text-xs focus:bg-zinc-800"
+											onclick={() =>
+												treeModals.openSessionLabel(node.path, labelForSession(node))}
+										>Rename label…</ContextMenuItem>
 										<ContextMenuItem
 											class="text-xs focus:bg-zinc-800"
 											onclick={notImplemented}

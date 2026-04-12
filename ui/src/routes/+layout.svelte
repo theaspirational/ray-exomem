@@ -4,6 +4,7 @@
 	import { onMount } from 'svelte';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import { Toaster } from '$lib/components/ui/sonner/index.js';
+	import CommandPalette from '$lib/CommandPalette.svelte';
 	import Drawer from '$lib/Drawer.svelte';
 	import TopBar from '$lib/TopBar.svelte';
 	import StatusBar from '$lib/StatusBar.svelte';
@@ -11,13 +12,23 @@
 
 	let { children }: { children: Snippet } = $props();
 
+	let commandOpen = $state(false);
+
 	onMount(() => {
 		void app.refreshExoms();
 		const connectTimer = window.setTimeout(() => app.live.connect(), 75);
 		const uptimeInterval = window.setInterval(() => void app.refreshServerUptime(), 15_000);
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+				e.preventDefault();
+				commandOpen = true;
+			}
+		};
+		window.addEventListener('keydown', onKey);
 		return () => {
 			clearTimeout(connectTimer);
 			clearInterval(uptimeInterval);
+			window.removeEventListener('keydown', onKey);
 			app.live.disconnect();
 		};
 	});
@@ -44,5 +55,6 @@
 		</div>
 	</div>
 	<StatusBar />
+	<CommandPalette bind:open={commandOpen} />
 	<Toaster richColors position="bottom-right" />
 </div>
