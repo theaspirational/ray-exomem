@@ -47,25 +47,19 @@
 		return d;
 	}
 
-	const previewRows = $derived.by(() => {
+	const previewRowsAll = $derived.by(() => {
 		const seg = newSegment.trim();
 		if (!path || !seg || !subtree) return [];
 		const all = collectPaths(subtree);
-		const rows = all
+		return all
 			.filter((d) => d === path || d.startsWith(`${path}/`))
 			.map((d) => ({ from: d, to: newPathAfterRename(path, seg, d) }))
 			.filter((r) => r.from !== r.to);
-		return rows.slice(0, 40);
 	});
 
-	const previewExtra = $derived.by(() => {
-		const seg = newSegment.trim();
-		if (!path || !seg || !subtree) return 0;
-		const all = collectPaths(subtree);
-		const n = all.filter((d) => d === path || d.startsWith(`${path}/`)).length;
-		const shown = previewRows.length;
-		return Math.max(0, n - shown);
-	});
+	const previewRows = $derived(previewRowsAll.slice(0, 40));
+
+	const previewExtra = $derived(Math.max(0, previewRowsAll.length - previewRows.length));
 
 	type ActiveSession = { rel: string; branches: string[] };
 
@@ -181,10 +175,10 @@
 					<Loader2 class="size-4 animate-spin" />
 					Loading affected paths…
 				</div>
-			{:else if previewRows.length > 0}
+			{:else if previewRowsAll.length > 0}
 				<div>
 					<p class="text-xs text-zinc-500">
-						This will change {previewRows.length}{#if previewExtra > 0}+{/if} path{previewRows.length === 1 ? '' : 's'}:
+						This will change {previewRowsAll.length} path{previewRowsAll.length === 1 ? '' : 's'}:
 					</p>
 					<ul class="mt-2 max-h-40 overflow-y-auto thin-scrollbar rounded border border-zinc-800 bg-zinc-950/80 p-2 font-mono text-[11px] text-zinc-300">
 						{#each previewRows as r (r.from)}
