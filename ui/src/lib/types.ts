@@ -16,6 +16,8 @@ export interface ExomemStatus {
 		name: string;
 		version: string;
 		uptime_sec: number;
+		/** Daemon tree root on disk (nested exoms layout). */
+		tree_root?: string;
 		build?: {
 			git_sha: string;
 			built_unix: string;
