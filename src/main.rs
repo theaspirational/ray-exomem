@@ -217,6 +217,12 @@ struct Cli {
     /// Machine-readable JSON on stdout (also implied when stdout is not a TTY for several commands).
     #[arg(long, global = true)]
     json: bool,
+    /// Override the data directory (sets RAY_EXOMEM_HOME for this invocation).
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+    /// Base URL of the running daemon (default: http://127.0.0.1:9780/ray-exomem).
+    #[arg(long, global = true, default_value = "http://127.0.0.1:9780/ray-exomem")]
+    daemon_url: String,
     #[command(subcommand)]
     command: Commands,
 }
@@ -600,6 +606,18 @@ enum Commands {
         addr: String,
         #[arg(long)]
         json: bool,
+    },
+
+    /// Scaffold a project (main exom + sessions/) at the given tree path.
+    Init {
+        /// Tree path, e.g. work::ath::lynx::orsl or work/ath/lynx/orsl.
+        path: String,
+    },
+
+    /// Create a bare exom at the given tree path (no scaffolding).
+    ExomNew {
+        /// Tree path for the new bare exom.
+        path: String,
     },
 }
 
@@ -1175,8 +1193,15 @@ fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> Option<PathBuf> {
 fn main() {
     let Cli {
         json: global_json,
+        data_dir: global_data_dir,
+        daemon_url: _global_daemon_url,
         command,
     } = Cli::parse();
+
+    // If --data-dir was provided, propagate it via env so storage::tree_root() picks it up.
+    if let Some(ref dd) = global_data_dir {
+        std::env::set_var("RAY_EXOMEM_HOME", dd);
+    }
 
     match command {
         Commands::Run { file } => match ray_exomem::run_file(&file) {
@@ -2874,6 +2899,40 @@ fn main() {
         }
         Commands::Guide { topic } => {
             println!("{}", ray_exomem::agent_guide::render(topic));
+        }
+
+        Commands::Init { path } => {
+            let tp: ray_exomem::path::TreePath = match path.parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: invalid path {:?}: {}", path, e);
+                    std::process::exit(1);
+                }
+            };
+            match ray_exomem::scaffold::init_project(&ray_exomem::storage::tree_root(), &tp) {
+                Ok(()) => println!("scaffolded {}", tp),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::ExomNew { path } => {
+            let tp: ray_exomem::path::TreePath = match path.parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: invalid path {:?}: {}", path, e);
+                    std::process::exit(1);
+                }
+            };
+            match ray_exomem::scaffold::new_bare_exom(&ray_exomem::storage::tree_root(), &tp) {
+                Ok(()) => println!("created bare exom {}", tp),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
