@@ -131,6 +131,10 @@ pub struct Branch {
     pub parent_branch_id: Option<String>,
     pub created_tx_id: TxId,
     pub archived: bool,
+    /// TOFU ownership: the first actor to write to this branch claims it.
+    /// `None` means unclaimed (any actor may claim it on first write).
+    #[serde(default)]
+    pub claimed_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +208,7 @@ impl Brain {
             parent_branch_id: None,
             created_tx_id: 0,
             archived: false,
+            claimed_by: None,
         };
         Brain {
             observations: Vec::new(),
@@ -277,6 +282,7 @@ impl Brain {
                         parent_branch_id: None,
                         created_tx_id: 0,
                         archived: false,
+                        claimed_by: None,
                     },
                 );
             }
@@ -320,6 +326,7 @@ impl Brain {
                     parent_branch_id: None,
                     created_tx_id: 0,
                     archived: false,
+                    claimed_by: None,
                 },
             );
         }
@@ -370,6 +377,7 @@ impl Brain {
                     parent_branch_id: None,
                     created_tx_id: 0,
                     archived: false,
+                    claimed_by: None,
                 },
             );
         }
@@ -718,6 +726,7 @@ impl Brain {
             parent_branch_id: Some(self.current_branch.clone()),
             created_tx_id: tx_id,
             archived: false,
+            claimed_by: None,
         };
         self.branches.push(branch);
         self.persist_table(DirtyTable::Branch)?;
@@ -1518,6 +1527,111 @@ pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
     Ok(ExomStats { fact_count, last_tx, branches: branch_names })
 }
 
+// ---------------------------------------------------------------------------
+// Branch JSONL helpers (no FFI, no Brain instance required)
+// ---------------------------------------------------------------------------
+
+/// Load all branches from the JSONL sidecar in `exom_disk`.
+/// Returns an empty vec (treated as "just main, unclaimed") when the file
+/// doesn't exist — consistent with `read_exom_stats`.
+fn load_branches_jsonl(exom_disk: &Path) -> anyhow::Result<Vec<Branch>> {
+    use crate::storage::load_jsonl;
+    load_jsonl(&exom_disk.join("branch.jsonl"))
+}
+
+/// Save the full branch list back to `branch.jsonl` atomically.
+fn save_branches_jsonl(exom_disk: &Path, branches: &[Branch]) -> std::io::Result<()> {
+    use crate::storage::save_jsonl;
+    save_jsonl(branches, &exom_disk.join("branch.jsonl"))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+/// Create a new branch record in `branch.jsonl` for the given exom.
+/// Idempotent: if a non-archived branch with this name already exists, returns Ok without
+/// modifying it. `claimed_by` is always set to `None` on creation.
+///
+/// The `exom_path` is the path to the session/exom node in the tree (e.g. `work::sessions/xyz`).
+pub fn create_branch(
+    tree_root: &Path,
+    exom_path: &TreePath,
+    branch_name: &str,
+) -> Result<(), crate::scaffold::ScaffoldError> {
+    let disk = exom_path.to_disk_path(tree_root);
+    let mut branches = load_branches_jsonl(&disk)
+        .map_err(|e| crate::scaffold::ScaffoldError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        ))?;
+
+    // Idempotent: don't duplicate
+    if branches.iter().any(|b| b.name == branch_name && !b.archived) {
+        return Ok(());
+    }
+    // "main" is a special implicit branch; synthesise its entry to persist it
+    let parent = if branch_name == "main" {
+        None
+    } else {
+        Some("main".to_string())
+    };
+    branches.push(Branch {
+        branch_id: branch_name.to_string(),
+        name: branch_name.to_string(),
+        parent_branch_id: parent,
+        created_tx_id: 0,
+        archived: false,
+        claimed_by: None,
+    });
+    save_branches_jsonl(&disk, &branches)?;
+    Ok(())
+}
+
+/// TOFU-claim a branch for `actor` in `branch.jsonl`.
+///
+/// - If `claimed_by` is None → set it to `actor` and persist.
+/// - If `claimed_by == actor` → no-op (idempotent).
+/// - If `claimed_by == someone_else` → `Err(WriteError::BranchOwned(owner))`.
+/// - If the branch doesn't exist → `Err(WriteError::BranchMissing(name))`.
+///
+/// "main" is considered to always exist even when branch.jsonl is absent.
+pub fn claim_branch(
+    tree_root: &Path,
+    exom_path: &TreePath,
+    branch_name: &str,
+    actor: &str,
+) -> Result<(), WriteError> {
+    let disk = exom_path.to_disk_path(tree_root);
+    let mut branches = load_branches_jsonl(&disk)
+        .map_err(|e| WriteError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        ))?;
+
+    // Synthesise implicit "main" if it's not in the file yet
+    let main_implicit = branches.is_empty() || !branches.iter().any(|b| b.name == "main");
+    if main_implicit && branch_name == "main" {
+        branches.push(Branch {
+            branch_id: "main".to_string(),
+            name: "main".to_string(),
+            parent_branch_id: None,
+            created_tx_id: 0,
+            archived: false,
+            claimed_by: None,
+        });
+    }
+
+    let Some(b) = branches.iter_mut().find(|b| b.name == branch_name && !b.archived) else {
+        return Err(WriteError::BranchMissing(branch_name.to_string()));
+    };
+
+    match &b.claimed_by {
+        Some(owner) if owner != actor => return Err(WriteError::BranchOwned(owner.clone())),
+        Some(_) => {} // already claimed by same actor — idempotent
+        None => {
+            b.claimed_by = Some(actor.to_string());
+            save_branches_jsonl(&disk, &branches)?;
+        }
+    }
+    Ok(())
+}
+
 /// Rejection codes for mutation prechecks.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
@@ -1531,13 +1645,13 @@ pub enum WriteError {
 
 /// Gate every mutation path. Call this before touching any splay table.
 ///
-/// Enforces: exom exists, session is not closed, actor is non-empty.
-/// Branch TOFU ownership is wired in Task 4.4 once branch splay tables are
-/// path-aware; the pseudocode is preserved as inline comments below.
+/// Enforces: exom exists, session is not closed, actor is non-empty,
+/// branch exists in the exom, and the actor either owns the branch or
+/// is the first writer (TOFU claim).
 pub fn precheck_write(
     tree_root: &Path,
     exom_path: &TreePath,
-    _branch: &str,
+    branch: &str,
     actor: &str,
 ) -> Result<(), WriteError> {
     if actor.is_empty() { return Err(WriteError::ActorRequired); }
@@ -1555,19 +1669,21 @@ pub fn precheck_write(
     if let Some(s) = &meta.session {
         if s.closed_at.is_some() { return Err(WriteError::SessionClosed); }
     }
-    // Branch existence + ownership: implemented against the existing branch-splay
-    // table helpers in brain.rs. Pseudocode, adapt to the real helpers:
-    //
-    //     let branches = existing_list_branches(&disk)?;
-    //     if !branches.iter().any(|b| b.name == _branch) {
-    //         return Err(WriteError::BranchMissing(_branch.into()));
-    //     }
-    //     match existing_read_claimed_by(&disk, _branch)? {
-    //         Some(owner) if owner != actor => return Err(WriteError::BranchOwned(owner)),
-    //         Some(_) => {}
-    //         None => existing_write_claimed_by(&disk, _branch, actor)?, // TOFU
-    //     }
-    Ok(())
+
+    // Branch existence check: load branches from JSONL sidecar (no FFI).
+    let branches = load_branches_jsonl(&disk)
+        .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+    // "main" is always implicitly present even when branch.jsonl is absent or empty.
+    let branch_exists = branch == "main"
+        || branches.iter().any(|b| b.name == branch && !b.archived);
+
+    if !branch_exists {
+        return Err(WriteError::BranchMissing(branch.to_string()));
+    }
+
+    // TOFU ownership claim via claim_branch (reads + conditionally writes JSONL).
+    claim_branch(tree_root, exom_path, branch, actor)
 }
 
 /// Mirror writes to `session/label`, `session/closed_at`, or
@@ -1647,10 +1763,68 @@ pub fn session_new(
     });
     exom::write_meta(&disk, &meta)?;
 
-    // Pre-create branches (logical records on the branch splay table will be handled
-    // by the existing brain branch-creation path in Task 3.2). For now, record the
-    // branch names into the session meta only.
+    // Pre-create branch records in branch.jsonl for every participant.
+    // Orchestrator gets "main"; each other agent gets a branch named after themselves.
+    for agent_name in &agents_final {
+        let branch_name = if agent_name == actor { "main" } else { agent_name.as_str() };
+        create_branch(tree_root, &session_path, branch_name)?;
+    }
+    // TOFU-claim "main" immediately for the orchestrator.
+    claim_branch(tree_root, &session_path, "main", actor)
+        .map_err(|e| crate::scaffold::ScaffoldError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        ))?;
+
     Ok(session_path)
+}
+
+/// Join an existing session as `actor`.
+///
+/// Looks up the branch named `actor` in the session exom (set up by `session_new`).
+/// Performs TOFU ownership claim: if unclaimed → claims it; if already owned by
+/// `actor` → idempotent; if owned by someone else → `WriteError::BranchOwned`.
+/// Returns the branch name (== `actor`).
+///
+/// The orchestrator's branch is "main", so orchestrators should not call this;
+/// they already own "main" after `session_new`. Sub-agents call this to claim
+/// their named branch.
+///
+/// Access-control note: the HTTP handler must verify that `actor` is a member of
+/// the session's `agents` list before calling this function.
+pub fn session_join(
+    tree_root: &Path,
+    session_path: &TreePath,
+    actor: &str,
+) -> Result<String, WriteError> {
+    // Verify the session exom exists.
+    let disk = session_path.to_disk_path(tree_root);
+    if classify(&disk) != NodeKind::Exom {
+        return Err(WriteError::NoSuchExom(session_path.to_cli_string()));
+    }
+    let meta = match exom::read_meta(&disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(WriteError::NoSuchExom(session_path.to_cli_string()));
+        }
+        Err(e) => return Err(WriteError::Io(e)),
+    };
+    if let Some(s) = &meta.session {
+        if s.closed_at.is_some() { return Err(WriteError::SessionClosed); }
+    }
+
+    // The branch for this actor must exist (created by session_new).
+    let branches = load_branches_jsonl(&disk)
+        .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    let branch_name = actor;
+    let exists = branch_name == "main"
+        || branches.iter().any(|b| b.name == branch_name && !b.archived);
+    if !exists {
+        return Err(WriteError::BranchMissing(branch_name.to_string()));
+    }
+
+    // TOFU-claim the branch.
+    claim_branch(tree_root, session_path, branch_name, actor)?;
+    Ok(branch_name.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1743,6 +1917,77 @@ mod tofu_tests {
         exom::write_meta(&disk, &meta).unwrap();
         let err = precheck_write(d.path(), &session, "main", "me").unwrap_err();
         assert!(matches!(err, WriteError::SessionClosed));
+    }
+
+    #[test]
+    fn tofu_claims_branch_on_first_write() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        // Create a branch "agent_a" via create_branch.
+        create_branch(d.path(), &tp("work::main"), "agent_a").unwrap();
+        // First write claims it for alice.
+        assert!(precheck_write(d.path(), &tp("work::main"), "agent_a", "alice").is_ok());
+        // Same actor writes again — succeeds (idempotent).
+        assert!(precheck_write(d.path(), &tp("work::main"), "agent_a", "alice").is_ok());
+        // Different actor tries same branch — rejected.
+        let err = precheck_write(d.path(), &tp("work::main"), "agent_a", "bob").unwrap_err();
+        assert!(matches!(err, WriteError::BranchOwned(_)));
+    }
+
+    #[test]
+    fn precheck_rejects_nonexistent_branch() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        let err = precheck_write(d.path(), &tp("work::main"), "nonexistent", "alice").unwrap_err();
+        assert!(matches!(err, WriteError::BranchMissing(_)));
+    }
+
+    #[test]
+    fn precheck_allows_main_branch_without_explicit_create() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        // "main" branch should exist implicitly for any exom.
+        assert!(precheck_write(d.path(), &tp("work::main"), "main", "alice").is_ok());
+    }
+
+    #[test]
+    fn session_join_claims_agent_branch() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
+        let session = session_new(
+            d.path(), &tp("proj"), SessionType::Multi, "collab",
+            "orch", &["agent_a".into()],
+        ).unwrap();
+        // agent_a joins and claims their branch.
+        let branch = session_join(d.path(), &session, "agent_a").unwrap();
+        assert_eq!(branch, "agent_a");
+        // Joining again is idempotent.
+        assert!(session_join(d.path(), &session, "agent_a").is_ok());
+        // A different actor cannot claim the same branch.
+        let err = session_join(d.path(), &session, "agent_a").unwrap();
+        assert_eq!(err, "agent_a"); // same actor — ok
+        // Fabricated actor not in the session's pre-created branches is rejected.
+        let err = session_join(d.path(), &session, "impostor").unwrap_err();
+        assert!(matches!(err, WriteError::BranchMissing(_)));
+    }
+
+    #[test]
+    fn session_new_precreates_agent_branches() {
+        let d = tempdir().unwrap();
+        crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
+        let session = session_new(
+            d.path(), &tp("proj"), SessionType::Multi, "multi",
+            "orch", &["sub_a".into(), "sub_b".into()],
+        ).unwrap();
+        let disk = session.to_disk_path(d.path());
+        let branches = load_branches_jsonl(&disk).unwrap();
+        let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        assert!(names.contains(&"main"), "main branch missing");
+        assert!(names.contains(&"sub_a"), "sub_a branch missing");
+        assert!(names.contains(&"sub_b"), "sub_b branch missing");
+        // Orchestrator already owns main.
+        let main_branch = branches.iter().find(|b| b.name == "main").unwrap();
+        assert_eq!(main_branch.claimed_by.as_deref(), Some("orch"));
     }
 }
 

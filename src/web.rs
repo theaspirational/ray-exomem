@@ -3282,22 +3282,107 @@ fn api_action_session_new(req: &Request, state: &ServerState) -> ApiResult {
     }
 }
 
-fn api_action_session_join(_req: &Request, _state: &ServerState) -> ApiResult {
-    // FIXME(nested-exoms-task-4.4): wire to brain branch ops — TOFU claim requires
-    // branch splay table to be path-aware, which is deferred to Task 4.4.
-    let (s, b) = crate::http_error::ApiError::new("not_implemented", "session-join deferred to Task 4.4")
-        .with_status(501)
-        .into_response();
-    Ok(json_response(s, &b))
+fn api_action_session_join(req: &Request, state: &ServerState) -> ApiResult {
+    let body: serde_json::Value = serde_json::from_slice(&req.body)
+        .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+    let session_path_str = body["session_path"].as_str().unwrap_or("").to_string();
+    let actor = body["actor"].as_str().unwrap_or("").to_string();
+
+    let session_path: crate::path::TreePath = match session_path_str.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    if actor.is_empty() {
+        let (s, b) = crate::http_error::ApiError::new("actor_required", "actor required")
+            .with_suggestion("pass actor in request body")
+            .into_response();
+        return Ok(json_response(s, &b));
+    }
+
+    let tree_root = server_tree_root(state);
+    match crate::brain::session_join(&tree_root, &session_path, &actor) {
+        Ok(branch) => json_ok(&serde_json::json!({
+            "ok": true,
+            "session_path": session_path.to_slash_string(),
+            "actor": actor,
+            "branch": branch,
+        })),
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            Ok(json_response(s, &b))
+        }
+    }
 }
 
-fn api_action_branch_create(_req: &Request, _state: &ServerState) -> ApiResult {
-    // FIXME(nested-exoms-task-4.4): wire to brain branch ops — branch-create against
-    // path-based exoms requires brain changes deferred to Task 4.4.
-    let (s, b) = crate::http_error::ApiError::new("not_implemented", "branch-create deferred to Task 4.4")
-        .with_status(501)
-        .into_response();
-    Ok(json_response(s, &b))
+fn api_action_branch_create(req: &Request, state: &ServerState) -> ApiResult {
+    let body: serde_json::Value = serde_json::from_slice(&req.body)
+        .map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+    let exom_path_str = body["exom_path"].as_str().unwrap_or("").to_string();
+    let branch_name = body["branch_name"].as_str().unwrap_or("").to_string();
+    // actor is required for HTTP-layer gating (orchestrator check), but create_branch
+    // itself is unconstrained — ownership is set on first write via precheck_write.
+    let actor = body["actor"].as_str().unwrap_or("").to_string();
+
+    let exom_path: crate::path::TreePath = match exom_path_str.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::new("bad_path", e.to_string()).into_response();
+            return Ok(json_response(s, &b));
+        }
+    };
+    if branch_name.is_empty() {
+        let (s, b) = crate::http_error::ApiError::new("branch_name_required", "branch_name required")
+            .into_response();
+        return Ok(json_response(s, &b));
+    }
+    if actor.is_empty() {
+        let (s, b) = crate::http_error::ApiError::new("actor_required", "actor required")
+            .with_suggestion("pass actor in request body")
+            .into_response();
+        return Ok(json_response(s, &b));
+    }
+    // HTTP-layer access control: only the session orchestrator may create branches.
+    // Read the session meta to verify actor == initiated_by.
+    let tree_root = server_tree_root(state);
+    let disk = exom_path.to_disk_path(&tree_root);
+    let meta = match crate::exom::read_meta(&disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let (s, b) = crate::http_error::ApiError::new("no_such_exom",
+                format!("no such exom {exom_path_str}"))
+                .with_path(exom_path_str)
+                .into_response();
+            return Ok(json_response(s, &b));
+        }
+        Err(e) => return Err(anyhow::anyhow!("io: {}", e)),
+    };
+    if let Some(sess) = &meta.session {
+        if sess.initiated_by != actor {
+            let (s, b) = crate::http_error::ApiError::new("not_orchestrator",
+                format!("only the session orchestrator ({}) may create branches", sess.initiated_by))
+                .with_actor(actor.clone())
+                .into_response();
+            return Ok(json_response(s, &b));
+        }
+    }
+
+    match crate::brain::create_branch(&tree_root, &exom_path, &branch_name) {
+        Ok(()) => {
+            sse_push_tree_changed(state);
+            json_ok(&serde_json::json!({
+                "ok": true,
+                "exom_path": exom_path.to_slash_string(),
+                "branch_name": branch_name,
+            }))
+        }
+        Err(e) => {
+            let (s, b) = crate::http_error::ApiError::from(e).into_response();
+            Ok(json_response(s, &b))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -44,20 +44,22 @@ fn exom_new_creates_bare_exom() {
 }
 
 #[test]
-fn session_join_returns_501() {
+fn session_join_returns_400_for_bad_path() {
     let d = TestDaemon::start();
+    // "x" is not a valid exom path (single-segment paths are project roots, not exoms),
+    // so the response should be a 400-class error, not a 501.
     let err = ureq::post(&format!("{}/ray-exomem/api/actions/session-join", d.base_url))
         .send_json(json!({"session_path": "x", "actor": "y"})).unwrap_err();
-    if let ureq::Error::Status(s, _) = err { assert_eq!(s, 501); }
+    if let ureq::Error::Status(s, _) = err { assert!(s >= 400 && s < 500, "expected 4xx, got {s}"); }
     else { panic!("expected status error"); }
 }
 
 #[test]
-fn branch_create_returns_501() {
+fn branch_create_returns_400_for_bad_path() {
     let d = TestDaemon::start();
     let err = ureq::post(&format!("{}/ray-exomem/api/actions/branch-create", d.base_url))
-        .send_json(json!({"exom": "x", "branch": "y"})).unwrap_err();
-    if let ureq::Error::Status(s, _) = err { assert_eq!(s, 501); }
+        .send_json(json!({"exom_path": "x", "branch_name": "y", "actor": "z"})).unwrap_err();
+    if let ureq::Error::Status(s, _) = err { assert!(s >= 400 && s < 500, "expected 4xx, got {s}"); }
     else { panic!("expected status error"); }
 }
 
@@ -173,7 +175,6 @@ fn post_api_exoms_is_gone() {
 }
 
 #[test]
-#[ignore] // FIXME(nested-exoms-task-4.4): session-join deferred to Task 4.4
 fn session_join_claims_branch() {
     let d = TestDaemon::start();
     let _ = ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
@@ -194,13 +195,23 @@ fn session_join_claims_branch() {
 }
 
 #[test]
-#[ignore] // FIXME(nested-exoms-task-4.4): branch-create deferred to Task 4.4
 fn branch_create_works() {
     let d = TestDaemon::start();
-    let _ = ureq::post(&format!("{}/ray-exomem/api/actions/exom-new", d.base_url))
-        .send_json(json!({"path": "work::main"})).unwrap();
+    // Create a project and get the session exom path.
+    let _ = ureq::post(&format!("{}/ray-exomem/api/actions/init", d.base_url))
+        .send_json(json!({"path": "work"})).unwrap();
+    // Create a session so orchestrator owns the exom.
+    let s: serde_json::Value = ureq::post(&format!("{}/ray-exomem/api/actions/session-new", d.base_url))
+        .send_json(json!({
+            "project_path": "work",
+            "type": "multi",
+            "label": "feat",
+            "actor": "orch",
+            "agents": [],
+        })).unwrap().into_json().unwrap();
+    let session_path = s["session_path"].as_str().unwrap().replace('/', "::");
     let r: serde_json::Value = ureq::post(&format!("{}/ray-exomem/api/actions/branch-create", d.base_url))
-        .send_json(json!({"exom": "work::main", "branch": "feature-x"}))
+        .send_json(json!({"exom_path": session_path, "branch_name": "feature-x", "actor": "orch"}))
         .unwrap().into_json().unwrap();
     assert_eq!(r["ok"], true);
 }

@@ -1610,6 +1610,7 @@ pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
             parent_branch_id: parents[i].clone(),
             created_tx_id: created[i] as u64,
             archived: archived_col[i] != 0,
+            claimed_by: None, // splay tables don't store this; JSONL is the source of truth
         });
     }
     Ok(branches)
