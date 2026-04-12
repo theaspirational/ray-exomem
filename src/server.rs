@@ -236,6 +236,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/eval", post(api_eval))
         .route("/actions/evaluate", post(api_evaluate_noop))
         // Facts
+        .route("/facts", get(api_facts_list))
         .route("/facts/valid-at", get(api_facts_valid_at))
         .route("/facts/bitemporal", get(api_facts_bitemporal))
         .route("/facts/{id}", get(api_fact_detail))
@@ -1593,6 +1594,132 @@ fn fact_to_json(f: &crate::brain::Fact) -> serde_json::Value {
     })
 }
 
+fn resolve_branch_key<'a>(brain: &'a Brain, key: &str) -> Option<&'a str> {
+    brain
+        .branches()
+        .iter()
+        .find(|b| b.branch_id == key || b.name == key)
+        .map(|b| b.branch_id.as_str())
+}
+
+fn fact_json_enriched(brain: &Brain, f: &crate::brain::Fact) -> serde_json::Value {
+    let tx = brain.transactions().iter().find(|t| t.tx_id == f.created_by_tx);
+    let (actor, branch_id, tx_time) = match tx {
+        Some(t) => (
+            t.actor.as_str(),
+            t.branch_id.as_str(),
+            t.tx_time.as_str(),
+        ),
+        None => ("", "", ""),
+    };
+    let branch_name = brain
+        .branches()
+        .iter()
+        .find(|b| b.branch_id == branch_id)
+        .map(|b| b.name.as_str())
+        .unwrap_or("");
+    serde_json::json!({
+        "fact_id": f.fact_id,
+        "predicate": f.predicate,
+        "value": f.value,
+        "confidence": f.confidence,
+        "valid_from": f.valid_from,
+        "valid_to": f.valid_to,
+        "created_by_tx": f.created_by_tx,
+        "provenance": f.provenance,
+        "actor": actor,
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "tx_time": tx_time,
+    })
+}
+
+#[derive(Deserialize)]
+struct FactsListQuery {
+    exom: Option<String>,
+    /// Branch id or name; omit = current branch.
+    branch: Option<String>,
+    /// Deduped union of visible facts on every non-archived branch, sorted by `tx_time`.
+    #[serde(default)]
+    all_branches: bool,
+}
+
+async fn api_facts_list(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<FactsListQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let brain = &es.brain;
+
+    let entries: Vec<serde_json::Value> = if q.all_branches {
+        let mut seen: HashMap<String, &crate::brain::Fact> = HashMap::new();
+        for b in brain.branches() {
+            if b.archived {
+                continue;
+            }
+            for f in brain.facts_on_branch(&b.branch_id) {
+                seen.entry(f.fact_id.clone()).or_insert(f);
+            }
+        }
+        let mut rows: Vec<_> = seen
+            .into_values()
+            .map(|f| fact_json_enriched(brain, f))
+            .collect();
+        rows.sort_by(|a, b| {
+            let ta = a["tx_time"].as_str().unwrap_or("");
+            let tb = b["tx_time"].as_str().unwrap_or("");
+            ta.cmp(tb).then_with(|| {
+                let fa = a["fact_id"].as_str().unwrap_or("");
+                let fb = b["fact_id"].as_str().unwrap_or("");
+                fa.cmp(fb)
+            })
+        });
+        rows
+    } else if let Some(ref key) = q.branch {
+        let bid = match resolve_branch_key(brain, key) {
+            Some(id) => id,
+            None => {
+                return ApiError::new(
+                    "unknown_branch",
+                    format!("no branch matching {:?}", key),
+                )
+                .into_response();
+            }
+        };
+        brain
+            .facts_on_branch(bid)
+            .into_iter()
+            .map(|f| fact_json_enriched(brain, f))
+            .collect()
+    } else {
+        brain
+            .current_facts()
+            .into_iter()
+            .map(|f| fact_json_enriched(brain, f))
+            .collect()
+    };
+
+    Json(serde_json::json!({
+        "ok": true,
+        "exom": exom_slash,
+        "facts": entries,
+        "count": entries.len()
+    }))
+    .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // GET /branches + POST /branches
 // ---------------------------------------------------------------------------
@@ -1626,6 +1753,7 @@ async fn api_list_branches(
             "archived": b.archived,
             "is_current": b.branch_id == es.brain.current_branch_id(),
             "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
+            "claimed_by": b.claimed_by,
         }))
         .collect();
     Json(serde_json::json!({"branches": branches})).into_response()

@@ -324,6 +324,8 @@ export type TreeNode =
 			session: any | null;
 	  };
 
+export type TreeExom = Extract<TreeNode, { kind: 'exom' }>;
+
 /**
  * Folder/exom tree from `GET /api/tree`. Uses the same base URL as other API calls (daemon on 9780 in dev).
  * Query flags use `true` (server expects string "true", not "1").
@@ -343,6 +345,69 @@ export async function fetchTree(
 	if (opts.branches) qs.set('branches', 'true');
 	if (opts.archived) qs.set('archived', 'true');
 	return readJson<TreeNode>(`api/tree?${qs}`, opts.signal ? { signal: opts.signal } : undefined);
+}
+
+/** One row from `GET /api/facts?exom=` (slash path). */
+export interface ListedFact {
+	fact_id: string;
+	predicate: string;
+	value: string;
+	valid_from: string;
+	valid_to: string | null;
+	actor: string;
+	branch_id?: string;
+	branch_name?: string;
+	tx_time?: string;
+	created_by_tx?: number;
+}
+
+export async function fetchFactsList(
+	exomSlashPath: string,
+	opts?: { branch?: string; allBranches?: boolean; signal?: AbortSignal }
+): Promise<ListedFact[]> {
+	const qs = new URLSearchParams();
+	qs.set('exom', exomSlashPath);
+	if (opts?.branch) qs.set('branch', opts.branch);
+	if (opts?.allBranches) qs.set('all_branches', 'true');
+	const r = await readJson<{ facts: ListedFact[] }>(
+		`api/facts?${qs}`,
+		opts?.signal ? { signal: opts.signal } : undefined
+	);
+	return r.facts ?? [];
+}
+
+export function apiInitFolder(path: string): Promise<{ ok: boolean; path: string }> {
+	return postAction('api/actions/init', { path });
+}
+
+export function apiNewBareExom(path: string): Promise<{ ok: boolean; path: string }> {
+	return postAction('api/actions/exom-new', { path });
+}
+
+export function apiSessionNew(body: {
+	project_path: string;
+	type: 'multi' | 'single';
+	label: string;
+	actor?: string;
+	agents?: string[];
+}): Promise<{ ok: boolean; session_path: string }> {
+	return postAction('api/actions/session-new', {
+		project_path: body.project_path,
+		type: body.type,
+		label: body.label,
+		actor: body.actor ?? 'ui',
+		agents: body.agents ?? []
+	});
+}
+
+/** Retracts the `session/archived_at` fact so the session is visible again in default inspect. */
+export async function unarchiveSessionExom(exomSlashPath: string): Promise<{ ok: boolean }> {
+	const facts = await fetchFactsList(exomSlashPath);
+	const row = facts.find((f) => f.predicate === 'session/archived_at');
+	if (!row) {
+		throw new Error('No session/archived_at fact found for this exom');
+	}
+	return retractFact(row.fact_id, exomSlashPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -830,6 +895,7 @@ export interface BranchRow {
 	archived: boolean;
 	is_current: boolean;
 	fact_count: number;
+	claimed_by?: string | null;
 }
 
 export interface BranchDiffResult {
