@@ -114,3 +114,38 @@ fn session_add_agent_returns_501() {
         .unwrap();
     // 501 stub — test is ignored until Task 4.4 lands
 }
+
+// ============================================================
+// Task 5.3 — inspect subcommand
+// ============================================================
+
+#[test]
+fn inspect_prints_tree() {
+    let d = TestDaemon::start();
+    run(&d, &["init", "work::ath::lynx::orsl"]);
+    let out = run(&d, &["inspect", "work", "--depth", "4"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("orsl"), "stdout: {}", s);
+    assert!(s.contains("main"), "stdout: {}", s);
+}
+
+#[test]
+fn inspect_json_flag() {
+    let d = TestDaemon::start();
+    run(&d, &["init", "work::proj"]);
+    let out = run(&d, &["inspect", "work", "--json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&s).expect("should be valid JSON");
+    assert!(s.contains("\"kind\""), "stdout: {}", s);
+    let _ = v;
+}

@@ -688,6 +688,24 @@ enum Commands {
         #[command(subcommand)]
         cmd: SessionCmd,
     },
+
+    /// Show the tree structure rooted at <path> (offline; reads disk directly).
+    Inspect {
+        /// Tree path to inspect (default: tree root).
+        path: Option<String>,
+        /// Max depth (default: 2).
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+        /// Include branch list in exom nodes.
+        #[arg(long)]
+        branches: bool,
+        /// Include archived sessions.
+        #[arg(long)]
+        archived: bool,
+        /// Print raw JSON instead of ASCII tree.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn default_data_dir() -> PathBuf {
@@ -1257,6 +1275,74 @@ fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> Option<PathBuf> {
                 .join(d)
         }
     })
+}
+
+/// Render a `TreeNode` as an ASCII tree string.
+fn render_tree(
+    node: &ray_exomem::tree::TreeNode,
+    indent: &str,
+    last: bool,
+    include_branches: bool,
+) -> String {
+    use ray_exomem::exom::ExomKind;
+    use ray_exomem::tree::TreeNode;
+    let mut out = String::new();
+    let connector = if last { "└── " } else { "├── " };
+    match node {
+        TreeNode::Folder { name, children, .. } => {
+            if name.is_empty() {
+                for (i, c) in children.iter().enumerate() {
+                    out.push_str(&render_tree(c, "", i == children.len() - 1, include_branches));
+                }
+            } else {
+                out.push_str(&format!("{}{}{}/\n", indent, connector, name));
+                let next_indent = if last {
+                    format!("{}    ", indent)
+                } else {
+                    format!("{}│   ", indent)
+                };
+                for (i, c) in children.iter().enumerate() {
+                    out.push_str(&render_tree(
+                        c,
+                        &next_indent,
+                        i == children.len() - 1,
+                        include_branches,
+                    ));
+                }
+            }
+        }
+        TreeNode::Exom {
+            name,
+            exom_kind,
+            fact_count,
+            current_branch,
+            branches,
+            ..
+        } => {
+            let kind_label = match exom_kind {
+                ExomKind::ProjectMain => "exom",
+                ExomKind::Session => "session",
+                ExomKind::Bare => "bare",
+            };
+            out.push_str(&format!(
+                "{}{}{}  ({}, {} facts, branch: {})\n",
+                indent, connector, name, kind_label, fact_count, current_branch
+            ));
+            if include_branches {
+                if let Some(bs) = branches {
+                    if !bs.is_empty() {
+                        let next_indent = if last {
+                            format!("{}    ", indent)
+                        } else {
+                            format!("{}│   ", indent)
+                        };
+                        out.push_str(&format!("{}branches: {}\n", next_indent, bs.join(", ")));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Parse the daemon URL's host:port portion for use with the legacy Client.
@@ -3170,6 +3256,56 @@ fn main() {
                         }
                     }
                 }
+            }
+        }
+
+        Commands::Inspect {
+            path,
+            depth,
+            branches,
+            archived,
+            json: inspect_json,
+        } => {
+            let tree_root = ray_exomem::storage::tree_root();
+            let opts = ray_exomem::tree::WalkOptions {
+                depth: Some(depth),
+                include_archived: archived,
+                include_branches: branches,
+                include_activity: false,
+            };
+            let node = match path {
+                Some(ref p) => {
+                    let tp: ray_exomem::path::TreePath = match p.parse() {
+                        Ok(tp) => tp,
+                        Err(e) => {
+                            eprintln!("error: invalid path {:?}: {}", p, e);
+                            std::process::exit(1);
+                        }
+                    };
+                    match ray_exomem::tree::walk(&tree_root, &tp, &opts) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => match ray_exomem::tree::walk_root(&tree_root, &opts) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+            };
+            if json_stdout(global_json, inspect_json) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&node)
+                        .unwrap_or_else(|_| serde_json::to_string(&node).unwrap_or_default())
+                );
+            } else {
+                print!("{}", render_tree(&node, "", true, branches));
             }
         }
     }
