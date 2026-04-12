@@ -263,13 +263,15 @@ enum SessionCmd {
     name = "ray-exomem",
     version = env!("CARGO_PKG_VERSION"),
     about = "Native rayforce2 exomemory front-end — Rayfall list-style syntax only",
-    long_about = "ray-exomem is a thin orchestration layer over native rayforce2.\n\n\
+    long_about = "ray-exomem persists memory as a tree of folders and exoms.\n\n\
+                  Tree:        work/ath/lynx/orsl/main              (the project's main exom)\n\
+                               work/ath/lynx/orsl/sessions/<id>     (per-session exoms)\n\
+                  CLI paths:   work::ath::lynx::orsl::main          (`::`  ==  `/`)\n\
+                  Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)\n\
+                  Writes:      always require --actor <name>\n\
+                  Full agent workflow:   ray-exomem guide\n\n\
                   Quick start (UI + JSON API):  ray-exomem daemon\n\
-                  Then open http://127.0.0.1:9780/ray-exomem/  —  stop with: ray-exomem stop\n\n\
-                  All input uses Rayfall list-style syntax. No Teide parser,\n\
-                  Teide AST, or Teide-to-Rayfall translation layer is present.\n\n\
-                  Full reference for agents:  ray-exomem guide\n\
-                  Sections:  ray-exomem guide --topic <overview|workflow|cli|http|env|limitations>",
+                  Then open http://127.0.0.1:9780/ray-exomem/  —  stop with: ray-exomem stop",
     after_long_help = "Quick links:\n  \
         ray-exomem daemon             background UI + API (recommended)\n  \
         ray-exomem guide              full CLI + HTTP + env reference\n  \
@@ -3073,7 +3075,13 @@ fn main() {
             }
         }
         Commands::Guide { topic } => {
-            println!("{}", ray_exomem::agent_guide::render(topic));
+            use ray_exomem::agent_guide::GuideTopic;
+            if matches!(topic, GuideTopic::All) {
+                // Default: print the full markdown doctrine (includes the "agent guide" heading).
+                print!("{}", ray_exomem::agent_guide::doctrine());
+            } else {
+                println!("{}", ray_exomem::agent_guide::render(topic));
+            }
         }
 
         Commands::Init { path } => {

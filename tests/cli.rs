@@ -149,3 +149,29 @@ fn inspect_json_flag() {
     assert!(s.contains("\"kind\""), "stdout: {}", s);
     let _ = v;
 }
+
+// ============================================================
+// Task 5.4 — guide subcommand + --help blurb
+// ============================================================
+
+#[test]
+fn top_help_contains_schema_blurb() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ray-exomem"))
+        .args(["--help"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("Tree:"), "stdout: {}", s);
+    assert!(s.contains("`::`"), "stdout: {}", s);
+}
+
+#[test]
+fn guide_subcommand_prints_doctrine() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ray-exomem"))
+        .arg("guide")
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("agent guide"), "stdout: {}", s);
+    assert!(s.contains("Multi-line commands"), "stdout: {}", s);
+}
