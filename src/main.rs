@@ -195,6 +195,69 @@ enum CoordCommands {
     },
 }
 
+/// Session management subcommands.
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Create a new session exom under <project_path>/sessions/.
+    New {
+        /// Project path (e.g. work::ath or work/ath).
+        project_path: String,
+        /// Human label for the session.
+        #[arg(long)]
+        name: String,
+        /// Multi-agent session (conflicts with --single).
+        #[arg(long, group = "session_type")]
+        multi: bool,
+        /// Single-agent session (conflicts with --multi).
+        #[arg(long, group = "session_type")]
+        single: bool,
+        /// Actor creating the session.
+        #[arg(long)]
+        actor: String,
+        /// Comma-separated list of agent ids for multi-agent sessions.
+        #[arg(long, value_delimiter = ',', default_value = "")]
+        agents: Vec<String>,
+    },
+    /// Add an agent branch to an existing session (501 stub — deferred to Task 4.4).
+    AddAgent {
+        session_path: String,
+        #[arg(long)]
+        agent: String,
+    },
+    /// Join an existing session as an agent (501 stub — deferred to Task 4.4).
+    Join {
+        session_path: String,
+        #[arg(long)]
+        actor: String,
+    },
+    /// Update the human label of a session.
+    Rename {
+        session_path: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+    },
+    /// Mark a session as closed (records session/closed_at timestamp).
+    Close {
+        session_path: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        /// ISO 8601 timestamp; defaults to now.
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// Archive a session (records session/archived_at timestamp).
+    Archive {
+        session_path: String,
+        #[arg(long, default_value = "cli")]
+        actor: String,
+        /// ISO 8601 timestamp; defaults to now.
+        #[arg(long)]
+        at: Option<String>,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     name = "ray-exomem",
@@ -618,6 +681,12 @@ enum Commands {
     ExomNew {
         /// Tree path for the new bare exom.
         path: String,
+    },
+
+    /// Manage sessions.
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
     },
 }
 
@@ -1190,11 +1259,31 @@ fn resolve_ui_dir(ui_dir: Option<PathBuf>) -> Option<PathBuf> {
     })
 }
 
+/// Parse the daemon URL's host:port portion for use with the legacy Client.
+fn daemon_url_to_addr(url: &str) -> String {
+    let s = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    s.splitn(2, '/').next().unwrap_or(s).to_string()
+}
+
+/// POST JSON to a daemon URL path (resolves addr from the global daemon_url flag).
+fn daemon_post_json(
+    daemon_url: &str,
+    path: &str,
+    payload: &serde_json::Value,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<String> {
+    let addr = daemon_url_to_addr(daemon_url);
+    let c = ray_exomem::client::Client::new(Some(&addr));
+    c.post_json_with_headers(path, &payload.to_string(), headers)
+}
+
 fn main() {
     let Cli {
         json: global_json,
         data_dir: global_data_dir,
-        daemon_url: _global_daemon_url,
+        daemon_url: global_daemon_url,
         command,
     } = Cli::parse();
 
@@ -2931,6 +3020,155 @@ fn main() {
                 Err(e) => {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Session { cmd } => {
+            match cmd {
+                SessionCmd::New {
+                    project_path,
+                    name,
+                    multi,
+                    single: _single,
+                    actor,
+                    agents,
+                } => {
+                    let agents_clean: Vec<String> =
+                        agents.into_iter().filter(|a| !a.is_empty()).collect();
+                    let session_type = if multi { "multi" } else { "single" };
+                    let payload = serde_json::json!({
+                        "project_path": project_path,
+                        "type": session_type,
+                        "label": name,
+                        "actor": actor,
+                        "agents": agents_clean,
+                    });
+                    let h = vec![("X-Actor", actor.as_str())];
+                    match daemon_post_json(
+                        &global_daemon_url,
+                        "/api/actions/session-new",
+                        &payload,
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                SessionCmd::AddAgent { session_path, agent } => {
+                    // FIXME(nested-exoms-task-4.4): branch-create is a 501 stub.
+                    let payload = serde_json::json!({ "exom": session_path, "branch": agent });
+                    let h: Vec<(&str, &str)> = vec![];
+                    match daemon_post_json(
+                        &global_daemon_url,
+                        "/api/actions/branch-create",
+                        &payload,
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                SessionCmd::Join { session_path, actor } => {
+                    // FIXME(nested-exoms-task-4.4): session-join is a 501 stub.
+                    let payload =
+                        serde_json::json!({ "session_path": session_path, "actor": actor });
+                    let h = vec![("X-Actor", actor.as_str())];
+                    match daemon_post_json(
+                        &global_daemon_url,
+                        "/api/actions/session-join",
+                        &payload,
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                SessionCmd::Rename {
+                    session_path,
+                    label,
+                    actor,
+                } => {
+                    let payload = serde_json::json!({
+                        "exom": session_path,
+                        "predicate": "session/label",
+                        "value": label,
+                        "actor": actor,
+                    });
+                    let h = vec![("X-Actor", actor.as_str())];
+                    match daemon_post_json(
+                        &global_daemon_url,
+                        &format!("/api/actions/assert-fact?exom={}", session_path),
+                        &payload,
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                SessionCmd::Close {
+                    session_path,
+                    actor,
+                    at,
+                } => {
+                    let ts = at.unwrap_or_else(ray_exomem::exom::now_iso8601_basic);
+                    let payload = serde_json::json!({
+                        "exom": session_path,
+                        "predicate": "session/closed_at",
+                        "value": ts,
+                        "actor": actor,
+                    });
+                    let h = vec![("X-Actor", actor.as_str())];
+                    match daemon_post_json(
+                        &global_daemon_url,
+                        &format!("/api/actions/assert-fact?exom={}", session_path),
+                        &payload,
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                SessionCmd::Archive {
+                    session_path,
+                    actor,
+                    at,
+                } => {
+                    let ts = at.unwrap_or_else(ray_exomem::exom::now_iso8601_basic);
+                    let payload = serde_json::json!({
+                        "exom": session_path,
+                        "predicate": "session/archived_at",
+                        "value": ts,
+                        "actor": actor,
+                    });
+                    let h = vec![("X-Actor", actor.as_str())];
+                    match daemon_post_json(
+                        &global_daemon_url,
+                        &format!("/api/actions/assert-fact?exom={}", session_path),
+                        &payload,
+                        &h,
+                    ) {
+                        Ok(body) => println!("{}", body),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }
