@@ -6,10 +6,10 @@ use std::{
 };
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -18,9 +18,12 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     backend::RayforceEngine,
-    brain::{self, Brain},
+    brain::{self, Brain, MergePolicy},
     context::{self, MutationContext},
+    ffi,
     http_error::ApiError,
+    rayfall_ast::{self, CanonicalForm, CanonicalQuery, LoweringOptions},
+    rayfall_parser,
     rules::{self, ParsedRule},
     storage::{self, RayObj},
     system_schema,
@@ -204,6 +207,48 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/branch-create", post(api_branch_create))
         .route("/actions/rename", post(api_rename))
         .route("/actions/assert-fact", post(api_assert_fact))
+        // Query
+        .route("/query", get(api_query_get).post(api_query_post))
+        .route("/expand-query", post(api_expand_query))
+        // Eval
+        .route("/actions/eval", post(api_eval))
+        .route("/actions/evaluate", post(api_evaluate_noop))
+        // Facts
+        .route("/facts/valid-at", get(api_facts_valid_at))
+        .route("/facts/bitemporal", get(api_facts_bitemporal))
+        .route("/facts/{id}", get(api_fact_detail))
+        // Branches
+        .route("/branches", get(api_list_branches).post(api_create_branch))
+        .route("/branches/{id}", get(api_branch_detail).delete(api_delete_branch_handler))
+        .route("/branches/{id}/switch", post(api_switch_branch_handler))
+        .route("/branches/{id}/diff", get(api_branch_diff_handler))
+        .route("/branches/{id}/merge", post(api_merge_branch_handler))
+        // Explain
+        .route("/explain", get(api_explain))
+        // Export / Import
+        .route("/actions/export", get(api_export))
+        .route("/actions/export-json", get(api_export_json))
+        .route("/actions/import-json", post(api_import_json))
+        // Mutations
+        .route("/actions/retract-all", post(api_retract_all))
+        .route("/actions/wipe", post(api_wipe))
+        .route("/actions/factory-reset", post(api_factory_reset))
+        .route("/actions/consolidate-propose", post(api_consolidate_propose))
+        // Schema / graph / clusters / logs / provenance / relation-graph
+        .route("/schema", get(api_schema))
+        .route("/graph", get(api_graph))
+        .route("/clusters", get(api_clusters))
+        .route("/clusters/{id}", get(api_cluster_detail_handler))
+        .route("/logs", get(api_logs))
+        .route("/provenance", get(api_provenance))
+        .route("/relation-graph", get(api_relation_graph))
+        // Derived / beliefs
+        .route("/derived/{pred}", get(api_derived_handler))
+        .route("/beliefs/{id}/support", get(api_belief_support_handler))
+        // Exom manage (legacy)
+        .route("/exoms/{name}/manage", post(api_exom_manage_handler))
+        // Old start-session compat → 410
+        .route("/actions/start-session", post(api_start_session_gone))
 }
 
 pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
@@ -847,4 +892,1853 @@ async fn api_assert_fact(
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Query helpers (shared by query + eval + expand-query handlers)
+// ---------------------------------------------------------------------------
+
+struct ExpandedQuery {
+    original_source: String,
+    normalized_query: String,
+    expanded_query: String,
+    #[allow(dead_code)]
+    exom_name: String,
+}
+
+fn lower_query_request(
+    source: &str,
+    default_exom: Option<&str>,
+    surface: &str,
+) -> anyhow::Result<CanonicalQuery> {
+    let forms = rayfall_ast::parse_forms(source)?;
+    if forms.len() != 1 {
+        anyhow::bail!("{surface} expects exactly one top-level Rayfall query form");
+    }
+    let lowered = rayfall_ast::lower_top_level(
+        &forms[0],
+        LoweringOptions {
+            default_query_exom: default_exom,
+            default_rule_exom: Some(crate::web::DEFAULT_EXOM),
+        },
+    )?;
+    match lowered.as_slice() {
+        [CanonicalForm::Query(query)] => Ok(query.clone()),
+        [CanonicalForm::AssertFact(_) | CanonicalForm::RetractFact(_) | CanonicalForm::Rule(_)] => {
+            anyhow::bail!("{surface} only accepts a Rayfall (query ...) form")
+        }
+        [] => anyhow::bail!("{surface} expects exactly one top-level Rayfall query form"),
+        _ => anyhow::bail!("{surface} accepts exactly one logical query form"),
+    }
+}
+
+enum EvalForm {
+    Canonical(CanonicalForm),
+    Raw(String),
+}
+
+fn lower_eval_forms(source: &str) -> anyhow::Result<Vec<EvalForm>> {
+    let forms = rayfall_ast::parse_forms(source)?;
+    let mut out = Vec::new();
+    for form in forms {
+        match form
+            .as_list()
+            .and_then(|items| items.first())
+            .and_then(|item| item.as_symbol())
+        {
+            Some("assert-fact" | "retract-fact" | "rule" | "query" | "in-exom") => {
+                let lowered = rayfall_ast::lower_top_level(
+                    &form,
+                    LoweringOptions {
+                        default_query_exom: None,
+                        default_rule_exom: Some(crate::web::DEFAULT_EXOM),
+                    },
+                )?;
+                out.extend(lowered.into_iter().map(EvalForm::Canonical));
+            }
+            _ => out.push(EvalForm::Raw(form.emit())),
+        }
+    }
+    Ok(out)
+}
+
+fn expand_canonical_query(
+    exoms: &HashMap<String, ExomState>,
+    engine: &crate::backend::RayforceEngine,
+    original_source: String,
+    query: &CanonicalQuery,
+) -> anyhow::Result<ExpandedQuery> {
+    let exom_name = query.exom.clone();
+    let rule_inline_bodies: Vec<String> = {
+        let es = exoms
+            .get(&exom_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
+        combined_rules(&exom_name, &es.rules)?
+            .into_iter()
+            .map(|rule| rule.inline_body)
+            .collect()
+    };
+    let normalized_query = query.emit();
+    let expanded_query =
+        rayfall_parser::rewrite_query_with_rules(&normalized_query, &rule_inline_bodies)?;
+    let _ = engine; // engine is accessed separately for eval
+    Ok(ExpandedQuery {
+        original_source,
+        normalized_query,
+        expanded_query,
+        exom_name,
+    })
+}
+
+fn expand_query(
+    exoms: &HashMap<String, ExomState>,
+    engine: &crate::backend::RayforceEngine,
+    source: &str,
+    default_exom: Option<&str>,
+    surface: &str,
+) -> anyhow::Result<ExpandedQuery> {
+    let query = lower_query_request(source, default_exom, surface)?;
+    expand_canonical_query(exoms, engine, source.to_string(), &query)
+}
+
+fn eval_query_form(
+    exoms: &HashMap<String, ExomState>,
+    engine: &crate::backend::RayforceEngine,
+    query: &CanonicalQuery,
+) -> anyhow::Result<(String, Option<serde_json::Value>)> {
+    let expanded = expand_canonical_query(exoms, engine, query.emit(), query)?;
+    let raw = engine.eval_raw(&expanded.expanded_query)?;
+    if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE {
+        let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+        Ok((storage::format_decoded_query_table(&decoded), Some(decoded)))
+    } else {
+        Ok((engine.format_obj(&raw)?, None))
+    }
+}
+
+fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomState>) {
+    if let Err(e) = state.engine.reconcile_lang_env() {
+        eprintln!("[ray-exomem] reconcile_lang_env failed: {}", e);
+        return;
+    }
+    for (name, es) in exoms {
+        let _ = state.engine.bind_named_db(storage::sym_intern(name), &es.datoms);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET/POST /query
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct QueryParams {
+    exom: Option<String>,
+}
+
+async fn api_query_get(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<QueryParams>,
+) -> impl IntoResponse {
+    // GET with body is non-standard; just return an error directing to POST
+    let _ = params;
+    let _ = state;
+    ApiError::new("use_post", "Use POST /api/query with a Rayfall query in the request body")
+        .with_status(405)
+        .into_response()
+}
+
+async fn api_query_post(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let source = String::from_utf8_lossy(&body).into_owned();
+    let mut exoms = state.exoms.lock().unwrap();
+    let expanded = match expand_query(&exoms, &state.engine, &source, None, "api/query") {
+        Ok(e) => e,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    match state.engine.eval_raw(&expanded.expanded_query) {
+        Ok(raw) => {
+            let (output, decoded) = if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE {
+                match storage::decode_query_table(&raw, &expanded.normalized_query) {
+                    Ok(d) => (storage::format_decoded_query_table(&d), Some(d)),
+                    Err(e) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e.to_string()}))).into_response();
+                    }
+                }
+            } else {
+                match state.engine.format_obj(&raw) {
+                    Ok(s) => (s, None),
+                    Err(e) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e.to_string()}))).into_response();
+                    }
+                }
+            };
+            let mut payload = serde_json::json!({
+                "ok": true,
+                "output": output,
+                "mutated_exom": serde_json::Value::Null,
+                "mutation_count": 0,
+                "normalized_query": expanded.normalized_query,
+                "expanded_query": expanded.expanded_query
+            });
+            if let Some(decoded) = decoded {
+                if let (Some(dst), Some(src)) = (payload.as_object_mut(), decoded.as_object()) {
+                    for (k, v) in src {
+                        dst.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            Json(payload).into_response()
+        }
+        Err(err) => {
+            reconcile_engine(&state, &exoms);
+            drop(exoms);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /expand-query
+// ---------------------------------------------------------------------------
+
+async fn api_expand_query(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let source = String::from_utf8_lossy(&body).into_owned();
+    let exoms = state.exoms.lock().unwrap();
+    match expand_query(&exoms, &state.engine, &source, None, "api/expand-query") {
+        Ok(expanded) => Json(serde_json::json!({
+            "ok": true,
+            "original_source": expanded.original_source,
+            "normalized_query": expanded.normalized_query,
+            "expanded_query": expanded.expanded_query,
+            "exom": expanded.exom_name,
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/eval
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct EvalActorHeader {
+    // actor may come from x-actor header or body — we allow both
+}
+
+async fn api_eval(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let actor = headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+    let ctx = MutationContext {
+        actor: actor.clone(),
+        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    };
+    api_eval_inner(state, ctx, body).await
+}
+
+async fn api_eval_inner(
+    state: Arc<AppState>,
+    ctx: MutationContext,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let source = String::from_utf8_lossy(&body).into_owned();
+    let forms = match lower_eval_forms(&source) {
+        Ok(forms) => forms,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    let mut last_result = String::new();
+    let mut last_decoded: Option<serde_json::Value> = None;
+    let mut exoms = state.exoms.lock().unwrap();
+
+    for form in forms {
+        let exec: anyhow::Result<()> = match form {
+            EvalForm::Canonical(CanonicalForm::AssertFact(mutation)) => {
+                let exom = mutation.exom.clone();
+                let pred = mutation.predicate.clone();
+                let fact_id = mutation.fact_id.clone();
+                let value = mutation.value.clone();
+                (|| {
+                    let es = exoms
+                        .get_mut(&exom)
+                        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
+                    es.brain.assert_fact(&fact_id, &pred, &value, 1.0, "rayfall-eval", None, None, &ctx)?;
+                    es.datoms = storage::build_datoms_table(&es.brain)?;
+                    state.engine.bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
+                    if let Some(disk) = es.exom_disk.as_ref() {
+                        es.brain.save()?;
+                        let body_str: String = es.rules.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join("\n");
+                        if !body_str.is_empty() {
+                            std::fs::write(disk.join("rules.ray"), format!("{}\n", body_str))?;
+                        }
+                    }
+                    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
+                    Ok(())
+                })()
+            }
+            EvalForm::Canonical(CanonicalForm::RetractFact(mutation)) => {
+                let exom = mutation.exom.clone();
+                let pred = mutation.predicate.clone();
+                let fact_id = mutation.fact_id.clone();
+                let value = mutation.value.clone();
+                (|| {
+                    let es = exoms
+                        .get_mut(&exom)
+                        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
+                    es.brain.retract_fact_exact(&fact_id, &pred, &value, &ctx)?;
+                    es.datoms = storage::build_datoms_table(&es.brain)?;
+                    state.engine.bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
+                    if let Some(disk) = es.exom_disk.as_ref() {
+                        es.brain.save()?;
+                    }
+                    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
+                    Ok(())
+                })()
+            }
+            EvalForm::Canonical(CanonicalForm::Rule(rule)) => {
+                let full = rule.emit();
+                let exom_name = rule.exom.clone();
+                (|| {
+                    let pr = rules::parse_rule_line(&full, ctx.clone(), brain::now_iso())?;
+                    let es = exoms
+                        .get_mut(&exom_name)
+                        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
+                    es.rules.push(pr);
+                    es.datoms = storage::build_datoms_table(&es.brain)?;
+                    state.engine.bind_named_db(storage::sym_intern(&exom_name), &es.datoms)?;
+                    if let Some(disk) = es.exom_disk.as_ref() {
+                        es.brain.save()?;
+                        let body_str: String = es.rules.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join("\n");
+                        std::fs::write(disk.join("rules.ray"), format!("{}\n", body_str))?;
+                    }
+                    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#, exom_name, ctx.actor));
+                    Ok(())
+                })()
+            }
+            EvalForm::Canonical(CanonicalForm::Query(query)) => {
+                (|| {
+                    let (output, decoded) = eval_query_form(&exoms, &state.engine, &query)?;
+                    last_result = output;
+                    last_decoded = decoded;
+                    Ok(())
+                })()
+            }
+            EvalForm::Raw(source) => {
+                (|| {
+                    last_result = state.engine.eval(&source)?;
+                    last_decoded = None;
+                    Ok(())
+                })()
+            }
+        };
+
+        if let Err(err) = exec {
+            reconcile_engine(&state, &exoms);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    }
+
+    let mut payload = serde_json::json!({
+        "ok": true,
+        "output": last_result,
+        "mutated_exom": serde_json::Value::Null,
+        "mutation_count": 0
+    });
+    if let Some(decoded) = last_decoded {
+        if let (Some(dst), Some(src)) = (payload.as_object_mut(), decoded.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Json(payload).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/evaluate (noop)
+// ---------------------------------------------------------------------------
+
+async fn api_evaluate_noop() -> impl IntoResponse {
+    Json(serde_json::json!({"ok": true, "new_derivations": 0, "duration_ms": 0}))
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/consolidate-propose (501)
+// ---------------------------------------------------------------------------
+
+async fn api_consolidate_propose() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({"ok": false, "error": "consolidation propose API is not implemented yet"})),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// GET /facts/valid-at
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExomQuery {
+    exom: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ValidAtQuery {
+    exom: Option<String>,
+    timestamp: Option<String>,
+}
+
+async fn api_facts_valid_at(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ValidAtQuery>,
+) -> impl IntoResponse {
+    let timestamp = match q.timestamp.as_deref().filter(|s| !s.is_empty()) {
+        Some(t) => t.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "timestamp query parameter is required"})),
+            )
+                .into_response();
+        }
+    };
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let entries: Vec<_> = es
+        .brain
+        .facts_valid_at(&timestamp)
+        .iter()
+        .map(|f| fact_to_json(f))
+        .collect();
+    Json(serde_json::json!({
+        "ok": true,
+        "timestamp": timestamp,
+        "facts": entries,
+        "count": entries.len()
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /facts/bitemporal
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct BitemporalQuery {
+    exom: Option<String>,
+    timestamp: Option<String>,
+    tx_id: Option<u64>,
+}
+
+async fn api_facts_bitemporal(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BitemporalQuery>,
+) -> impl IntoResponse {
+    let timestamp = q.timestamp.as_deref().unwrap_or("");
+    let tx_id = q.tx_id.unwrap_or(0);
+    if timestamp.is_empty() || tx_id == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "timestamp and tx_id query parameters are required"})),
+        )
+            .into_response();
+    }
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let entries: Vec<_> = es
+        .brain
+        .facts_bitemporal(tx_id, timestamp)
+        .iter()
+        .map(|f| fact_to_json(f))
+        .collect();
+    Json(serde_json::json!({
+        "ok": true,
+        "timestamp": timestamp,
+        "tx_id": tx_id,
+        "facts": entries,
+        "count": entries.len()
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /facts/:id
+// ---------------------------------------------------------------------------
+
+async fn api_fact_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let brain = &es.brain;
+    let history = brain.fact_history(&id);
+    match history.last() {
+        Some(f) => {
+            let status = if f.revoked_by_tx.is_some() { "retracted" } else { "active" };
+            let touch_history: Vec<_> = brain
+                .explain(&id)
+                .iter()
+                .map(|tx| serde_json::json!({
+                    "event_id": format!("tx{}", tx.tx_id),
+                    "event_type": tx.action.to_string()
+                }))
+                .collect();
+            Json(serde_json::json!({
+                "fact": {
+                    "id": f.fact_id,
+                    "predicate": f.predicate,
+                    "tuple": [f.fact_id, f.predicate, f.value, f.confidence],
+                    "interval": {
+                        "start": f.valid_from,
+                        "end": f.valid_to.as_deref().unwrap_or("inf")
+                    },
+                    "status": status,
+                    "cluster_ids": [format!("cluster:{}", f.predicate)]
+                },
+                "metadata": {
+                    "predicate": f.predicate,
+                    "value": f.value,
+                    "confidence": f.confidence,
+                    "provenance": f.provenance,
+                    "created_at": f.created_at,
+                    "valid_from": f.valid_from,
+                    "valid_to": f.valid_to,
+                    "created_by": format!("tx/{}", f.created_by_tx),
+                    "superseded_by": f.superseded_by_tx.map(|tx| format!("tx/{}", tx)),
+                    "revoked_by": f.revoked_by_tx.map(|tx| format!("tx/{}", tx))
+                },
+                "provenance": {"type": "base"},
+                "touch_history": touch_history
+            }))
+            .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "fact not found"})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fact JSON helper
+// ---------------------------------------------------------------------------
+
+fn fact_to_json(f: &crate::brain::Fact) -> serde_json::Value {
+    serde_json::json!({
+        "fact_id": f.fact_id,
+        "predicate": f.predicate,
+        "value": f.value,
+        "confidence": f.confidence,
+        "valid_from": f.valid_from,
+        "valid_to": f.valid_to,
+        "created_by_tx": f.created_by_tx,
+        "provenance": f.provenance
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GET /branches + POST /branches
+// ---------------------------------------------------------------------------
+
+async fn api_list_branches(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let branches: Vec<_> = es
+        .brain
+        .branches()
+        .iter()
+        .map(|b| serde_json::json!({
+            "branch_id": b.branch_id,
+            "name": b.name,
+            "parent_branch_id": b.parent_branch_id,
+            "created_tx_id": b.created_tx_id,
+            "archived": b.archived,
+            "is_current": b.branch_id == es.brain.current_branch_id(),
+            "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
+        }))
+        .collect();
+    Json(serde_json::json!({"branches": branches})).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateBranchBody {
+    exom: Option<String>,
+    branch_id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn api_create_branch(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<CreateBranchBody>,
+) -> impl IntoResponse {
+    let actor = headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+    let ctx = MutationContext {
+        actor: actor.clone(),
+        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    };
+
+    let exom_raw = body.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+
+    if state.tree_root.is_some() {
+        let tree_root = server_tree_root(&state);
+        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &actor) {
+            return ApiError::from(e).into_response();
+        }
+    }
+
+    let bid = body.branch_id.clone();
+    let name = body.name.unwrap_or_else(|| bid.clone());
+    let bid2 = bid.clone();
+    let result = mutate_exom(&state, &exom_slash, move |ex| ex.brain.create_branch(&bid2, &name, &ctx));
+    match result {
+        Ok(tx_id) => Json(serde_json::json!({"branch_id": bid, "tx_id": tx_id})).into_response(),
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /branches/:id
+// ---------------------------------------------------------------------------
+
+async fn api_branch_detail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(branch_id): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    match es.brain.branches().iter().find(|b| b.branch_id == branch_id) {
+        Some(b) => Json(serde_json::json!({
+            "branch_id": b.branch_id,
+            "name": b.name,
+            "parent_branch_id": b.parent_branch_id,
+            "created_tx_id": b.created_tx_id,
+            "archived": b.archived,
+            "is_current": b.branch_id == es.brain.current_branch_id(),
+            "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("branch '{}' not found", branch_id)})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /branches/:id
+// ---------------------------------------------------------------------------
+
+async fn api_delete_branch_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(branch_id): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let actor = headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+    let ctx = MutationContext {
+        actor: actor.clone(),
+        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    };
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let bid = branch_id.clone();
+    let result = mutate_exom(&state, &exom_slash, move |ex| {
+        ex.brain.archive_branch(&bid)?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => Json(serde_json::json!({"archived": branch_id})).into_response(),
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /branches/:id/switch
+// ---------------------------------------------------------------------------
+
+async fn api_switch_branch_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(branch_id): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let actor = headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let bid = branch_id.clone();
+    let result = mutate_exom(&state, &exom_slash, move |ex| {
+        ex.brain.switch_branch(&bid)?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"branch_switch","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            Json(serde_json::json!({"switched_to": branch_id})).into_response()
+        }
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /branches/:id/diff
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    exom: Option<String>,
+    base: Option<String>,
+}
+
+async fn api_branch_diff_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(branch_id): AxumPath<String>,
+    Query(q): Query<DiffQuery>,
+) -> impl IntoResponse {
+    let base = q.base.as_deref().unwrap_or("main");
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let branch_facts = es.brain.facts_on_branch(&branch_id);
+    let base_facts = es.brain.facts_on_branch(base);
+    let base_map: HashMap<&str, &&crate::brain::Fact> = base_facts.iter().map(|f| (f.fact_id.as_str(), f)).collect();
+    let branch_map: HashMap<&str, &&crate::brain::Fact> = branch_facts.iter().map(|f| (f.fact_id.as_str(), f)).collect();
+    let added: Vec<_> = branch_facts.iter().filter(|f| !base_map.contains_key(f.fact_id.as_str())).map(|f| fact_to_json(f)).collect();
+    let removed: Vec<_> = base_facts.iter().filter(|f| !branch_map.contains_key(f.fact_id.as_str())).map(|f| fact_to_json(f)).collect();
+    let changed: Vec<_> = branch_facts.iter().filter_map(|f| {
+        base_map.get(f.fact_id.as_str()).filter(|bf| bf.value != f.value).map(|bf| serde_json::json!({
+            "fact_id": f.fact_id,
+            "predicate": f.predicate,
+            "base_value": bf.value,
+            "branch_value": f.value,
+        }))
+    }).collect();
+    Json(serde_json::json!({"added": added, "removed": removed, "changed": changed})).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /branches/:id/merge
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct MergeBranchBody {
+    exom: Option<String>,
+    #[serde(default)]
+    policy: Option<String>,
+}
+
+async fn api_merge_branch_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(source_branch): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<MergeBranchBody>,
+) -> impl IntoResponse {
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let ctx = MutationContext {
+        actor: actor.clone(),
+        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    };
+    let policy = match body.policy.as_deref().unwrap_or("last-writer-wins") {
+        "last-writer-wins" => MergePolicy::LastWriterWins,
+        "keep-target" => MergePolicy::KeepTarget,
+        "manual" => MergePolicy::Manual,
+        _ => return ApiError::new("bad_policy", "unknown merge policy").into_response(),
+    };
+    let exom_raw = body.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let src = source_branch.clone();
+    let result = mutate_exom(&state, &exom_slash, move |ex| {
+        let target = ex.brain.current_branch_id().to_string();
+        ex.brain.merge_branch(&src, &target, policy, &ctx)
+    });
+    match result {
+        Ok(merge_result) => Json(serde_json::json!({
+            "added": merge_result.added,
+            "conflicts": merge_result.conflicts.iter().map(|c| serde_json::json!({
+                "fact_id": c.fact_id,
+                "predicate": c.predicate,
+                "source_value": c.source_value,
+                "target_value": c.target_value,
+            })).collect::<Vec<_>>(),
+            "tx_id": merge_result.tx_id,
+        }))
+        .into_response(),
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /explain
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ExplainQuery {
+    exom: Option<String>,
+    predicate: Option<String>,
+    #[allow(dead_code)]
+    terms: Option<String>,
+}
+
+async fn api_explain(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExplainQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let predicate = q.predicate.as_deref().unwrap_or("").to_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+        Ok(r) => r,
+        Err(e) => return ApiError::new("error", e.to_string()).into_response(),
+    };
+    let defining_rules: Vec<&str> = all_rules
+        .iter()
+        .filter(|r| r.head_predicate == predicate)
+        .map(|r| r.full_text.as_str())
+        .collect();
+    if !defining_rules.is_empty() {
+        return Json(serde_json::json!({
+            "kind": "derived",
+            "predicate": predicate,
+            "derived_by_rules": defining_rules,
+        }))
+        .into_response();
+    }
+    let facts = es.brain.current_facts();
+    let matching = facts.iter().find(|f| f.predicate == predicate || f.fact_id == predicate);
+    match matching {
+        Some(f) => Json(serde_json::json!({
+            "predicate": f.predicate,
+            "terms": [f.fact_id, f.predicate, f.value],
+            "tree": {
+                "id": f.fact_id,
+                "predicate": f.predicate,
+                "terms": [f.fact_id, f.predicate, f.value],
+                "kind": "base",
+                "source": f.provenance,
+                "confidence": f.confidence,
+                "asserted_at": f.created_by_tx
+            },
+            "meta": {
+                "source": f.provenance,
+                "confidence": f.confidence,
+                "asserted_at": f.created_by_tx
+            }
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no fact matching predicate '{}'", predicate)})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /actions/export (Rayfall text)
+// ---------------------------------------------------------------------------
+
+async fn api_export(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let facts = es.brain.current_facts();
+    let mut out = String::new();
+    out.push_str(&format!(";; ray-exomem export — exom: {}\n", exom_slash));
+    for f in &facts {
+        out.push_str(&format!(
+            "(assert-fact {} \"{}\" '{} \"{}\")",
+            exom_slash,
+            f.fact_id.replace('"', "\\\""),
+            f.predicate.replace('"', "\\\""),
+            f.value.replace('"', "\\\""),
+        ));
+        let valid_to_str = f.valid_to.as_deref().unwrap_or("inf");
+        out.push_str(&format!(" ;; @valid[{}, {}]", f.valid_from, valid_to_str));
+        out.push('\n');
+    }
+    for rule in &es.rules {
+        out.push_str(&rule.full_text);
+        out.push('\n');
+    }
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        out,
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /actions/export-json
+// ---------------------------------------------------------------------------
+
+async fn api_export_json(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let payload = serde_json::json!({
+        "exom": exom_slash,
+        "version": 1,
+        "facts": es.brain.all_facts(),
+        "transactions": es.brain.transactions(),
+        "observations": es.brain.observations(),
+        "beliefs": es.brain.all_beliefs(),
+        "branches": es.brain.branches(),
+        "rules": es.rules.iter().map(|r| &r.full_text).collect::<Vec<_>>(),
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(body) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/import-json
+// ---------------------------------------------------------------------------
+
+async fn api_import_json(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    use crate::brain::{Belief, Branch, Fact, Observation, Tx};
+
+    #[derive(Deserialize)]
+    struct ImportPayload {
+        facts: Vec<Fact>,
+        transactions: Vec<Tx>,
+        #[serde(default)]
+        observations: Vec<Observation>,
+        #[serde(default)]
+        beliefs: Vec<Belief>,
+        #[serde(default)]
+        branches: Vec<Branch>,
+        #[serde(default)]
+        rules: Vec<String>,
+    }
+
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+
+    let payload: ImportPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("invalid_payload", format!("invalid JSON import payload: {}", e)).into_response(),
+    };
+
+    let ctx = MutationContext {
+        actor: actor.clone(),
+        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    };
+
+    let result = mutate_exom(&state, &exom_slash, move |ex| {
+        ex.brain.replace_state(
+            payload.facts,
+            payload.transactions,
+            payload.observations,
+            payload.beliefs,
+            payload.branches,
+        )?;
+        let mut parsed_rules = Vec::new();
+        for line in &payload.rules {
+            let line = line.trim();
+            if !line.is_empty() {
+                parsed_rules.push(rules::parse_rule_line(line, MutationContext::default(), String::new())?);
+            }
+        }
+        ex.rules = parsed_rules;
+        let n_facts = ex.brain.all_facts().len();
+        let n_txs = ex.brain.transactions().len();
+        Ok((n_facts, n_txs))
+    });
+
+    match result {
+        Ok((n_facts, n_txs)) => {
+            // Re-bind all exoms after import to ensure consistency
+            let exoms = state.exoms.lock().unwrap();
+            reconcile_engine(&state, &exoms);
+            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"import_json","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            Json(serde_json::json!({
+                "ok": true,
+                "imported": {"facts": n_facts, "transactions": n_txs}
+            }))
+            .into_response()
+        }
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/retract-all
+// ---------------------------------------------------------------------------
+
+async fn api_retract_all(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let ctx = MutationContext {
+        actor: actor.clone(),
+        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    };
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+
+    if state.tree_root.is_some() {
+        let tree_root = server_tree_root(&state);
+        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &actor) {
+            return ApiError::from(e).into_response();
+        }
+    }
+
+    let result = mutate_exom(&state, &exom_slash, move |ex| {
+        let fact_ids: Vec<String> = ex.brain.current_facts().iter().map(|f| f.fact_id.clone()).collect();
+        let count = fact_ids.len();
+        for id in &fact_ids {
+            let _ = ex.brain.retract_fact(id, &ctx);
+        }
+        ex.rules.clear();
+        Ok(count)
+    });
+
+    match result {
+        Ok(count) => {
+            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"retract_all","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            Json(serde_json::json!({"ok": true, "tuples_removed": count})).into_response()
+        }
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/wipe
+// ---------------------------------------------------------------------------
+
+async fn api_wipe(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+
+    if state.tree_root.is_some() {
+        let tree_root = server_tree_root(&state);
+        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &actor) {
+            return ApiError::from(e).into_response();
+        }
+    }
+
+    let result = mutate_exom(&state, &exom_slash, |ex| {
+        ex.brain.reset();
+        ex.rules.clear();
+        if let Some(disk) = ex.exom_disk.as_ref() {
+            if disk.exists() {
+                std::fs::remove_dir_all(disk)?;
+            }
+            std::fs::create_dir_all(disk)?;
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => {
+            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"wipe","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            Json(serde_json::json!({"ok": true, "wiped": exom_slash})).into_response()
+        }
+        Err(e) => ApiError::new("error", e.to_string()).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/factory-reset
+// ---------------------------------------------------------------------------
+
+async fn api_factory_reset(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let old_names: Vec<String> = exoms.keys().cloned().collect();
+    exoms.clear();
+
+    let default_exom = crate::web::DEFAULT_EXOM;
+    let new_es = ExomState {
+        brain: Brain::new(),
+        datoms: match storage::build_datoms_table(&Brain::new()) {
+            Ok(d) => d,
+            Err(e) => {
+                return ApiError::new("error", e.to_string()).into_response();
+            }
+        },
+        rules: Vec::new(),
+        exom_disk: None,
+    };
+    exoms.insert(default_exom.to_string(), new_es);
+
+    reconcile_engine(&state, &exoms);
+    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"factory_reset","exom":"*","actor":"{}"}}"#, actor));
+    Json(serde_json::json!({
+        "ok": true,
+        "removed_exoms": old_names,
+        "state": "clean"
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /schema
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SchemaQuery {
+    exom: Option<String>,
+    include_samples: Option<String>,
+    sample_limit: Option<usize>,
+    relation: Option<String>,
+}
+
+async fn api_schema(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SchemaQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let include_samples = q.include_samples.as_deref() == Some("true");
+    let sample_limit = q.sample_limit.unwrap_or(10);
+    let filter_relation = q.relation.clone();
+
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let brain = &es.brain;
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+        Ok(r) => r,
+        Err(e) => return ApiError::new("error", e.to_string()).into_response(),
+    };
+
+    let facts = brain.current_facts();
+    let beliefs = brain.current_beliefs();
+    let observations = brain.observations();
+
+    let mut relations = Vec::new();
+    let mut fact_groups: HashMap<&str, Vec<Vec<serde_json::Value>>> = HashMap::new();
+    let mut has_intervals_map: HashMap<&str, bool> = HashMap::new();
+    for f in &facts {
+        let entry = fact_groups.entry(&f.predicate).or_default();
+        entry.push(vec![
+            serde_json::Value::String(f.fact_id.clone()),
+            serde_json::Value::String(f.predicate.clone()),
+            serde_json::Value::String(f.value.clone()),
+            serde_json::json!(f.confidence),
+            serde_json::json!({
+                "valid_from": f.valid_from,
+                "valid_to": f.valid_to,
+                "branch_origin": brain.tx_branch(f.created_by_tx).unwrap_or(""),
+                "branch_role": brain.fact_branch_role(f, brain.current_branch_id()),
+            }),
+        ]);
+        if f.valid_to.is_some() {
+            has_intervals_map.insert(&f.predicate, true);
+        }
+    }
+
+    for (pred, tuples) in &fact_groups {
+        if let Some(ref filter) = filter_relation {
+            if *pred != filter.as_str() { continue; }
+        }
+        let has_intervals = has_intervals_map.get(pred).copied().unwrap_or(false);
+        let mut rel = serde_json::json!({
+            "name": pred,
+            "arity": 5,
+            "kind": "base",
+            "cardinality": tuples.len(),
+            "has_intervals": has_intervals,
+            "defined_by": []
+        });
+        if include_samples {
+            rel["sample_tuples"] = serde_json::json!(tuples.iter().take(sample_limit).cloned().collect::<Vec<_>>());
+        }
+        relations.push(rel);
+    }
+
+    if filter_relation.is_none() || filter_relation.as_deref() == Some("observation") {
+        let obs_tuples: Vec<Vec<serde_json::Value>> = observations.iter().map(|o| vec![
+            serde_json::Value::String(o.obs_id.clone()),
+            serde_json::Value::String(o.source_type.clone()),
+            serde_json::Value::String(o.content.clone()),
+            serde_json::json!(o.confidence),
+        ]).collect();
+        let mut rel = serde_json::json!({
+            "name": "observation",
+            "arity": 4,
+            "kind": "base",
+            "cardinality": obs_tuples.len(),
+            "has_intervals": false,
+            "defined_by": []
+        });
+        if include_samples && !obs_tuples.is_empty() {
+            rel["sample_tuples"] = serde_json::json!(obs_tuples.into_iter().take(sample_limit).collect::<Vec<_>>());
+        }
+        relations.push(rel);
+    }
+
+    if filter_relation.is_none() || filter_relation.as_deref() == Some("belief") {
+        let has_belief_intervals = beliefs.iter().any(|b| b.valid_to.is_some());
+        let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs.iter().map(|b| vec![
+            serde_json::Value::String(b.belief_id.clone()),
+            serde_json::Value::String(b.claim_text.clone()),
+            serde_json::json!(b.confidence),
+            serde_json::Value::String(b.status.to_string()),
+            serde_json::json!({"valid_from": b.valid_from, "valid_to": b.valid_to}),
+        ]).collect();
+        let mut rel = serde_json::json!({
+            "name": "belief",
+            "arity": 5,
+            "kind": "derived",
+            "cardinality": belief_tuples.len(),
+            "has_intervals": has_belief_intervals,
+            "defined_by": ["belief-revision"]
+        });
+        if include_samples && !belief_tuples.is_empty() {
+            rel["sample_tuples"] = serde_json::json!(belief_tuples.into_iter().take(sample_limit).collect::<Vec<_>>());
+        }
+        relations.push(rel);
+    }
+
+    let mut base_names: std::collections::HashSet<String> = fact_groups.keys().map(|s| (*s).to_string()).collect();
+    base_names.insert("observation".into());
+    base_names.insert("belief".into());
+
+    let derived_preds = rules::derived_predicates(&all_rules);
+    for (pred_name, arity) in derived_preds {
+        if base_names.contains(&pred_name) { continue; }
+        if let Some(ref filter) = filter_relation {
+            if filter != pred_name.as_str() { continue; }
+        }
+        let defined_by_rules: Vec<usize> = all_rules.iter().enumerate()
+            .filter(|(_, r)| r.head_predicate == pred_name).map(|(i, _)| i).collect();
+        relations.push(serde_json::json!({
+            "name": pred_name, "arity": arity, "kind": "derived",
+            "cardinality": serde_json::Value::Null,
+            "has_intervals": false, "defined_by": defined_by_rules,
+        }));
+    }
+
+    let base_count = relations.iter().filter(|r| r["kind"] == "base").count();
+    let derived_count = relations.iter().filter(|r| r["kind"] == "derived").count();
+    let largest = relations.iter().max_by_key(|r| r["cardinality"].as_u64().unwrap_or(0))
+        .map(|r| serde_json::json!({"name": r["name"], "cardinality": r["cardinality"]}));
+
+    Json(serde_json::json!({
+        "relations": relations,
+        "ontology": system_schema::build_exom_ontology(&exom_slash, brain, &es.rules),
+        "directives": [],
+        "summary": {
+            "relation_count": relations.len(),
+            "base_relation_count": base_count,
+            "derived_relation_count": derived_count,
+            "largest_relation": largest
+        }
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /graph
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GraphQuery {
+    exom: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn api_graph(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GraphQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let limit = q.limit.unwrap_or(500);
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let facts = es.brain.current_facts();
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut seen_nodes = std::collections::HashSet::new();
+    for (i, f) in facts.iter().take(limit).enumerate() {
+        let entity_id = &f.fact_id;
+        let pred_id = format!("pred:{}", f.predicate);
+        if seen_nodes.insert(entity_id.clone()) {
+            nodes.push(serde_json::json!({"id": entity_id, "type": "entity", "label": format!("{} = {}", f.predicate, f.value), "degree": 1}));
+        }
+        if seen_nodes.insert(pred_id.clone()) {
+            nodes.push(serde_json::json!({"id": pred_id, "type": "entity", "label": f.predicate, "degree": 1}));
+        }
+        edges.push(serde_json::json!({"id": format!("e{}", i), "type": "fact", "source": entity_id, "target": pred_id, "label": f.value}));
+    }
+    Json(serde_json::json!({
+        "nodes": nodes, "edges": edges, "clusters": [],
+        "summary": {"node_count": nodes.len(), "edge_count": edges.len(), "cluster_count": 0}
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /clusters
+// ---------------------------------------------------------------------------
+
+async fn api_clusters(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let facts = es.brain.current_facts();
+    let mut groups: HashMap<&str, usize> = HashMap::new();
+    for f in &facts {
+        *groups.entry(&f.predicate).or_default() += 1;
+    }
+    let clusters: Vec<_> = groups.iter().map(|(pred, count)| serde_json::json!({
+        "id": format!("cluster:{}", pred), "label": pred, "kind": "shared_predicate",
+        "fact_count": count, "active_count": count, "deprecated_count": 0
+    })).collect();
+    Json(serde_json::json!({"clusters": clusters})).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /clusters/:id
+// ---------------------------------------------------------------------------
+
+async fn api_cluster_detail_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let pred = id.strip_prefix("cluster:").unwrap_or(&id);
+    let facts = es.brain.current_facts();
+    let matching: Vec<_> = facts.iter().filter(|f| f.predicate == pred).collect();
+    let nodes: Vec<_> = matching.iter().map(|f| serde_json::json!({"id": f.fact_id, "type": "fact", "label": format!("{} = {}", f.predicate, f.value)})).collect();
+    let fact_entries: Vec<_> = matching.iter().map(|f| serde_json::json!({
+        "id": f.fact_id, "tuple": [f.fact_id, f.predicate, f.value, f.confidence],
+        "status": "active", "interval": {"start": f.valid_from, "end": f.valid_to.as_deref().unwrap_or("inf")}
+    })).collect();
+    Json(serde_json::json!({
+        "id": id, "label": pred, "kind": "shared_predicate",
+        "stats": {"fact_count": matching.len(), "active_count": matching.len(), "deprecated_count": 0},
+        "nodes": nodes, "facts": fact_entries, "related_clusters": []
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /logs
+// ---------------------------------------------------------------------------
+
+async fn api_logs(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let events: Vec<_> = es.brain.transactions().iter().rev().take(24).map(|tx| serde_json::json!({
+        "id": format!("tx{}", tx.tx_id), "type": tx.action.to_string(),
+        "timestamp": tx.tx_time, "pattern": tx.note, "source": tx.actor
+    })).collect();
+    Json(serde_json::json!({"events": events})).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /provenance
+// ---------------------------------------------------------------------------
+
+async fn api_provenance(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let facts = es.brain.current_facts();
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+        Ok(r) => r,
+        Err(e) => return ApiError::new("error", e.to_string()).into_response(),
+    };
+    let derived_n = rules::derived_predicates(&all_rules).len();
+    let base_facts: Vec<_> = facts.iter().map(|f| serde_json::json!({
+        "id": f.fact_id, "predicate": f.predicate, "terms": [f.fact_id, f.predicate, f.value],
+        "kind": "base", "source": f.provenance, "confidence": f.confidence, "asserted_at": f.created_by_tx
+    })).collect();
+    Json(serde_json::json!({
+        "derivations": [], "base_facts": base_facts, "edges": [], "timeline": [],
+        "summary": {"derived_count": derived_n, "base_count": base_facts.len(), "edge_count": 0, "event_count": 0}
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /relation-graph
+// ---------------------------------------------------------------------------
+
+async fn api_relation_graph(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let facts = es.brain.current_facts();
+    let mut preds: HashMap<&str, usize> = HashMap::new();
+    for f in &facts {
+        *preds.entry(&f.predicate).or_default() += 1;
+    }
+    let nodes: Vec<_> = preds.iter().map(|(pred, count)| serde_json::json!({"id": *pred, "label": *pred, "degree": count})).collect();
+    Json(serde_json::json!({
+        "nodes": nodes, "edges": [],
+        "summary": {"node_count": nodes.len(), "edge_count": 0}
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /derived/:pred
+// ---------------------------------------------------------------------------
+
+async fn api_derived_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(pred_name): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    if pred_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing predicate"}))).into_response();
+    }
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+        Ok(r) => r,
+        Err(e) => return ApiError::new("error", e.to_string()).into_response(),
+    };
+    let arity = match all_rules.iter().find(|r| r.head_predicate == pred_name).map(|r| r.head_arity) {
+        Some(a) => a,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "unknown derived predicate"}))).into_response(),
+    };
+    let find_vars: Vec<String> = (0..arity).map(|i| format!("?v{i}")).collect();
+    let find_vars_str = find_vars.join(" ");
+    let bodies: Vec<String> = all_rules.iter().map(|r| r.inline_body.clone()).collect();
+    let rules_clause = bodies.join(" ");
+    let rayfall = format!(
+        "(query {exom_slash} (find {find_vars_str}) (where ({pred_name} {find_vars_str})) (rules {rules_clause}))"
+    );
+    match state.engine.eval(&rayfall) {
+        Ok(output) => Json(serde_json::json!({"predicate": pred_name, "kind": "derived", "arity": arity, "rows": output})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /beliefs/:id/support
+// ---------------------------------------------------------------------------
+
+async fn api_belief_support_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(belief_id): AxumPath<String>,
+    Query(q): Query<ExomQuery>,
+) -> impl IntoResponse {
+    let exom_raw = q.exom.as_deref().unwrap_or(crate::web::DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    let bid = belief_id.trim().to_string();
+    if bid.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing belief id"}))).into_response();
+    }
+    let mut exoms = state.exoms.lock().unwrap();
+    let tree_root = state.tree_root.as_deref();
+    let sym_path = state.sym_path.as_deref();
+    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
+        Ok(e) => e,
+        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+    };
+    let brain = &es.brain;
+    let beliefs: Vec<_> = brain.current_beliefs().into_iter().filter(|b| b.belief_id == bid).collect();
+    let b = match beliefs.first() {
+        Some(x) => *x,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("belief '{}' not found", bid)}))).into_response(),
+    };
+    let mut support_facts = Vec::new();
+    let mut support_obs = Vec::new();
+    let mut unresolved: Vec<&str> = Vec::new();
+    for id in &b.supported_by {
+        if let Some(f) = brain.current_facts().iter().find(|f| f.fact_id == *id) {
+            support_facts.push(fact_to_json(f));
+        } else if let Some(o) = brain.observations().iter().find(|o| o.obs_id == *id) {
+            support_obs.push(serde_json::json!({"obs_id": o.obs_id, "source_type": o.source_type, "source_ref": o.source_ref, "content": o.content}));
+        } else {
+            unresolved.push(id.as_str());
+        }
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "belief_id": b.belief_id,
+        "claim_text": b.claim_text,
+        "supported_by_resolved": {"facts": support_facts, "observations": support_obs},
+        "supported_by_unresolved": unresolved,
+    }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /exoms/:name/manage (legacy)
+// ---------------------------------------------------------------------------
+
+async fn api_exom_manage_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
+    let action = payload["action"].as_str().unwrap_or("").to_string();
+    let default_exom = crate::web::DEFAULT_EXOM;
+    let mut exoms = state.exoms.lock().unwrap();
+
+    match action.as_str() {
+        "delete" => {
+            if name == default_exom {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "cannot delete the default exom"}))).into_response();
+            }
+            if exoms.remove(&name).is_some() {
+                reconcile_engine(&state, &exoms);
+                Json(serde_json::json!({"ok": true, "deleted": name})).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("exom '{}' not found", name)}))).into_response()
+            }
+        }
+        "rename" => {
+            let new_name = payload["new_name"].as_str().unwrap_or("").to_string();
+            if new_name.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "new_name is required"}))).into_response();
+            }
+            if name == default_exom {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "cannot rename the default exom"}))).into_response();
+            }
+            if exoms.contains_key(new_name.as_str()) {
+                return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("exom '{}' already exists", new_name)}))).into_response();
+            }
+            if let Some(es) = exoms.remove(&name) {
+                exoms.insert(new_name.clone(), es);
+                reconcile_engine(&state, &exoms);
+                Json(serde_json::json!({"ok": true, "old_name": name, "new_name": new_name})).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("exom '{}' not found", name)}))).into_response()
+            }
+        }
+        "archive" => {
+            if exoms.contains_key(&name) {
+                Json(serde_json::json!({"ok": true, "archived": name})).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("exom '{}' not found", name)}))).into_response()
+            }
+        }
+        _ => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("unknown action '{}'", action)}))).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /actions/start-session → 410
+// ---------------------------------------------------------------------------
+
+async fn api_start_session_gone() -> impl IntoResponse {
+    ApiError::new("gone", "POST /api/actions/start-session is removed; use POST /api/actions/session-new")
+        .with_status(410)
+        .into_response()
 }
