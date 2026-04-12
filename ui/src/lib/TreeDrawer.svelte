@@ -7,6 +7,7 @@
 		Loader2,
 		RefreshCw
 	} from '@lucide/svelte';
+	import { tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
 	import { Badge } from '$lib/components/ui/badge/index.js';
@@ -38,11 +39,54 @@
 	let root = $state<TreeNode | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	/** Default expanded; toggles persist per path */
+	/** Folder open state; only explicit `true` opens (default closed). Reset on currentPath change; manual toggles persist until then. */
 	let folderOpen = $state<Record<string, boolean>>({});
+	/** Last currentPath we applied auto-reveal for (tree refresh does not reset manual toggles). */
+	let lastRevealForPath = $state<string | undefined>(undefined);
+
+	function parentFolderPrefixes(path: string): string[] {
+		const parts = path.split('/').filter(Boolean);
+		const out: string[] = [];
+		let acc = '';
+		for (let i = 0; i < parts.length - 1; i++) {
+			acc = acc ? `${acc}/${parts[i]}` : parts[i];
+			out.push(acc);
+		}
+		return out;
+	}
+
+	function allFolderPrefixes(path: string): string[] {
+		const parts = path.split('/').filter(Boolean);
+		const out: string[] = [];
+		let acc = '';
+		for (let i = 0; i < parts.length; i++) {
+			acc = acc ? `${acc}/${parts[i]}` : parts[i];
+			out.push(acc);
+		}
+		return out;
+	}
+
+	function findTreeNode(n: TreeNode, target: string): TreeNode | null {
+		if (n.path === target) return n;
+		if (n.kind !== 'folder') return null;
+		for (const c of n.children) {
+			const r = findTreeNode(c, target);
+			if (r) return r;
+		}
+		return null;
+	}
+
+	/** Paths that must be open to reveal `targetPath` in the tree (VS Code–style). */
+	function revealFolderPaths(tree: TreeNode, targetPath: string): string[] {
+		if (!targetPath) return [];
+		const node = findTreeNode(tree, targetPath);
+		if (!node) return parentFolderPrefixes(targetPath);
+		if (node.kind === 'folder') return allFolderPrefixes(node.path);
+		return parentFolderPrefixes(node.path);
+	}
 
 	function folderIsOpen(path: string): boolean {
-		return folderOpen[path] ?? true;
+		return folderOpen[path] === true;
 	}
 
 	function setFolderOpen(path: string, value: boolean) {
@@ -67,6 +111,24 @@
 		void loadTree();
 	});
 
+	$effect(() => {
+		const path = currentPath;
+		root;
+		if (!root) return;
+		if (path === lastRevealForPath) return;
+		lastRevealForPath = path;
+		const reveal = revealFolderPaths(root, path);
+		folderOpen = Object.fromEntries(reveal.map((p) => [p, true]));
+	});
+
+	$effect(() => {
+		currentPath;
+		root;
+		void tick().then(() => {
+			document.querySelector('[data-tree-active]')?.scrollIntoView({ block: 'nearest' });
+		});
+	});
+
 	function notImplemented() {
 		toast('Not implemented yet');
 	}
@@ -77,9 +139,12 @@
 		return 'fill-zinc-500 text-zinc-500';
 	}
 
-	function isPathSelected(path: string): boolean {
-		if (!currentPath) return false;
-		return path === currentPath || currentPath.startsWith(`${path}/`);
+	function isActivePath(path: string): boolean {
+		return Boolean(currentPath && path === currentPath);
+	}
+
+	function activeRowClass(): string {
+		return 'border-l-2 border-blue-400 bg-zinc-700/50 pl-0.5';
 	}
 
 	function labelForSession(node: TreeExom): string {
@@ -131,10 +196,11 @@
 										class="w-full"
 									>
 										<div
-											class="flex min-w-0 items-stretch rounded-sm border border-transparent {isPathSelected(
+											data-tree-active={isActivePath(node.path) ? '' : undefined}
+											class="flex min-w-0 items-stretch rounded-sm border border-transparent {isActivePath(
 												node.path
 											)
-												? 'bg-zinc-800/40'
+												? activeRowClass()
 												: ''}"
 										>
 											<CollapsibleTrigger
@@ -177,8 +243,9 @@
 								<ContextMenuTrigger class="block w-full text-left">
 									<button
 										type="button"
-										class="flex w-full min-w-0 items-center gap-1.5 rounded-sm border border-transparent px-0.5 py-0.5 text-left hover:bg-zinc-800/80 {node.path === currentPath
-											? 'bg-zinc-800/50'
+										data-tree-active={isActivePath(node.path) ? '' : undefined}
+										class="flex w-full min-w-0 items-center gap-1.5 rounded-sm border border-transparent px-0.5 py-0.5 text-left hover:bg-zinc-800/80 {isActivePath(node.path)
+											? activeRowClass()
 											: ''} {node.archived ? 'opacity-50' : ''}"
 										onclick={() => onNavigate(node.path)}
 									>
