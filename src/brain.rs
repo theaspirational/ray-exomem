@@ -1963,9 +1963,9 @@ mod tofu_tests {
         assert_eq!(branch, "agent_a");
         // Joining again is idempotent.
         assert!(session_join(d.path(), &session, "agent_a").is_ok());
-        // A different actor cannot claim the same branch.
-        let err = session_join(d.path(), &session, "agent_a").unwrap();
-        assert_eq!(err, "agent_a"); // same actor — ok
+        // A different actor cannot claim the same (already-owned) branch.
+        let err = precheck_write(d.path(), &session, "agent_a", "bob").unwrap_err();
+        assert!(matches!(err, WriteError::BranchOwned(_)));
         // Fabricated actor not in the session's pre-created branches is rejected.
         let err = session_join(d.path(), &session, "impostor").unwrap_err();
         assert!(matches!(err, WriteError::BranchMissing(_)));
