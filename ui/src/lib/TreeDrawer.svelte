@@ -47,6 +47,8 @@
 	let lastRevealForPath = $state<string | undefined>(undefined);
 	/** When true, suppress auto-reveal until currentPath actually changes. */
 	let suppressReveal = $state(false);
+	/** Saved folder state before collapse-all, for toggle restore. */
+	let savedFolderOpen = $state<Record<string, boolean> | null>(null);
 
 	function parentFolderPrefixes(path: string): string[] {
 		const parts = path.split('/').filter(Boolean);
@@ -161,10 +163,19 @@
 		return s?.label?.trim() || node.name;
 	}
 
-	function collapseAll() {
-		folderOpen = {};
-		suppressReveal = true;
-		lastRevealForPath = undefined;
+	function toggleCollapseAll() {
+		const isCollapsed = Object.keys(folderOpen).length === 0 || Object.values(folderOpen).every((v) => !v);
+		if (isCollapsed && savedFolderOpen) {
+			folderOpen = { ...savedFolderOpen };
+			savedFolderOpen = null;
+			suppressReveal = true;
+			lastRevealForPath = undefined;
+		} else {
+			savedFolderOpen = { ...folderOpen };
+			folderOpen = {};
+			suppressReveal = true;
+			lastRevealForPath = undefined;
+		}
 	}
 </script>
 
@@ -197,7 +208,7 @@
 		type="button"
 		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
 		title="Collapse all"
-		onclick={collapseAll}
+		onclick={toggleCollapseAll}
 	>
 		<ChevronsDownUp class="size-3.5" />
 	</button>
