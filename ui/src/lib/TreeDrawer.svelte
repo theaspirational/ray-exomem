@@ -2,7 +2,10 @@
 	import {
 		ChevronRight,
 		Circle,
+		ChevronsDownUp,
+		FilePlus,
 		FolderOpen,
+		FolderPlus,
 		GitBranch,
 		Loader2,
 		RefreshCw
@@ -151,7 +154,47 @@
 		const s = node.session as { label?: string } | null | undefined;
 		return s?.label?.trim() || node.name;
 	}
+
+	function collapseAll() {
+		folderOpen = {};
+		lastRevealForPath = undefined;
+	}
 </script>
+
+<div class="flex items-center justify-end gap-0.5 px-1 py-1">
+	<button
+		type="button"
+		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		title="New exom"
+		onclick={() => treeModals.openNewExom(currentPath ? `${currentPath}/notes` : 'notes')}
+	>
+		<FilePlus class="size-3.5" />
+	</button>
+	<button
+		type="button"
+		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		title="Init project here"
+		onclick={() => treeModals.openInit(currentPath)}
+	>
+		<FolderPlus class="size-3.5" />
+	</button>
+	<button
+		type="button"
+		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		title="Refresh tree"
+		onclick={() => void loadTree()}
+	>
+		<RefreshCw class="size-3.5" />
+	</button>
+	<button
+		type="button"
+		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		title="Collapse all"
+		onclick={collapseAll}
+	>
+		<ChevronsDownUp class="size-3.5" />
+	</button>
+</div>
 
 <div class="flex min-h-0 flex-1 flex-col gap-1 font-mono text-xs text-zinc-300">
 	{#if loading}
