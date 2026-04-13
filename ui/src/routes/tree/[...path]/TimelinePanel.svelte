@@ -1,13 +1,12 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { resolve } from '$app/paths';
 	import { Calendar, GitBranch, Route, Search } from '@lucide/svelte';
-	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
-	import { Badge } from '$lib/components/ui/badge';
-	import { app } from '$lib/stores.svelte';
+	import { Badge } from '$lib/components/ui/badge/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
 	import { exportBackupText, fetchExomemStatus, parseFactsFromExport } from '$lib/exomem.svelte';
 	import type { FactEntry } from '$lib/types';
+
+	let { exomPath }: { exomPath: string } = $props();
 
 	let facts = $state<FactEntry[]>([]);
 	let currentBranch = $state('main');
@@ -56,8 +55,8 @@
 		loading = true;
 		try {
 			const [dlText, status] = await Promise.all([
-				exportBackupText(app.selectedExom),
-				fetchExomemStatus(app.selectedExom)
+				exportBackupText(exomPath),
+				fetchExomemStatus(exomPath)
 			]);
 			facts = parseFactsFromExport(dlText);
 			currentBranch = status.current_branch ?? 'main';
@@ -71,19 +70,12 @@
 
 	$effect(() => {
 		if (!browser) return;
-		app.selectedExom;
+		exomPath;
 		void loadTimeline();
 	});
 </script>
 
-<div class="flex flex-col gap-6 p-4 sm:p-6 lg:p-8">
-	<div>
-		<h1 class="text-2xl font-semibold tracking-tight">Validity Timeline</h1>
-		<p class="text-sm text-muted-foreground">
-			Visible temporal fact versions for the current branch. This view is export-backed, so it shows durable user facts and their branch-aware validity windows, not raw system metadata rows.
-		</p>
-	</div>
-
+<div class="flex flex-col gap-4">
 	<div class="grid gap-3 xl:grid-cols-4">
 		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
 			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Current branch</p>
@@ -147,12 +139,9 @@
 			<div>
 				<p class="text-sm font-medium text-muted-foreground">No temporal facts</p>
 				<p class="mt-1 text-xs text-muted-foreground/70">
-					Assert facts with <code class="font-mono">--valid-from</code> / <code class="font-mono">--valid-to</code> to see them on the branch-aware validity timeline.
+					Assert facts with valid-from/valid-to to see them here
 				</p>
 			</div>
-			<Button variant="outline" size="sm" href={resolve('/facts')}>
-				Browse Facts
-			</Button>
 		</div>
 	{:else}
 		<div class="relative flex flex-col gap-0">

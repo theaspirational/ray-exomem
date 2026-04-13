@@ -17,6 +17,7 @@
 	} from '$lib/exomem.svelte';
 	import FactsDataTable from './FactsDataTable.svelte';
 	import SessionFactsPanel from './SessionFactsPanel.svelte';
+	import TimelinePanel from './TimelinePanel.svelte';
 
 	let {
 		node,
@@ -242,7 +243,9 @@
 		</Tabs.Content>
 
 		<Tabs.Content value="history" class="mt-4">
-			<p class="text-sm text-zinc-500">Coming soon</p>
+			{#if tab === 'history'}
+				<TimelinePanel exomPath={node.path} />
+			{/if}
 		</Tabs.Content>
 		<Tabs.Content value="graph" class="mt-4">
 			<p class="text-sm text-zinc-500">Coming soon</p>
