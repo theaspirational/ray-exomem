@@ -56,6 +56,11 @@
 	--chart-3: oklch(0.546 0.245 262.881);
 	--chart-4: oklch(0.488 0.243 264.376);
 	--chart-5: oklch(0.424 0.199 265.638);
+	--chart-6: oklch(0.65 0.15 150);
+	--chart-7: oklch(0.55 0.18 30);
+	--chart-8: oklch(0.60 0.12 330);
+	--chart-9: oklch(0.70 0.10 200);
+	--chart-10: oklch(0.50 0.20 290);
 }
 
 .dark {
@@ -98,6 +103,11 @@
 	--chart-3: oklch(0.546 0.245 262.881);
 	--chart-4: oklch(0.488 0.243 264.376);
 	--chart-5: oklch(0.424 0.199 265.638);
+	--chart-6: oklch(0.65 0.15 150);
+	--chart-7: oklch(0.55 0.18 30);
+	--chart-8: oklch(0.60 0.12 330);
+	--chart-9: oklch(0.70 0.10 200);
+	--chart-10: oklch(0.50 0.20 290);
 }
 
 @theme inline {
@@ -112,6 +122,11 @@
 	--color-sidebar-foreground: var(--sidebar-foreground);
 	--color-sidebar: var(--sidebar);
 	--color-chart-5: var(--chart-5);
+	--color-chart-6: var(--chart-6);
+	--color-chart-7: var(--chart-7);
+	--color-chart-8: var(--chart-8);
+	--color-chart-9: var(--chart-9);
+	--color-chart-10: var(--chart-10);
 	--color-chart-4: var(--chart-4);
 	--color-chart-3: var(--chart-3);
 	--color-chart-2: var(--chart-2);

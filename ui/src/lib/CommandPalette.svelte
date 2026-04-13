@@ -58,6 +58,7 @@
 	const showGuide = $derived(fuzzyMatch(query, 'open guide') || fuzzyMatch(query, 'guide'));
 	const showInit = $derived(fuzzyMatch(query, 'init'));
 	const showRename = $derived(fuzzyMatch(query, 'rename'));
+	const showQuery = $derived(fuzzyMatch(query, 'query') || fuzzyMatch(query, 'open query'));
 
 	$effect(() => {
 		if (!open) return;
@@ -128,6 +129,11 @@
 		open = false;
 		treeModals.openRename(currentTreePath);
 	}
+
+	function doQuery() {
+		open = false;
+		void goto(`${base}/query`);
+	}
 </script>
 
 <CommandDialog
@@ -176,7 +182,7 @@
 			</CommandGroup>
 		{/if}
 
-		{#if showGuide || showInit || showRename}
+		{#if showGuide || showInit || showRename || showQuery}
 			<CommandGroup heading="Actions" class="text-zinc-500 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
 				{#if showGuide}
 					<CommandItem
@@ -203,6 +209,15 @@
 						onSelect={doRename}
 					>
 						Rename (current path)
+					</CommandItem>
+				{/if}
+				{#if showQuery}
+					<CommandItem
+						value="open query editor"
+						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
+						onSelect={doQuery}
+					>
+						Open Query Editor
 					</CommandItem>
 				{/if}
 			</CommandGroup>

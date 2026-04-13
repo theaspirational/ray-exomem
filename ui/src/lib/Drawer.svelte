@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { Loader2, Search, Settings, TreePine } from '@lucide/svelte';
+	import { Loader2, Search, TreePine } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -11,6 +11,7 @@
 	import { Sheet, SheetContent, SheetHeader, SheetTitle } from '$lib/components/ui/sheet/index.js';
 	import { Tooltip, TooltipContent, TooltipTrigger } from '$lib/components/ui/tooltip/index.js';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
+	import { commandPaletteState } from '$lib/commandPaletteState.svelte';
 	import {
 		apiInitFolder,
 		apiNewBareExom,
@@ -22,10 +23,7 @@
 	import { treeModals } from '$lib/treeModals.svelte';
 	import TreeDrawer from '$lib/TreeDrawer.svelte';
 
-	type Panel = 'tree' | 'search' | 'settings';
-
 	let sheetOpen = $state(false);
-	let panel = $state<Panel>('tree');
 
 	const currentTreePath = $derived.by((): string => {
 		let pathname = String(page.url.pathname);
@@ -37,18 +35,11 @@
 	});
 
 	function openTree() {
-		panel = 'tree';
 		sheetOpen = true;
 	}
 
 	function openSearch() {
-		panel = 'search';
-		sheetOpen = true;
-	}
-
-	function openSettings() {
-		panel = 'settings';
-		sheetOpen = true;
+		commandPaletteState.show();
 	}
 
 	let busy = $state(false);
@@ -155,23 +146,6 @@
 		</TooltipTrigger>
 		<TooltipContent side="right">Search</TooltipContent>
 	</Tooltip>
-
-	<Tooltip>
-		<TooltipTrigger>
-			{#snippet child({ props })}
-				<button
-					type="button"
-					class="flex size-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-					aria-label="Open settings"
-					{...props}
-					onclick={openSettings}
-				>
-					<Settings class="size-4" />
-				</button>
-			{/snippet}
-		</TooltipTrigger>
-		<TooltipContent side="right">Settings</TooltipContent>
-	</Tooltip>
 </div>
 
 <Sheet bind:open={sheetOpen}>
@@ -181,28 +155,16 @@
 		class="h-full min-h-0 w-[min(100vw,22rem)] border-r border-zinc-700 bg-zinc-900 text-zinc-100 sm:max-w-md"
 	>
 		<SheetHeader>
-			<SheetTitle class="font-sans text-zinc-100">
-				{#if panel === 'tree'}
-					Tree
-				{:else if panel === 'search'}
-					Search
-				{:else}
-					Settings
-				{/if}
-			</SheetTitle>
+			<SheetTitle class="font-sans text-zinc-100">Tree</SheetTitle>
 		</SheetHeader>
 		<Separator class="bg-zinc-700" />
 		<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-1 py-2 font-sans text-sm text-zinc-300">
-			{#if sheetOpen && panel === 'tree'}
+			{#if sheetOpen}
 				<TreeDrawer
 					currentPath={currentTreePath}
 					refreshSignal={treeModals.refreshTree}
 					onNavigate={(path) => goto(`${base}/tree/${path.replace(/^\/+/, '')}`)}
 				/>
-			{:else if panel === 'search'}
-				<p class="text-zinc-400">Search placeholder — Phase 8 fills this</p>
-			{:else}
-				<p class="text-zinc-400">Settings placeholder — Phase 8 fills this</p>
 			{/if}
 		</div>
 	</SheetContent>

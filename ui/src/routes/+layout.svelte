@@ -6,14 +6,13 @@
 	import { Toaster } from '$lib/components/ui/sonner/index.js';
 	import ActorIdentityDialog from '$lib/ActorIdentityDialog.svelte';
 	import CommandPalette from '$lib/CommandPalette.svelte';
+	import { commandPaletteState } from '$lib/commandPaletteState.svelte';
 	import Drawer from '$lib/Drawer.svelte';
 	import TopBar from '$lib/TopBar.svelte';
 	import StatusBar from '$lib/StatusBar.svelte';
 	import { app } from '$lib/stores.svelte';
 
 	let { children }: { children: Snippet } = $props();
-
-	let commandOpen = $state(false);
 
 	onMount(() => {
 		void app.refreshExoms();
@@ -22,7 +21,7 @@
 		const onKey = (e: KeyboardEvent) => {
 			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
 				e.preventDefault();
-				commandOpen = true;
+				commandPaletteState.show();
 			}
 		};
 		window.addEventListener('keydown', onKey);
@@ -56,7 +55,7 @@
 		</div>
 	</div>
 	<StatusBar />
-	<CommandPalette bind:open={commandOpen} />
+	<CommandPalette bind:open={commandPaletteState.open} />
 	<ActorIdentityDialog />
 	<Toaster richColors position="bottom-right" />
 </div>
