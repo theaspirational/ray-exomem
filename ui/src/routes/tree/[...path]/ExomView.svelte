@@ -16,6 +16,8 @@
 		type TreeExom
 	} from '$lib/exomem.svelte';
 	import FactsDataTable from './FactsDataTable.svelte';
+	import GraphPanel from './GraphPanel.svelte';
+	import RulesPanel from './RulesPanel.svelte';
 	import SessionFactsPanel from './SessionFactsPanel.svelte';
 	import TimelinePanel from './TimelinePanel.svelte';
 
@@ -248,10 +250,14 @@
 			{/if}
 		</Tabs.Content>
 		<Tabs.Content value="graph" class="mt-4">
-			<p class="text-sm text-zinc-500">Coming soon</p>
+			{#if tab === 'graph'}
+				<GraphPanel exomPath={node.path} />
+			{/if}
 		</Tabs.Content>
 		<Tabs.Content value="rules" class="mt-4">
-			<p class="text-sm text-zinc-500">Coming soon</p>
+			{#if tab === 'rules'}
+				<RulesPanel exomPath={node.path} />
+			{/if}
 		</Tabs.Content>
 	</Tabs.Root>
 </div>

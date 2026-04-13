@@ -12,8 +12,9 @@
 		importBackup,
 		parseRulesFromExport
 	} from '$lib/exomem.svelte';
-	import { app } from '$lib/stores.svelte';
 	import type { ExomemSchemaResponse, RuleEntry } from '$lib/types';
+
+	let { exomPath }: { exomPath: string } = $props();
 
 	type BuiltinView = NonNullable<ExomemSchemaResponse['ontology']>['builtin_views'][number];
 
@@ -68,12 +69,12 @@
 
 	function builtinViewQuery(view: BuiltinView): string {
 		const vars = varsForArity(view.arity);
-		return `(query ${app.selectedExom} (find ${vars.join(' ')}) (where (${view.name} ${vars.join(' ')})))`;
+		return `(query ${exomPath} (find ${vars.join(' ')}) (where (${view.name} ${vars.join(' ')})))`;
 	}
 
 	function ruleHeadQuery(rule: RuleEntry): string {
 		const vars = Array.from({ length: Math.max(1, rule.body_atoms.length + 1) }, (_, i) => `?v${i + 1}`);
-		return `(query ${app.selectedExom} (find ${vars.join(' ')}) (where (${rule.head_predicate} ${vars.join(' ')})))`;
+		return `(query ${exomPath} (find ${vars.join(' ')}) (where (${rule.head_predicate} ${vars.join(' ')})))`;
 	}
 
 	async function copySnippet(key: string, text: string) {
@@ -228,8 +229,8 @@
 		error = null;
 		try {
 			const [dlText, schema] = await Promise.all([
-				exportBackupText(app.selectedExom),
-				fetchExomemSchema(app.selectedExom)
+				exportBackupText(exomPath),
+				fetchExomemSchema(exomPath)
 			]);
 			rules = parseRulesFromExport(dlText);
 			builtinViews = schema.ontology?.builtin_views ?? [];
@@ -246,7 +247,7 @@
 		submitResult = null;
 		submitError = null;
 		try {
-			const result = await addRule(newRuleText.trim(), app.selectedExom);
+			const result = await addRule(newRuleText.trim(), exomPath);
 			submitResult = result.ok ? 'Rule sent to eval successfully.' : 'Eval returned not ok.';
 			newRuleText = '';
 			await loadRules();
@@ -267,9 +268,9 @@
 		editing = true;
 		editError = null;
 		try {
-			const source = await exportBackupText(app.selectedExom);
+			const source = await exportBackupText(exomPath);
 			const updated = replaceRuleInText(source, editingRule.raw, draft.rule.raw);
-			await importBackup(updated, app.selectedExom);
+			await importBackup(updated, exomPath);
 			await loadRules();
 			closeEditRule();
 		} catch (e) {
@@ -290,9 +291,9 @@
 	async function handleDeleteRule(rule: RuleEntry) {
 		deleting = true;
 		try {
-			const source = await exportBackupText(app.selectedExom);
+			const source = await exportBackupText(exomPath);
 			const updated = replaceRuleInText(source, rule.raw);
-			await importBackup(updated, app.selectedExom);
+			await importBackup(updated, exomPath);
 			await loadRules();
 			deleteConfirmIndex = null;
 		} catch (e) {
@@ -311,7 +312,7 @@
 
 	$effect(() => {
 		if (!browser) return;
-		app.selectedExom;
+		exomPath;
 		void loadRules();
 		return () => {
 			if (copyTimer) clearTimeout(copyTimer);
@@ -319,11 +320,10 @@
 	});
 </script>
 
-<div class="flex flex-col gap-3 p-4">
+<div class="flex flex-col gap-3">
 	<!-- Header -->
 	<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 		<div class="flex flex-wrap items-center gap-2">
-			<h1 class="text-lg font-semibold">Rules</h1>
 			{#if !loading}
 				<Badge variant="secondary">{rules.length} authored</Badge>
 				<Badge variant="outline">{builtinViews.length} system views</Badge>

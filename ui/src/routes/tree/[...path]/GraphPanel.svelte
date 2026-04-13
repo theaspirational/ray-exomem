@@ -4,7 +4,7 @@
 	import * as d3 from 'd3';
 	import {
 		ArrowLeft, RefreshCw, ZoomIn, ZoomOut, Maximize2,
-		Settings2, Eye, EyeOff, RotateCcw, X, ChevronRight
+		Settings2, Eye, EyeOff, RotateCcw, X
 	} from '@lucide/svelte';
 
 	import { Badge } from '$lib/components/ui/badge';
@@ -17,13 +17,23 @@
 		type RelationGraphResponse
 	} from '$lib/exomem.svelte';
 	import type { ExomemSchemaResponse, FactEntry } from '$lib/types';
-	import { app } from '$lib/stores.svelte';
 
-	const PALETTE = [
+	let { exomPath }: { exomPath: string } = $props();
+
+	const CHART_PALETTE_FALLBACK = [
 		'#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed',
 		'#0891b2', '#be185d', '#4f46e5', '#0d9488', '#ea580c',
 		'#6d28d9', '#15803d', '#b91c1c', '#1d4ed8', '#a16207'
 	];
+
+	function getChartPalette(): string[] {
+		if (typeof document === 'undefined') return Array(10).fill('#888');
+		const style = getComputedStyle(document.documentElement);
+		return Array.from({ length: 10 }, (_, i) => {
+			const raw = style.getPropertyValue(`--chart-${i + 1}`).trim();
+			return raw || CHART_PALETTE_FALLBACK[i % CHART_PALETTE_FALLBACK.length];
+		});
+	}
 
 	// --- State ---
 	let svgEl = $state<SVGSVGElement | null>(null);
@@ -104,7 +114,7 @@
 		factFilterPredicate = null;
 		highlightSelectedNode(entityId);
 		try {
-			selectedNodeFacts = await fetchEntityFacts(entityId, app.selectedExom);
+			selectedNodeFacts = await fetchEntityFacts(entityId, exomPath);
 		} catch {
 			selectedNodeFacts = [];
 		}
@@ -166,8 +176,9 @@
 
 	const predicateColor = $derived(() => {
 		const preds = predicates();
+		const palette = getChartPalette();
 		const map = new Map<string, string>();
-		preds.forEach((p, i) => map.set(p, PALETTE[i % PALETTE.length]));
+		preds.forEach((p, i) => map.set(p, palette[i % palette.length]));
 		return map;
 	});
 
@@ -250,7 +261,7 @@
 
 	$effect(() => {
 		if (!browser) return;
-		app.selectedExom;
+		exomPath;
 		void loadGraph();
 	});
 
@@ -259,8 +270,8 @@
 		error = null;
 		try {
 			const [graphRes, schemaRes] = await Promise.all([
-				fetchRelationGraph(app.selectedExom),
-				fetchExomemSchema(app.selectedExom)
+				fetchRelationGraph(exomPath),
+				fetchExomemSchema(exomPath)
 			]);
 			graph = graphRes;
 			schema = schemaRes;
@@ -282,7 +293,7 @@
 	}
 
 	function tick(): Promise<void> {
-		return new Promise((resolve) => setTimeout(resolve, 0));
+		return new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
 	}
 
 	function nodeRadius(d: GNode): number {
@@ -498,11 +509,7 @@
 	}
 </script>
 
-<svelte:head>
-	<title>Graph - Ray Exomem</title>
-</svelte:head>
-
-<div class="flex h-screen flex-col bg-background text-foreground">
+<div class="flex h-[min(72vh,640px)] min-h-[360px] flex-col bg-background text-foreground">
 	<!-- Toolbar -->
 	<div class="flex items-center gap-3 border-b border-border/80 px-4 py-2.5">
 		<a href={resolve('/')} class="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
@@ -511,7 +518,7 @@
 		</a>
 		<div class="h-5 w-px bg-border/80"></div>
 		<h1 class="text-sm font-semibold">Graph View</h1>
-		<Badge variant="secondary" class="text-xs">{app.selectedExom}</Badge>
+		<Badge variant="secondary" class="text-xs">{exomPath}</Badge>
 		{#if graph}
 			<Badge variant="outline" class="tabular-nums text-xs">
 				{graph.summary.node_count} nodes
@@ -543,27 +550,29 @@
 		</div>
 	</div>
 
-	<div class="relative flex flex-1 overflow-hidden">
+	<div class="relative flex min-h-0 flex-1 overflow-hidden">
 		<!-- Graph canvas -->
-		<div class="flex-1">
+		<div class="flex min-h-0 flex-1 flex-col">
 			{#if error}
-				<div class="flex h-full items-center justify-center">
+				<div class="flex h-full min-h-[200px] items-center justify-center">
 					<Card class="max-w-md border-destructive/30 bg-destructive/10">
 						<p class="text-sm text-destructive">{error}</p>
 						<Button variant="outline" size="sm" onclick={loadGraph} class="mt-3">Retry</Button>
 					</Card>
 				</div>
 			{:else if loading}
-				<div class="flex h-full items-center justify-center text-muted-foreground">
+				<div class="flex h-full min-h-[200px] items-center justify-center text-muted-foreground">
 					<RefreshCw class="mr-2 size-5 animate-spin" />
 					Loading graph...
 				</div>
 			{:else}
-				<svg
-					bind:this={svgEl}
-					class="h-full w-full"
-					style="background: oklch(0.15 0.01 260);"
-				></svg>
+				<div class="min-h-0 flex-1 overflow-x-auto">
+					<svg
+						bind:this={svgEl}
+						class="block h-full min-h-[400px] w-full"
+						style="min-width: 600px; background: oklch(0.15 0.01 260);"
+					></svg>
+				</div>
 			{/if}
 		</div>
 
@@ -572,7 +581,7 @@
 			<div class="w-60 shrink-0 overflow-y-auto border-l border-border/80 bg-background/95 p-4 backdrop-blur">
 				<div class="mb-4 rounded-md border border-border/60 bg-card/60 px-3 py-2.5">
 					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Scope</p>
-					<p class="mt-1 text-sm text-foreground">Current branch visibility for <span class="font-mono">{app.selectedExom}</span>.</p>
+					<p class="mt-1 text-sm text-foreground">Current branch visibility for <span class="font-mono">{exomPath}</span>.</p>
 					<p class="mt-1 text-xs text-muted-foreground">System and coordination predicates are shown explicitly instead of being mixed invisibly into the graph.</p>
 				</div>
 
