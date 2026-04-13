@@ -1,9 +1,8 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { resolve } from '$app/paths';
 	import * as d3 from 'd3';
 	import {
-		ArrowLeft, RefreshCw, ZoomIn, ZoomOut, Maximize2,
+		RefreshCw, ZoomIn, ZoomOut, Maximize2,
 		Settings2, Eye, EyeOff, RotateCcw, X
 	} from '@lucide/svelte';
 
@@ -509,44 +508,32 @@
 	}
 </script>
 
-<div class="flex h-[min(72vh,640px)] min-h-[360px] flex-col bg-background text-foreground">
-	<!-- Toolbar -->
-	<div class="flex items-center gap-3 border-b border-border/80 px-4 py-2.5">
-		<a href={resolve('/')} class="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
-			<ArrowLeft class="size-4" />
-			Dashboard
-		</a>
-		<div class="h-5 w-px bg-border/80"></div>
-		<h1 class="text-sm font-semibold">Graph View</h1>
-		<Badge variant="secondary" class="text-xs">{exomPath}</Badge>
-		{#if graph}
-			<Badge variant="outline" class="tabular-nums text-xs">
-				{graph.summary.node_count} nodes
-			</Badge>
-			<Badge variant="outline" class="tabular-nums text-xs">
-				{graph.summary.edge_count} edges
-			</Badge>
-		{/if}
-		<div class="flex-1"></div>
-		<div class="flex items-center gap-1.5">
-			<Button size="sm" variant="ghost" onclick={() => showControls = !showControls} title="Toggle controls">
-				<Settings2 class="size-4" />
-			</Button>
-			<div class="h-5 w-px bg-border/80"></div>
-			<Button size="sm" variant="ghost" onclick={zoomIn} title="Zoom in">
-				<ZoomIn class="size-4" />
-			</Button>
-			<Button size="sm" variant="ghost" onclick={zoomOut} title="Zoom out">
-				<ZoomOut class="size-4" />
-			</Button>
-			<Button size="sm" variant="ghost" onclick={zoomFit} title="Reset view">
-				<Maximize2 class="size-4" />
-			</Button>
-			<div class="h-5 w-px bg-border/80"></div>
-			<Button size="sm" variant="outline" onclick={loadGraph} disabled={loading}>
-				<RefreshCw class="size-3.5 {loading ? 'animate-spin' : ''}" data-icon="inline-start" />
-				Reload
-			</Button>
+<div class="flex h-[min(72vh,640px)] min-h-[360px] flex-col">
+	<!-- Minimal toolbar -->
+	<div class="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
+		<div class="flex items-center gap-2 text-xs text-zinc-500">
+			{#if graph}
+				<span class="tabular-nums">{graph.summary.node_count} nodes</span>
+				<span class="text-zinc-700">·</span>
+				<span class="tabular-nums">{graph.summary.edge_count} edges</span>
+			{/if}
+		</div>
+		<div class="flex items-center gap-0.5">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={() => showControls = !showControls} title="Toggle controls">
+				<Settings2 class="size-3.5" />
+			</button>
+			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={zoomIn} title="Zoom in">
+				<ZoomIn class="size-3.5" />
+			</button>
+			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={zoomOut} title="Zoom out">
+				<ZoomOut class="size-3.5" />
+			</button>
+			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={zoomFit} title="Reset view">
+				<Maximize2 class="size-3.5" />
+			</button>
+			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={loadGraph} disabled={loading} title="Reload">
+				<RefreshCw class="size-3.5 {loading ? 'animate-spin' : ''}" />
+			</button>
 		</div>
 	</div>
 
@@ -578,7 +565,7 @@
 
 		<!-- Controls panel -->
 		{#if showControls && graph}
-			<div class="w-60 shrink-0 overflow-y-auto border-l border-border/80 bg-background/95 p-4 backdrop-blur">
+			<div class="w-56 shrink-0 overflow-y-auto border-l border-zinc-800 bg-zinc-900/95 p-3 text-xs">
 				<div class="mb-4 rounded-md border border-border/60 bg-card/60 px-3 py-2.5">
 					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Scope</p>
 					<p class="mt-1 text-sm text-foreground">Current branch visibility for <span class="font-mono">{exomPath}</span>.</p>
