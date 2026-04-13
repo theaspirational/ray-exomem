@@ -43,7 +43,7 @@
 	<title>Ray Exomem</title>
 </svelte:head>
 
-<div class="dark flex h-screen flex-col overflow-hidden bg-zinc-900 font-sans text-zinc-100">
+<div class="flex h-screen flex-col overflow-hidden bg-zinc-900 font-sans text-zinc-100">
 	<div class="flex min-h-0 flex-1">
 		<Drawer />
 		<Separator orientation="vertical" class="bg-zinc-700" />
