@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { Loader2, Search, TreePine } from '@lucide/svelte';
+	import { Loader2, Search, TreePine, Waypoints } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -145,6 +145,23 @@
 			{/snippet}
 		</TooltipTrigger>
 		<TooltipContent side="right">Search</TooltipContent>
+	</Tooltip>
+
+	<Tooltip>
+		<TooltipTrigger>
+			{#snippet child({ props })}
+				<button
+					type="button"
+					class="flex size-8 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+					aria-label="Global graph"
+					{...props}
+					onclick={() => goto(`${base}/graph`)}
+				>
+					<Waypoints class="size-4" />
+				</button>
+			{/snippet}
+		</TooltipTrigger>
+		<TooltipContent side="right">Graph</TooltipContent>
 	</Tooltip>
 </div>
 
