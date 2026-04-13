@@ -7,15 +7,8 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import * as Tabs from '$lib/components/ui/tabs/index.js';
-	import {
-		fetchBranches,
-		fetchFactsList,
-		unarchiveSessionExom,
-		type BranchRow,
-		type ListedFact,
-		type TreeExom
-	} from '$lib/exomem.svelte';
-	import FactsDataTable from './FactsDataTable.svelte';
+	import { fetchBranches, unarchiveSessionExom, type BranchRow, type TreeExom } from '$lib/exomem.svelte';
+	import FactsManager from './FactsManager.svelte';
 	import GraphPanel from './GraphPanel.svelte';
 	import RulesPanel from './RulesPanel.svelte';
 	import SessionFactsPanel from './SessionFactsPanel.svelte';
@@ -40,12 +33,7 @@
 	let branches = $state<BranchRow[]>([]);
 	let branchesErr = $state<string | null>(null);
 
-	let factsLoading = $state(false);
-	let facts = $state<ListedFact[]>([]);
-	let factsErr = $state<string | null>(null);
-
 	let unarchiveBusy = $state(false);
-	let factsRetry = $state(0);
 	let branchesRetry = $state(0);
 
 	$effect(() => {
@@ -65,30 +53,6 @@
 			})
 			.finally(() => {
 				if (!cancelled) branchesLoading = false;
-			});
-		return () => {
-			cancelled = true;
-		};
-	});
-
-	$effect(() => {
-		node.path;
-		tab;
-		sessionModes;
-		factsRetry;
-		if (tab !== 'facts' || sessionModes) return;
-		let cancelled = false;
-		factsLoading = true;
-		factsErr = null;
-		fetchFactsList(node.path)
-			.then((r) => {
-				if (!cancelled) facts = r;
-			})
-			.catch((e: unknown) => {
-				if (!cancelled) factsErr = e instanceof Error ? e.message : 'Failed to load facts';
-			})
-			.finally(() => {
-				if (!cancelled) factsLoading = false;
 			});
 		return () => {
 			cancelled = true;
@@ -169,24 +133,8 @@
 		<Tabs.Content value="facts" class="mt-4">
 			{#if sessionModes}
 				<SessionFactsPanel exomPath={node.path} />
-			{:else if factsErr}
-				<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
-					<p>{factsErr}</p>
-					<Button
-						variant="outline"
-						size="sm"
-						class="w-fit border-red-800/60 text-red-100"
-						onclick={() => {
-							factsErr = null;
-							factsRetry++;
-						}}
-					>
-						<RefreshCw class="mr-1 size-3" />
-						Retry
-					</Button>
-				</div>
-			{:else}
-				<FactsDataTable facts={facts} loading={factsLoading} emptyMessage="No facts yet" />
+			{:else if tab === 'facts'}
+				<FactsManager exomPath={node.path} />
 			{/if}
 		</Tabs.Content>
 

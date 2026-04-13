@@ -17,17 +17,18 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Badge } from '$lib/components/ui/badge';
-	import { app } from '$lib/stores.svelte';
 	import {
 		fetchExomemSchema,
 		fetchExplain,
 		fetchExomemStatus,
 		fetchTxRows,
 		type ProofTreeNode,
-		type ExplainResponse
+		type ExplainResponse,
+		type TxViewRow
 	} from '$lib/exomem.svelte';
 	import type { FactEntry, ExomemSchemaRelation, ExomemSchemaResponse } from '$lib/types';
-	import type { TxViewRow } from '$lib/exomem.svelte';
+
+	let { exomPath }: { exomPath: string } = $props();
 
 	type BuiltinView = NonNullable<ExomemSchemaResponse['ontology']>['builtin_views'][number];
 	type DerivedFactItem = {
@@ -91,7 +92,7 @@
 	function predicateQuery(predicate: string, arity: number, note?: string): string {
 		const vars = varsForArity(arity);
 		const comment = note ? `;; ${note}\n` : '';
-		return `${comment}(query ${app.selectedExom} (find ${vars.join(' ')}) (where (${predicate} ${vars.join(' ')})))`;
+		return `${comment}(query ${exomPath} (find ${vars.join(' ')}) (where (${predicate} ${vars.join(' ')})))`;
 	}
 
 	function nodeQuery(node: ProofTreeNode): string {
@@ -107,7 +108,7 @@
 	}
 
 	function txRowQuery(): string {
-		return `(query ${app.selectedExom} (find ?tx ?id ?actor ?action ?when ?branch) (where (tx-row ?tx ?id ?actor ?action ?when ?branch)))`;
+		return `(query ${exomPath} (find ?tx ?id ?actor ?action ?when ?branch) (where (tx-row ?tx ?id ?actor ?action ?when ?branch)))`;
 	}
 
 	async function copySnippet(key: string, text: string) {
@@ -133,9 +134,9 @@
 		expandedNodes = new Set();
 		try {
 			const [schemaRes, status, tx] = await Promise.all([
-				fetchExomemSchema(app.selectedExom),
-				fetchExomemStatus(app.selectedExom),
-				fetchTxRows(app.selectedExom)
+				fetchExomemSchema(exomPath),
+				fetchExomemStatus(exomPath),
+				fetchTxRows(exomPath)
 			]);
 			schema = schemaRes;
 			currentBranch = status.current_branch ?? 'main';
@@ -176,7 +177,7 @@
 
 	$effect(() => {
 		if (!browser) return;
-		app.selectedExom;
+		exomPath;
 		void loadProvenance();
 		return () => {
 			if (copyTimer) clearTimeout(copyTimer);
@@ -191,7 +192,7 @@
 		expandedNodes = new Set();
 
 		try {
-			const result = await fetchExplain(item.fact.predicate, item.fact.terms, 10, app.selectedExom);
+			const result = await fetchExplain(item.fact.predicate, item.fact.terms, 10, exomPath);
 			explainResult = result;
 			expandedNodes = new Set([result.tree.id]);
 		} catch (e) {
@@ -213,14 +214,7 @@
 	}
 </script>
 
-<div class="flex flex-col gap-6 p-4 sm:p-6 lg:p-8">
-	<div>
-		<h1 class="text-2xl font-semibold tracking-tight">Provenance</h1>
-		<p class="text-sm text-muted-foreground">
-			Trace why a derived fact exists, then jump straight into the query console with a predicate-scoped Rayfall draft.
-		</p>
-	</div>
-
+<div class="flex flex-col gap-4">
 	<div class="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
 		<div class="rounded-lg border border-border/60 bg-card p-4">
 			<div class="flex items-center justify-between gap-2">
@@ -540,7 +534,7 @@
 						>
 							{#if copiedSnippet === 'tx-row'}
 								<Check class="mr-1 size-3.5" />
-								Copied
+								Copy query
 							{:else}
 								<Copy class="mr-1 size-3.5" />
 								Copy query

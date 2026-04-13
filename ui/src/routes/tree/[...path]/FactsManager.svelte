@@ -1,9 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { base } from '$app/paths';
 	import { SvelteSet } from 'svelte/reactivity';
 	import {
-		ArrowRightSquare,
 		Check,
 		CircleAlert,
 		Filter,
@@ -30,8 +28,9 @@
 		updateFact
 	} from '$lib/exomem.svelte';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
-	import { app } from '$lib/stores.svelte';
 	import type { ExomemSchemaResponse, FactEntry } from '$lib/types';
+
+	let { exomPath }: { exomPath: string } = $props();
 
 	// ---------------------------------------------------------------------------
 	// State
@@ -127,7 +126,7 @@
 
 	function openEditFact(fact: FactEntry) {
 		editFact = fact;
-		editRawText = formatAssertFactLine(fact, app.selectedExom);
+		editRawText = formatAssertFactLine(fact, exomPath);
 		editError = null;
 	}
 
@@ -143,7 +142,7 @@
 
 	$effect(() => {
 		if (!browser) return;
-		app.selectedExom;
+		exomPath;
 		void loadFacts({ silent: true, showTableSpinner: true });
 		return () => {
 			loadAbort?.abort();
@@ -164,7 +163,7 @@
 		errorMessage = null;
 
 		try {
-			const exom = app.selectedExom;
+			const exom = exomPath;
 			const [exportText, schemaRes] = await Promise.all([
 				exportBackupText(exom, signal),
 				fetchExomemSchema(exom, signal)
@@ -239,7 +238,7 @@
 		actorPrompt.run(async () => {
 			deleting = key;
 			try {
-				await retractFact(fact.factId!, app.selectedExom);
+				await retractFact(fact.factId!, exomPath);
 				facts = facts.filter((f) => factKey(f) !== key);
 				selectedIds.delete(key);
 				deleteConfirmKey = null;
@@ -275,7 +274,7 @@
 						validFrom: draft.fact!.validFrom ?? undefined,
 						validTo: draft.fact!.validTo ?? undefined,
 					},
-					app.selectedExom
+					exomPath
 				);
 				facts = facts
 					.filter((f) => factKey(f) !== factKey(oldFact))
@@ -303,7 +302,7 @@
 						if (f.kind === 'derived' || !f.factId) {
 							throw new Error('Cannot delete derived facts in bulk');
 						}
-						return retractFact(f.factId, app.selectedExom);
+						return retractFact(f.factId, exomPath);
 					})
 				);
 				const deletedKeys = new Set(toDelete.map(factKey));
@@ -328,7 +327,7 @@
 				if (newIntervalFrom) options.validFrom = newIntervalFrom;
 				if (newIntervalTo) options.validTo = newIntervalTo;
 				if (newFactId.trim()) options.factId = newFactId.trim();
-				await assertFact(newPredicate.trim(), [newValue], options, app.selectedExom);
+				await assertFact(newPredicate.trim(), [newValue], options, exomPath);
 
 				// Reset form
 				newFactId = '';
@@ -350,17 +349,9 @@
 
 </script>
 
-<div class="flex flex-col gap-4 p-4 sm:p-6 lg:p-8">
-	<!-- Header -->
-	<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-		<div>
-			<h1 class="text-2xl font-semibold tracking-tight">Facts</h1>
-			<p class="text-sm text-muted-foreground">
-				{filteredFacts.length} of {facts.length} facts in
-				<span class="font-medium text-foreground">{app.selectedExom}</span>
-				— this page focuses on durable base facts and user-facing derived relations. Built-in system views stay in Query Console and Schema.
-			</p>
-		</div>
+<div class="flex flex-col gap-4">
+	<!-- Toolbar -->
+	<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
 		<div class="flex flex-wrap items-center gap-2">
 			<Button variant="outline" size="sm" onclick={() => loadFacts()} disabled={refreshing}>
 				<RefreshCw data-icon="inline-start" class="size-3.5 {refreshing ? 'animate-spin' : ''}" />
@@ -536,7 +527,7 @@
 								{editDraft.fact.validFrom ? `${editDraft.fact.validFrom} → ${editDraft.fact.validTo ?? 'open'}` : '—'}
 							</div>
 							<div class="rounded border border-border/40 bg-background px-2 py-1.5 text-[11px] text-muted-foreground">
-								{formatAssertFactLine(editDraft.fact, app.selectedExom)}
+								{formatAssertFactLine(editDraft.fact, exomPath)}
 							</div>
 						</div>
 					{:else}
@@ -714,15 +705,6 @@
 					<td class="px-3 py-1.5">
 						{#if fact.kind === 'base'}
 							<div class="flex items-center justify-end gap-1">
-								{#if fact.factId}
-									<a
-										class="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
-										href={`${base}/facts/${encodeURIComponent(fact.factId)}`}
-										title="Fact detail and history"
-									>
-										<ArrowRightSquare class="size-3.5" />
-									</a>
-								{/if}
 								<button
 									class="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
 									onclick={() => openEditFact(fact)}
