@@ -44,8 +44,9 @@
 	let error = $state<string | null>(null);
 	/** Folder open state; only explicit `true` opens (default closed). Reset on currentPath change; manual toggles persist until then. */
 	let folderOpen = $state<Record<string, boolean>>({});
-	/** Last currentPath we applied auto-reveal for (tree refresh does not reset manual toggles). */
 	let lastRevealForPath = $state<string | undefined>(undefined);
+	/** When true, suppress auto-reveal until currentPath actually changes. */
+	let suppressReveal = $state(false);
 
 	function parentFolderPrefixes(path: string): string[] {
 		const parts = path.split('/').filter(Boolean);
@@ -119,6 +120,11 @@
 		root;
 		if (!root) return;
 		if (path === lastRevealForPath) return;
+		if (suppressReveal) {
+			suppressReveal = false;
+			lastRevealForPath = path;
+			return;
+		}
 		lastRevealForPath = path;
 		const reveal = revealFolderPaths(root, path);
 		folderOpen = Object.fromEntries(reveal.map((p) => [p, true]));
@@ -157,6 +163,7 @@
 
 	function collapseAll() {
 		folderOpen = {};
+		suppressReveal = true;
 		lastRevealForPath = undefined;
 	}
 </script>
