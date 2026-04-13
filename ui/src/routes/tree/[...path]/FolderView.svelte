@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { base } from '$app/paths';
 	import { goto } from '$app/navigation';
-	import { Folder, Box, Loader2 } from '@lucide/svelte';
+	import { Folder, Brain, Loader2 } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
-	import { Badge } from '$lib/components/ui/badge/index.js';
+	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Card } from '$lib/components/ui/card/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -112,7 +112,7 @@
 	</div>
 
 	{#if sortedChildren.length === 0}
-		<p class="text-sm text-zinc-500">No children</p>
+		<EmptyState icon={Folder} message="No children" />
 	{:else}
 		<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
 			{#each sortedChildren as ch (ch.path)}
@@ -130,20 +130,18 @@
 								{#if ch.kind === 'folder'}
 									<Folder class="mt-0.5 size-4 shrink-0 text-amber-400/90" />
 								{:else}
-									<Box class="mt-0.5 size-4 shrink-0 text-emerald-400/90" />
+									<Brain class="mt-0.5 size-4 shrink-0 text-emerald-400/90" />
 								{/if}
 								<div class="min-w-0 flex-1">
 									<p class="truncate font-medium text-zinc-100">{ch.name}</p>
-									<p class="mt-0.5 truncate font-mono text-[10px] text-zinc-500">{ch.path}</p>
+									<p class="mt-0.5 text-[11px] text-zinc-500">
+										{#if ch.kind === 'exom'}
+											{ch.fact_count} facts
+										{:else}
+											{ch.children?.length ?? 0} children
+										{/if}
+									</p>
 								</div>
-							</div>
-							<div class="flex flex-wrap items-center gap-2">
-								<Badge variant="outline" class="border-zinc-600 text-[10px] text-zinc-300">
-									{ch.kind}
-								</Badge>
-								{#if ch.kind === 'exom'}
-									<Badge variant="secondary" class="text-[10px]">{ch.fact_count} facts</Badge>
-								{/if}
 							</div>
 						</div>
 					</Card>

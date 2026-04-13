@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import { GitBranch, Loader2, RefreshCw } from '@lucide/svelte';
+	import { GitBranch, Loader2 } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
+	import DataRow from '$lib/components/DataRow.svelte';
+	import ErrorState from '$lib/components/ErrorState.svelte';
+	import LoadingState from '$lib/components/LoadingState.svelte';
+	import StatCard from '$lib/components/StatCard.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { Separator } from '$lib/components/ui/separator/index.js';
 	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import { fetchBranches, unarchiveSessionExom, type BranchRow, type TreeExom } from '$lib/exomem.svelte';
 	import FactsManager from './FactsManager.svelte';
@@ -87,23 +90,22 @@
 
 <div class="flex flex-col gap-4" class:opacity-60={contentDimmed}>
 	<header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-		<div class="min-w-0 flex-1 space-y-2">
-			<p class="break-all font-mono text-sm text-zinc-100">{node.path}</p>
-			<div class="flex flex-wrap items-center gap-2 text-xs">
-				<span class="text-zinc-500">Facts</span>
-				<span class="font-mono text-zinc-200">{node.fact_count}</span>
-				<Separator orientation="vertical" class="hidden h-4 sm:inline-flex" />
-				<Badge variant="outline" class="border-zinc-600 font-mono text-[10px] text-zinc-200">
-					<GitBranch class="mr-1 size-3 opacity-70" />
-					{node.current_branch}
-				</Badge>
-				<Badge variant="secondary" class="text-[10px] capitalize text-zinc-200">{kindLabel}</Badge>
-				{#if node.archived}
-					<Badge variant="outline" class="border-amber-700/60 text-amber-200">archived</Badge>
-				{/if}
-				{#if node.closed}
-					<Badge variant="outline" class="border-red-800/60 text-red-200">closed</Badge>
-				{/if}
+		<div class="min-w-0 flex-1 space-y-3">
+			<div class="space-y-2">
+				<p class="break-all font-mono text-sm text-zinc-100">{node.path}</p>
+				<div class="flex flex-wrap items-center gap-2 text-xs">
+					<Badge variant="secondary" class="text-[10px] capitalize text-zinc-200">{kindLabel}</Badge>
+					{#if node.archived}
+						<Badge variant="outline" class="border-amber-700/60 text-amber-200">archived</Badge>
+					{/if}
+					{#if node.closed}
+						<Badge variant="outline" class="border-red-800/60 text-red-200">closed</Badge>
+					{/if}
+				</div>
+			</div>
+			<div class="grid gap-2 sm:grid-cols-2">
+				<StatCard label="Facts" value={node.fact_count} />
+				<StatCard label="Branch" value={node.current_branch} icon={GitBranch} />
 			</div>
 		</div>
 		{#if showUnarchive}
@@ -140,55 +142,32 @@
 
 		<Tabs.Content value="branches" class="mt-4 space-y-3">
 			{#if branchesLoading}
-				<p class="flex items-center gap-2 text-sm text-zinc-500">
-					<Loader2 class="size-4 animate-spin" /> Loading branches…
-				</p>
+				<LoadingState message="Loading branches…" />
 			{:else if branchesErr}
-				<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
-					<p>{branchesErr}</p>
-					<Button
-						variant="outline"
-						size="sm"
-						class="w-fit border-red-800/60 text-red-100"
-						onclick={() => {
-							branchesErr = null;
-							branchesRetry++;
-						}}
-					>
-						<RefreshCw class="mr-1 size-3" />
-						Retry
-					</Button>
-				</div>
+				<ErrorState
+					message={branchesErr}
+					onRetry={() => {
+						branchesErr = null;
+						branchesRetry++;
+					}}
+				/>
 			{:else if branches.length === 0}
 				<p class="text-sm text-zinc-500">No branches</p>
 			{:else}
-				<ul class="space-y-2">
+				<div class="space-y-2">
 					{#each branches as b (b.branch_id)}
-						<li
-							class="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-700 bg-zinc-950/40 px-3 py-2"
-						>
-							<div class="flex flex-wrap items-center gap-2">
-								<span class="font-mono text-sm text-zinc-100">{b.name}</span>
-								{#if b.is_current}
-									<Badge class="text-[10px]">current</Badge>
-								{/if}
-								{#if b.archived}
-									<Badge variant="outline" class="text-[10px]">archived</Badge>
-								{/if}
-							</div>
-							<div class="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
-								<span>{b.fact_count} facts</span>
-								{#if b.claimed_by}
-									<Badge variant="secondary" class="font-mono text-[10px] text-zinc-200">
-										{b.claimed_by}
-									</Badge>
-								{:else}
-									<span class="text-zinc-600">unclaimed</span>
-								{/if}
-							</div>
-						</li>
+						<DataRow
+							icon={GitBranch}
+							label={b.name}
+							badges={[
+								...(b.is_current ? [{ text: 'current', variant: 'default' as const }] : []),
+								...(b.archived ? [{ text: 'archived', variant: 'outline' as const }] : []),
+								...(b.claimed_by ? [{ text: b.claimed_by, variant: 'secondary' as const }] : [])
+							]}
+							trailing={`${b.fact_count} facts`}
+						/>
 					{/each}
-				</ul>
+				</div>
 			{/if}
 		</Tabs.Content>
 
