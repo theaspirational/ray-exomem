@@ -33,11 +33,7 @@
 	});
 </script>
 
-<div class="min-h-[60vh] bg-zinc-900 p-4 text-zinc-100 sm:p-6">
-	<div class="mb-4 font-mono text-[11px] text-zinc-500">
-		<span class="text-zinc-400">Path</span>
-		<span class="ml-2 text-zinc-200">{data.path || '/'}</span>
-	</div>
+<div class="min-h-[60vh] p-4 sm:p-6">
 
 	{#if loading}
 		<div class="flex items-center gap-2 text-sm text-zinc-400">

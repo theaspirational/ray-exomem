@@ -91,17 +91,14 @@
 <div class="flex flex-col gap-4" class:opacity-60={contentDimmed}>
 	<header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
 		<div class="min-w-0 flex-1 space-y-3">
-			<div class="space-y-2">
-				<p class="break-all font-mono text-sm text-zinc-100">{node.path}</p>
-				<div class="flex flex-wrap items-center gap-2 text-xs">
-					<Badge variant="secondary" class="text-[10px] capitalize text-zinc-200">{kindLabel}</Badge>
-					{#if node.archived}
-						<Badge variant="outline" class="border-amber-700/60 text-amber-200">archived</Badge>
-					{/if}
-					{#if node.closed}
-						<Badge variant="outline" class="border-red-800/60 text-red-200">closed</Badge>
-					{/if}
-				</div>
+			<div class="flex flex-wrap items-center gap-2 text-xs">
+				<Badge variant="secondary" class="text-[10px] capitalize text-zinc-200">{kindLabel}</Badge>
+				{#if node.archived}
+					<Badge variant="outline" class="border-amber-700/60 text-amber-200">archived</Badge>
+				{/if}
+				{#if node.closed}
+					<Badge variant="outline" class="border-red-800/60 text-red-200">closed</Badge>
+				{/if}
 			</div>
 			<div class="grid gap-2 sm:grid-cols-2">
 				<StatCard label="Facts" value={node.fact_count} />
