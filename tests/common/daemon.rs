@@ -17,16 +17,21 @@ impl TestDaemon {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let port = free_port();
         let bin = env!("CARGO_BIN_EXE_ray-exomem");
-        let child = Command::new(bin)
-            .args([
+        let mut cmd = Command::new(bin);
+        cmd.args([
                 "serve",
                 "--bind", &format!("127.0.0.1:{port}"),
                 "--data-dir", data_dir.path().to_str().expect("tempdir is utf-8"),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn daemon");
+            .stderr(Stdio::null());
+        // Put child in its own process group so Drop can kill the whole group.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe { cmd.pre_exec(|| { libc::setpgid(0, 0); Ok(()) }); }
+        }
+        let child = cmd.spawn().expect("spawn daemon");
 
         let base_url = format!("http://127.0.0.1:{port}");
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -51,7 +56,20 @@ impl TestDaemon {
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // SIGKILL ensures cleanup even if the child ignores SIGTERM.
+        // Also kill by process group to catch any grandchildren.
+        #[cfg(unix)]
+        {
+            let pid = self.child.id() as i32;
+            // Kill process group (negative PID)
+            unsafe { libc::kill(-pid, libc::SIGKILL); }
+            // Also direct kill in case setsid wasn't used
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
