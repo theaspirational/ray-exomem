@@ -566,12 +566,6 @@
 		<!-- Controls panel -->
 		{#if showControls && graph}
 			<div class="w-56 shrink-0 overflow-y-auto border-l border-zinc-800 bg-zinc-900/95 p-3 text-xs">
-				<div class="mb-4 rounded-md border border-border/60 bg-card/60 px-3 py-2.5">
-					<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Scope</p>
-					<p class="mt-1 text-sm text-foreground">Current branch visibility for <span class="font-mono">{exomPath}</span>.</p>
-					<p class="mt-1 text-xs text-muted-foreground">System and coordination predicates are shown explicitly instead of being mixed invisibly into the graph.</p>
-				</div>
-
 				<!-- Forces section -->
 				<div class="flex items-center justify-between mb-3">
 					<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Forces</p>
