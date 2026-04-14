@@ -41,7 +41,7 @@ pub const DEFAULT_EXOM: &str = "main";
 use crate::{
     auth::middleware::MaybeUser,
     backend::RayforceEngine,
-    brain::{self, Brain, MergePolicy},
+    brain::{self, Belief, Brain, Branch, Fact, MergePolicy, Observation, Tx},
     context::{self, MutationContext},
     ffi,
     http_error::ApiError,
@@ -495,6 +495,73 @@ pub fn mutate_exom<T>(
     Ok(out)
 }
 
+/// After sync JSONL + splay (`mutate_exom`), mirror the exom snapshot to Postgres when configured.
+/// Best-effort: logs a warning on failure and does not fail the HTTP mutation.
+async fn exom_db_save_brain_snapshot(state: &AppState, exom_name: &str) {
+    let Some(ref db) = state.exom_db else {
+        return;
+    };
+    let path = exom_name.to_string();
+    let snapshot = {
+        let exoms = state.exoms.lock().unwrap();
+        let Some(es) = exoms.get(exom_name) else {
+            return;
+        };
+        (
+            es.brain.transactions().to_vec(),
+            es.brain.all_facts().to_vec(),
+            es.brain.observations().to_vec(),
+            es.brain.all_beliefs().to_vec(),
+            es.brain.branches().to_vec(),
+        )
+    };
+    let db = db.clone();
+    let (txs, facts, observations, beliefs, branches) = snapshot;
+    if let Err(e) = async {
+        db.save_transactions(&path, &txs).await?;
+        db.save_facts(&path, &facts).await?;
+        db.save_observations(&path, &observations).await?;
+        db.save_beliefs(&path, &beliefs).await?;
+        db.save_branches(&path, &branches).await?;
+        anyhow::Ok(())
+    }
+    .await
+    {
+        eprintln!(
+            "[ray-exomem] warning: ExomDb snapshot failed for {path}: {e}"
+        );
+    }
+}
+
+/// Sync JSONL on disk under `disk` to Postgres (e.g. session exoms not loaded in `AppState`).
+async fn exom_db_sync_from_disk(
+    db: &Arc<dyn crate::db::ExomDb>,
+    exom_slash: &str,
+    disk: &std::path::Path,
+) -> anyhow::Result<()> {
+    let txs: Vec<Tx> = storage::load_jsonl(&disk.join("tx.jsonl"))?;
+    let facts: Vec<Fact> = storage::load_jsonl(&disk.join("fact.jsonl"))?;
+    let observations: Vec<Observation> = storage::load_jsonl(&disk.join("observation.jsonl"))?;
+    let beliefs: Vec<Belief> = storage::load_jsonl(&disk.join("belief.jsonl"))?;
+    let branches: Vec<Branch> = storage::load_jsonl(&disk.join("branch.jsonl"))?;
+    db.save_transactions(exom_slash, &txs).await?;
+    db.save_facts(exom_slash, &facts).await?;
+    db.save_observations(exom_slash, &observations).await?;
+    db.save_beliefs(exom_slash, &beliefs).await?;
+    db.save_branches(exom_slash, &branches).await?;
+    Ok(())
+}
+
+pub async fn mutate_exom_async<T>(
+    state: &AppState,
+    exom_name: &str,
+    f: impl FnOnce(&mut ExomState) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let result = mutate_exom(state, exom_name, f)?;
+    exom_db_save_brain_snapshot(state, exom_name).await;
+    Ok(result)
+}
+
 fn emit_tree_changed(state: &AppState) {
     let _ = state
         .sse_tx
@@ -804,6 +871,16 @@ async fn api_session_new(
     match brain::session_new(&tree_root, &project_path, session_type, &label, &actor, &body.agents) {
         Ok(session_path) => {
             emit_tree_changed(&state);
+            if let Some(ref db) = state.exom_db {
+                let disk = session_path.to_disk_path(&tree_root);
+                let slash = session_path.to_slash_string();
+                let db = db.clone();
+                if let Err(e) = exom_db_sync_from_disk(&db, &slash, &disk).await {
+                    eprintln!(
+                        "[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}"
+                    );
+                }
+            }
             Json(serde_json::json!({
                 "ok": true,
                 "session_path": session_path.to_slash_string(),
@@ -845,13 +922,25 @@ async fn api_session_join(
     }
     let tree_root = server_tree_root(&state);
     match brain::session_join(&tree_root, &session_path, &actor) {
-        Ok(branch) => Json(serde_json::json!({
-            "ok": true,
-            "session_path": session_path.to_slash_string(),
-            "actor": actor,
-            "branch": branch,
-        }))
-        .into_response(),
+        Ok(branch) => {
+            if let Some(ref db) = state.exom_db {
+                let disk = session_path.to_disk_path(&tree_root);
+                let slash = session_path.to_slash_string();
+                let db = db.clone();
+                if let Err(e) = exom_db_sync_from_disk(&db, &slash, &disk).await {
+                    eprintln!(
+                        "[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}"
+                    );
+                }
+            }
+            Json(serde_json::json!({
+                "ok": true,
+                "session_path": session_path.to_slash_string(),
+                "actor": actor,
+                "branch": branch,
+            }))
+            .into_response()
+        }
         Err(e) => ApiError::from(e).into_response(),
     }
 }
@@ -1068,7 +1157,7 @@ async fn api_assert_fact(
     let valid_from = req.valid_from.clone();
     let valid_to = req.valid_to.clone();
 
-    let result = mutate_exom(&state, &exom_slash, |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, |ex| {
         ex.brain.assert_fact(
             &fact_id,
             &predicate,
@@ -1079,7 +1168,8 @@ async fn api_assert_fact(
             valid_to.as_deref(),
             &write_ctx,
         )
-    });
+    })
+    .await;
 
     match result {
         Ok(tx_id) => {
@@ -2040,7 +2130,10 @@ async fn api_create_branch(
     let bid = body.branch_id.clone();
     let name = body.name.unwrap_or_else(|| bid.clone());
     let bid2 = bid.clone();
-    let result = mutate_exom(&state, &exom_slash, move |ex| ex.brain.create_branch(&bid2, &name, &ctx));
+    let result = mutate_exom_async(&state, &exom_slash, move |ex| {
+        ex.brain.create_branch(&bid2, &name, &ctx)
+    })
+    .await;
     match result {
         Ok(tx_id) => Json(serde_json::json!({"branch_id": bid, "tx_id": tx_id})).into_response(),
         Err(e) => ApiError::new("error", e.to_string()).into_response(),
@@ -2128,10 +2221,11 @@ async fn api_delete_branch_handler(
         return resp;
     }
     let bid = branch_id.clone();
-    let result = mutate_exom(&state, &exom_slash, move |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, move |ex| {
         ex.brain.archive_branch(&bid)?;
         Ok(())
-    });
+    })
+    .await;
     match result {
         Ok(()) => Json(serde_json::json!({"archived": branch_id})).into_response(),
         Err(e) => ApiError::new("error", e.to_string()).into_response(),
@@ -2168,10 +2262,11 @@ async fn api_switch_branch_handler(
         return resp;
     }
     let bid = branch_id.clone();
-    let result = mutate_exom(&state, &exom_slash, move |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, move |ex| {
         ex.brain.switch_branch(&bid)?;
         Ok(())
-    });
+    })
+    .await;
     match result {
         Ok(()) => {
             let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"branch_switch","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
@@ -2286,10 +2381,11 @@ async fn api_merge_branch_handler(
         return resp;
     }
     let src = source_branch.clone();
-    let result = mutate_exom(&state, &exom_slash, move |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, move |ex| {
         let target = ex.brain.current_branch_id().to_string();
         ex.brain.merge_branch(&src, &target, policy, &ctx)
-    });
+    })
+    .await;
     match result {
         Ok(merge_result) => Json(serde_json::json!({
             "added": merge_result.added,
@@ -2544,7 +2640,7 @@ async fn api_import_json(
         user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
     };
 
-    let result = mutate_exom(&state, &exom_slash, move |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, move |ex| {
         ex.brain.replace_state(
             payload.facts,
             payload.transactions,
@@ -2563,7 +2659,8 @@ async fn api_import_json(
         let n_facts = ex.brain.all_facts().len();
         let n_txs = ex.brain.transactions().len();
         Ok((n_facts, n_txs))
-    });
+    })
+    .await;
 
     match result {
         Ok((n_facts, n_txs)) => {
@@ -2631,7 +2728,7 @@ async fn api_retract_all(
         }
     }
 
-    let result = mutate_exom(&state, &exom_slash, move |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, move |ex| {
         let fact_ids: Vec<String> = ex.brain.current_facts().iter().map(|f| f.fact_id.clone()).collect();
         let count = fact_ids.len();
         for id in &fact_ids {
@@ -2639,7 +2736,8 @@ async fn api_retract_all(
         }
         ex.rules.clear();
         Ok(count)
-    });
+    })
+    .await;
 
     match result {
         Ok(count) => {
@@ -2687,7 +2785,7 @@ async fn api_wipe(
         }
     }
 
-    let result = mutate_exom(&state, &exom_slash, |ex| {
+    let result = mutate_exom_async(&state, &exom_slash, |ex| {
         ex.brain.reset();
         ex.rules.clear();
         if let Some(disk) = ex.exom_disk.as_ref() {
@@ -2697,7 +2795,8 @@ async fn api_wipe(
             std::fs::create_dir_all(disk)?;
         }
         Ok(())
-    });
+    })
+    .await;
 
     match result {
         Ok(()) => {

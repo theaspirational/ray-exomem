@@ -285,14 +285,14 @@ async fn handle_tool_call(
 
     let content = match tool_name {
         "query" => tool_query(state, &arguments),
-        "assert_fact" => tool_assert_fact(state, &arguments),
+        "assert_fact" => tool_assert_fact(state, &arguments).await,
         "list_exoms" => tool_list_exoms(state),
         "exom_status" => tool_exom_status(state, &arguments),
         "eval" => tool_eval(state, &arguments),
         "explain" => tool_explain(state, &arguments),
         "fact_history" => tool_fact_history(state, &arguments),
         "list_branches" => tool_list_branches(state, &arguments),
-        "create_branch" => tool_create_branch(state, &arguments),
+        "create_branch" => tool_create_branch(state, &arguments).await,
         "start_session" => tool_start_session(state, &arguments),
         "schema" => tool_schema(state, &arguments),
         "export" => tool_export(state, &arguments),
@@ -415,7 +415,7 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
     }
 }
 
-fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
+async fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let predicate = require_str(args, "predicate")?;
     let value = require_str(args, "value")?;
@@ -430,7 +430,7 @@ fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<String
         user_email: None,
     };
 
-    let result = crate::server::mutate_exom(state, &exom_slash, |es| {
+    let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.assert_fact(
             &fact_id,
             predicate,
@@ -441,7 +441,8 @@ fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<String
             None,
             &ctx,
         )
-    });
+    })
+    .await;
 
     match result {
         Ok(tx_id) => Ok(serde_json::json!({
@@ -586,7 +587,7 @@ fn tool_list_branches(
     Ok(serde_json::json!({ "branches": branches }).to_string())
 }
 
-fn tool_create_branch(
+async fn tool_create_branch(
     state: &AppState,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
@@ -600,10 +601,11 @@ fn tool_create_branch(
         user_email: None,
     };
 
-    let result = crate::server::mutate_exom(state, &exom_slash, |es| {
+    let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain
             .create_branch(branch_name, branch_name, &ctx)
-    });
+    })
+    .await;
 
     match result {
         Ok(branch_id) => Ok(serde_json::json!({
