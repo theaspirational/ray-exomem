@@ -16,6 +16,7 @@ pub mod server;
 pub mod storage;
 pub mod system_schema;
 pub mod tree;
+pub mod auth;
 
 use anyhow::{Context, Result};
 use std::{fs, path::Path};
