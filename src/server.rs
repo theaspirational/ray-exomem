@@ -596,6 +596,7 @@ async fn api_status(
             "name": "ray-exomem",
             "version": crate::frontend_version(),
             "uptime_sec": uptime,
+            "tree_root": server_tree_root(&state).display().to_string(),
             "build": {
                 "git_sha": crate::build_git_sha(),
                 "built_unix": crate::build_unix_timestamp(),

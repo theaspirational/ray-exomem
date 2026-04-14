@@ -316,6 +316,7 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Mutex;
         AuthStore {
+            auth_db: None,
             exom_disk: PathBuf::from("/tmp/fake"),
             jsonl_path: PathBuf::from("/tmp/fake/auth.jsonl"),
             session_cache: DashMap::new(),
