@@ -67,7 +67,9 @@
 		// @ts-ignore -- google.accounts loaded via external script
 		google.accounts.id.initialize({
 			client_id: googleClientId,
-			callback: handleCredentialResponse
+			callback: handleCredentialResponse,
+			auto_select: false,
+			use_fedcm_for_prompt: false
 		});
 		// @ts-ignore
 		google.accounts.id.renderButton(el, {
