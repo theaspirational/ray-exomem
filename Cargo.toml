@@ -15,7 +15,7 @@ postgres = ["sqlx"]
 [dependencies]
 anyhow = "1"
 include_dir = "0.7"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

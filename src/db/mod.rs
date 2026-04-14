@@ -124,6 +124,16 @@ pub trait AuthDb: Send + Sync {
     async fn list_domains(&self) -> anyhow::Result<Vec<String>>;
 }
 
+#[cfg(feature = "postgres")]
+pub async fn create_pool(database_url: &str) -> anyhow::Result<sqlx::PgPool> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .connect(database_url)
+        .await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    Ok(pool)
+}
+
 #[async_trait]
 pub trait ExomDb: Send + Sync {
     async fn load_transactions(&self, exom_path: &str) -> anyhow::Result<Vec<Tx>>;

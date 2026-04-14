@@ -324,6 +324,10 @@ enum Commands {
         /// Defaults to ~/.ray-exomem.
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to JSONL without it.
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
     },
 
     /// Evaluate Rayfall source via the daemon (inline or from file).
@@ -387,6 +391,10 @@ enum Commands {
         /// Comma-separated list of allowed email domains. Empty = allow all.
         #[arg(long, value_delimiter = ',')]
         allowed_domains: Option<Vec<String>>,
+
+        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to JSONL without it.
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
     },
 
     /// Stop a running daemon.
@@ -1464,6 +1472,7 @@ fn main() {
             auth_provider,
             google_client_id,
             allowed_domains,
+            database_url,
         } => {
             let resolved_data_dir = if no_persist {
                 None
@@ -1478,20 +1487,58 @@ fn main() {
                 }
             };
 
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
             // Wire auth provider + store if --auth-provider is set.
             if let Some(ref provider_name) = auth_provider {
-                let tree_root = state.tree_root.clone().unwrap_or_else(|| {
-                    eprintln!("error: --auth-provider requires persistent storage (a data directory)");
-                    std::process::exit(1);
-                });
                 let domains = allowed_domains.unwrap_or_default();
-                let store = match ray_exomem::auth::store::AuthStore::bootstrap(&tree_root, &domains) {
-                    Ok(s) => std::sync::Arc::new(s),
-                    Err(err) => {
-                        eprintln!("error bootstrapping auth store: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+
+                let store: std::sync::Arc<ray_exomem::auth::store::AuthStore> =
+                    if database_url.is_some() {
+                        #[cfg(feature = "postgres")]
+                        {
+                            let db_url = database_url.as_ref().expect("database_url");
+                            match rt.block_on(async {
+                                let pool = ray_exomem::db::create_pool(db_url).await?;
+                                let auth_db: std::sync::Arc<dyn ray_exomem::db::AuthDb> =
+                                    std::sync::Arc::new(ray_exomem::db::pg_auth::PgAuthDb::new(
+                                        pool,
+                                    ));
+                                let store =
+                                    ray_exomem::auth::store::AuthStore::with_auth_db(auth_db)
+                                        .await?;
+                                for d in &domains {
+                                    store.add_domain(d);
+                                }
+                                anyhow::Ok(store)
+                            }) {
+                                Ok(s) => std::sync::Arc::new(s),
+                                Err(e) => {
+                                    eprintln!("error: database connection failed: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        #[cfg(not(feature = "postgres"))]
+                        {
+                            eprintln!("error: --database-url requires postgres feature");
+                            std::process::exit(1);
+                        }
+                    } else {
+                        let tree_root = state.tree_root.clone().unwrap_or_else(|| {
+                            eprintln!(
+                                "error: --auth-provider requires persistent storage (a data directory)"
+                            );
+                            std::process::exit(1);
+                        });
+                        match ray_exomem::auth::store::AuthStore::bootstrap(&tree_root, &domains) {
+                            Ok(s) => std::sync::Arc::new(s),
+                            Err(err) => {
+                                eprintln!("error bootstrapping auth store: {}", err);
+                                std::process::exit(1);
+                            }
+                        }
+                    };
 
                 let provider: std::sync::Arc<dyn ray_exomem::auth::provider::AuthProvider> =
                     match provider_name.as_str() {
@@ -1522,7 +1569,6 @@ fn main() {
             }
 
             eprintln!("[ray-exomem] Open http://{}:{}/ray-exomem/ in your browser", bind.ip(), bind.port());
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
                 eprintln!("error: {}", err);
                 std::process::exit(1);
@@ -1532,6 +1578,7 @@ fn main() {
             bind,
             ui_dir: _,
             data_dir,
+            database_url: _,
         } => {
             let data_dir = data_dir.unwrap_or_else(default_data_dir);
 
@@ -3463,6 +3510,7 @@ mod tests {
                 auth_provider,
                 google_client_id,
                 allowed_domains,
+                database_url,
             } => {
                 assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
@@ -3471,6 +3519,7 @@ mod tests {
                 assert!(auth_provider.is_none());
                 assert!(google_client_id.is_none());
                 assert!(allowed_domains.is_none());
+                assert!(database_url.is_none());
             }
             _ => panic!("expected serve command"),
         }
@@ -3484,10 +3533,12 @@ mod tests {
                 bind,
                 ui_dir,
                 data_dir,
+                database_url,
             } => {
                 assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
                 assert!(data_dir.is_none());
+                assert!(database_url.is_none());
             }
             _ => panic!("expected daemon command"),
         }

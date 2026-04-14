@@ -313,6 +313,21 @@ async fn spa_fallback(uri: Uri) -> impl IntoResponse {
 }
 
 pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
+    if let Some(ref auth_store) = state.auth_store {
+        if let Some(auth_db) = &auth_store.auth_db {
+            let cleanup_db = auth_db.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = cleanup_db.cleanup_expired_sessions().await {
+                        eprintln!("auth: cleanup_expired_sessions: {}", e);
+                    }
+                }
+            });
+        }
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
