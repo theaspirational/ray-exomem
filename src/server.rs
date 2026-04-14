@@ -546,7 +546,7 @@ pub fn load_exom_from_tree_path(
 ) -> anyhow::Result<ExomState> {
     let mut brain = {
         let b = Brain::open_exom(exom_disk, sym_path)?;
-        b.ensure_jsonl_sidecars()?;
+        b.save_all_jsonl()?;
         b
     };
     let meta_p = exom_disk.join(crate::exom::META_FILENAME);
@@ -641,7 +641,7 @@ pub fn mutate_exom<T>(
     Ok(out)
 }
 
-/// After sync JSONL + splay (`mutate_exom`), mirror the exom snapshot to Postgres when configured.
+/// After sync splay rebuild (`mutate_exom`), persist the exom snapshot to Postgres when configured.
 /// Best-effort: logs a warning on failure and does not fail the HTTP mutation.
 async fn exom_db_save_brain_snapshot(state: &AppState, exom_name: &str) {
     let Some(ref db) = state.exom_db else {
@@ -698,13 +698,30 @@ async fn exom_db_sync_from_disk(
     Ok(())
 }
 
+/// After in-memory mutation + splay rebuild, write JSONL sidecars or mirror to Postgres.
+async fn persist_exom_storage(state: &AppState, exom_name: &str) {
+    if state.exom_db.is_some() {
+        exom_db_save_brain_snapshot(state, exom_name).await;
+    } else {
+        let exoms = state.exoms.lock().unwrap();
+        if let Some(es) = exoms.get(exom_name) {
+            if let Err(e) = es.brain.save_all_jsonl() {
+                eprintln!(
+                    "[ray-exomem] warning: JSONL write failed for {}: {e}",
+                    exom_name
+                );
+            }
+        }
+    }
+}
+
 pub async fn mutate_exom_async<T>(
     state: &AppState,
     exom_name: &str,
     f: impl FnOnce(&mut ExomState) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let result = mutate_exom(state, exom_name, f)?;
-    exom_db_save_brain_snapshot(state, exom_name).await;
+    persist_exom_storage(state, exom_name).await;
     Ok(result)
 }
 
@@ -1704,7 +1721,6 @@ async fn api_eval_inner(
     }
     let mut last_result = String::new();
     let mut last_decoded: Option<serde_json::Value> = None;
-    let mut exoms = state.exoms.lock().unwrap();
 
     for form in forms {
         let exec: anyhow::Result<()> = match form {
@@ -1713,7 +1729,8 @@ async fn api_eval_inner(
                 let pred = mutation.predicate.clone();
                 let fact_id = mutation.fact_id.clone();
                 let value = mutation.value.clone();
-                (|| {
+                let r = (|| {
+                    let mut exoms = state.exoms.lock().unwrap();
                     let es = exoms
                         .get_mut(&exom)
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
@@ -1729,14 +1746,22 @@ async fn api_eval_inner(
                     }
                     let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
                     Ok(())
-                })()
+                })();
+                match r {
+                    Ok(()) => {
+                        persist_exom_storage(&state, &exom).await;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             EvalForm::Canonical(CanonicalForm::RetractFact(mutation)) => {
                 let exom = mutation.exom.clone();
                 let pred = mutation.predicate.clone();
                 let fact_id = mutation.fact_id.clone();
                 let value = mutation.value.clone();
-                (|| {
+                let r = (|| {
+                    let mut exoms = state.exoms.lock().unwrap();
                     let es = exoms
                         .get_mut(&exom)
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
@@ -1748,13 +1773,21 @@ async fn api_eval_inner(
                     }
                     let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
                     Ok(())
-                })()
+                })();
+                match r {
+                    Ok(()) => {
+                        persist_exom_storage(&state, &exom).await;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             EvalForm::Canonical(CanonicalForm::Rule(rule)) => {
                 let full = rule.emit();
                 let exom_name = rule.exom.clone();
-                (|| {
+                let r = (|| {
                     let pr = rules::parse_rule_line(&full, ctx.clone(), brain::now_iso())?;
+                    let mut exoms = state.exoms.lock().unwrap();
                     let es = exoms
                         .get_mut(&exom_name)
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
@@ -1768,26 +1801,38 @@ async fn api_eval_inner(
                     }
                     let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#, exom_name, ctx.actor));
                     Ok(())
-                })()
+                })();
+                match r {
+                    Ok(()) => {
+                        persist_exom_storage(&state, &exom_name).await;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             EvalForm::Canonical(CanonicalForm::Query(query)) => {
-                (|| {
-                    let (output, decoded) = eval_query_form(&exoms, &state.engine, &query)?;
-                    last_result = output;
-                    last_decoded = decoded;
-                    Ok(())
-                })()
+                let exoms = state.exoms.lock().unwrap();
+                match eval_query_form(&exoms, &state.engine, &query) {
+                    Ok((output, decoded)) => {
+                        last_result = output;
+                        last_decoded = decoded;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
-            EvalForm::Raw(source) => {
-                (|| {
-                    last_result = state.engine.eval(&source)?;
+            EvalForm::Raw(source) => match state.engine.eval(&source) {
+                Ok(out) => {
+                    last_result = out;
                     last_decoded = None;
                     Ok(())
-                })()
-            }
+                }
+                Err(e) => Err(e),
+            },
         };
 
         if let Err(err) = exec {
+            let exoms = state.exoms.lock().unwrap();
             reconcile_engine(&state, &exoms);
             return (
                 StatusCode::BAD_REQUEST,

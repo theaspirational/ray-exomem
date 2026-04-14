@@ -169,13 +169,25 @@ pub enum MergePolicy {
 // ---------------------------------------------------------------------------
 
 /// Which table was affected by a mutation.
-#[derive(Clone, Copy)]
-enum DirtyTable {
+#[derive(Clone, Copy, Debug)]
+pub enum DirtyTable {
     Tx,
     Fact,
     Observation,
     Belief,
     Branch,
+}
+
+impl DirtyTable {
+    fn name(&self) -> &'static str {
+        match self {
+            DirtyTable::Tx => "tx",
+            DirtyTable::Fact => "fact",
+            DirtyTable::Observation => "observation",
+            DirtyTable::Belief => "belief",
+            DirtyTable::Branch => "branch",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -347,8 +359,9 @@ impl Brain {
     }
 
     /// Load brain state from an [`ExomDb`](crate::db::ExomDb) backend (e.g. Postgres).
-    /// Writes JSONL sidecars and rebuilds splay tables for rayforce2 query (same as
-    /// [`Self::open_exom_from_jsonl`]).
+    /// Rebuilds splay tables and sym for rayforce2 query (same shape as
+    /// [`Self::open_exom_from_jsonl`]). JSONL sidecars are optional and are written by
+    /// the server layer when not using `ExomDb`.
     pub async fn open_exom_from_db(
         exom_db: &dyn crate::db::ExomDb,
         exom_path: &str,
@@ -389,7 +402,7 @@ impl Brain {
             );
         }
 
-        // Rebuild JSONL sidecars + splay tables + sym from loaded data
+        // Rebuild splay tables + sym from loaded data
         brain.save()?;
 
         let n_facts = brain.facts.len();
@@ -440,68 +453,28 @@ impl Brain {
             );
         }
 
-        // Persist everything
+        // Rebuild splay cache for rayforce2
         self.save()?;
         Ok(())
     }
 
-    /// Write JSONL sidecars for any tables that don't have them yet.
-    /// Called on normal startup to backfill after the first upgrade that
-    /// introduces JSONL persistence.
-    pub fn ensure_jsonl_sidecars(&self) -> Result<()> {
-        use crate::storage;
-
-        let Some(data_dir) = &self.data_dir else {
-            return Ok(());
-        };
-
-        let tables: &[(&str, Box<dyn Fn(&Path) -> Result<()> + '_>)] = &[
-            (
-                "tx",
-                Box::new(|p| storage::save_jsonl(&self.transactions, p)),
-            ),
-            ("fact", Box::new(|p| storage::save_jsonl(&self.facts, p))),
-            (
-                "observation",
-                Box::new(|p| storage::save_jsonl(&self.observations, p)),
-            ),
-            (
-                "belief",
-                Box::new(|p| storage::save_jsonl(&self.beliefs, p)),
-            ),
-            (
-                "branch",
-                Box::new(|p| storage::save_jsonl(&self.branches, p)),
-            ),
-        ];
-
-        for (name, save_fn) in tables {
-            let jsonl_path = data_dir.join(format!("{}.jsonl", name));
-            if !jsonl_path.exists() {
-                save_fn(&jsonl_path)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Persist all tables to disk. No-op if no data_dir is set.
+    /// Rebuild all splayed columnar tables + sym. No-op if no `data_dir` / `sym_path`.
     pub fn save(&self) -> Result<()> {
-        self.persist_table(DirtyTable::Tx)?;
-        self.persist_table(DirtyTable::Fact)?;
-        self.persist_table(DirtyTable::Observation)?;
-        self.persist_table(DirtyTable::Belief)?;
-        self.persist_table(DirtyTable::Branch)?;
+        self.rebuild_splay(DirtyTable::Tx)?;
+        self.rebuild_splay(DirtyTable::Fact)?;
+        self.rebuild_splay(DirtyTable::Observation)?;
+        self.rebuild_splay(DirtyTable::Belief)?;
+        self.rebuild_splay(DirtyTable::Branch)?;
         Ok(())
     }
 
-    fn persist_table(&self, table: DirtyTable) -> Result<()> {
+    /// Rebuild the splay table for rayforce2 query cache. Always called after mutations.
+    fn rebuild_splay(&self, table: DirtyTable) -> Result<()> {
         use crate::storage;
-
         let (data_dir, sym_path) = match (&self.data_dir, &self.sym_path) {
             (Some(d), Some(s)) => (d, s),
             _ => return Ok(()), // in-memory mode
         };
-
         let (name, ray_table) = match &table {
             DirtyTable::Tx => ("tx", storage::build_tx_table(&self.transactions)),
             DirtyTable::Fact => ("fact", storage::build_fact_table(&self.facts)),
@@ -512,21 +485,39 @@ impl Brain {
             DirtyTable::Belief => ("belief", storage::build_belief_table(&self.beliefs)),
             DirtyTable::Branch => ("branch", storage::build_branch_table(&self.branches)),
         };
-
-        // Write JSONL sidecar first (atomic rename — always consistent)
-        let jsonl_path = data_dir.join(format!("{}.jsonl", name));
-        match &table {
-            DirtyTable::Tx => storage::save_jsonl(&self.transactions, &jsonl_path)?,
-            DirtyTable::Fact => storage::save_jsonl(&self.facts, &jsonl_path)?,
-            DirtyTable::Observation => storage::save_jsonl(&self.observations, &jsonl_path)?,
-            DirtyTable::Belief => storage::save_jsonl(&self.beliefs, &jsonl_path)?,
-            DirtyTable::Branch => storage::save_jsonl(&self.branches, &jsonl_path)?,
-        };
-
-        // Then write splay table (binary cache)
         let dir = data_dir.join(name);
         storage::save_table(&ray_table, &dir, sym_path)?;
         storage::sym_save(sym_path)?;
+        Ok(())
+    }
+
+    /// Write JSONL sidecar for a specific table. Called by the server layer in JSONL-only mode.
+    pub fn write_jsonl(&self, table: DirtyTable) -> Result<()> {
+        use crate::storage;
+        let Some(data_dir) = &self.data_dir else {
+            return Ok(());
+        };
+        let jsonl_path = data_dir.join(format!("{}.jsonl", table.name()));
+        match &table {
+            DirtyTable::Tx => storage::save_jsonl(&self.transactions, &jsonl_path),
+            DirtyTable::Fact => storage::save_jsonl(&self.facts, &jsonl_path),
+            DirtyTable::Observation => storage::save_jsonl(&self.observations, &jsonl_path),
+            DirtyTable::Belief => storage::save_jsonl(&self.beliefs, &jsonl_path),
+            DirtyTable::Branch => storage::save_jsonl(&self.branches, &jsonl_path),
+        }
+    }
+
+    /// Write all JSONL sidecars (e.g. after mutations in JSONL mode, or at startup backfill).
+    pub fn save_all_jsonl(&self) -> Result<()> {
+        for table in [
+            DirtyTable::Tx,
+            DirtyTable::Fact,
+            DirtyTable::Observation,
+            DirtyTable::Belief,
+            DirtyTable::Branch,
+        ] {
+            self.write_jsonl(table)?;
+        }
         Ok(())
     }
 
@@ -556,7 +547,7 @@ impl Brain {
         self.transactions.push(tx);
         self.tx_branch_index
             .insert(tx_id, self.current_branch.clone());
-        self.persist_table(DirtyTable::Tx)?;
+        self.rebuild_splay(DirtyTable::Tx)?;
         Ok((tx_id, tx_time))
     }
 
@@ -595,7 +586,7 @@ impl Brain {
             valid_to: valid_to.map(|s| s.to_string()),
         };
         self.observations.push(obs);
-        self.persist_table(DirtyTable::Observation)?;
+        self.rebuild_splay(DirtyTable::Observation)?;
         Ok(tx_id)
     }
 
@@ -631,7 +622,7 @@ impl Brain {
             valid_to: valid_to.map(|s| s.to_string()),
         };
         self.facts.push(fact);
-        self.persist_table(DirtyTable::Fact)?;
+        self.rebuild_splay(DirtyTable::Fact)?;
         Ok(tx_id)
     }
 
@@ -659,7 +650,7 @@ impl Brain {
                 f.valid_to = Some(tx_time);
             }
         }
-        self.persist_table(DirtyTable::Fact)?;
+        self.rebuild_splay(DirtyTable::Fact)?;
         Ok(tx_id)
     }
 
@@ -711,7 +702,7 @@ impl Brain {
             }
         }
 
-        self.persist_table(DirtyTable::Fact)?;
+        self.rebuild_splay(DirtyTable::Fact)?;
         Ok(tx_id)
     }
 
@@ -756,7 +747,7 @@ impl Brain {
             rationale: rationale.into(),
         };
         self.beliefs.push(belief);
-        self.persist_table(DirtyTable::Belief)?;
+        self.rebuild_splay(DirtyTable::Belief)?;
         Ok(tx_id)
     }
 
@@ -788,7 +779,7 @@ impl Brain {
             claimed_by: None,
         };
         self.branches.push(branch);
-        self.persist_table(DirtyTable::Branch)?;
+        self.rebuild_splay(DirtyTable::Branch)?;
         Ok(tx_id)
     }
 
@@ -815,7 +806,7 @@ impl Brain {
         if self.current_branch == branch_id {
             self.current_branch = "main".into();
         }
-        self.persist_table(DirtyTable::Branch)?;
+        self.rebuild_splay(DirtyTable::Branch)?;
         Ok(())
     }
 
