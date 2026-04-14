@@ -199,8 +199,34 @@ impl AuthStore {
         Vec::new()
     }
 
-    /// Placeholder for rename support.
-    pub fn update_share_paths(&self, _old_prefix: &str, _new_prefix: &str) {}
+    /// Rewrite share grant paths when an exom or folder is renamed (`old_prefix` → `new_prefix`).
+    pub fn update_share_paths(&self, old_prefix: &str, new_prefix: &str) {
+        if old_prefix == new_prefix {
+            return;
+        }
+        let prefix_slash = format!("{}/", old_prefix);
+        let mut grants = self.share_grants.lock().unwrap();
+        let mut to_log: Vec<(String, String)> = Vec::new();
+        for grant in grants.iter_mut() {
+            if grant.path == old_prefix || grant.path.starts_with(&prefix_slash) {
+                let new_path = format!("{}{}", new_prefix, &grant.path[old_prefix.len()..]);
+                if grant.path != new_path {
+                    grant.path = new_path.clone();
+                    to_log.push((grant.share_id.clone(), new_path));
+                }
+            }
+        }
+        drop(grants);
+        for (share_id, new_path) in to_log {
+            let entry = serde_json::json!({
+                "kind": "share-path-update",
+                "share_id": share_id,
+                "old_path": old_prefix,
+                "new_path": new_path,
+            });
+            let _ = self.append_entry(&entry);
+        }
+    }
 
     /// Replay the JSONL log to populate in-memory state.
     fn replay_jsonl(&self) -> anyhow::Result<()> {
@@ -339,6 +365,14 @@ impl AuthStore {
                         .lock()
                         .unwrap()
                         .retain(|g| g.share_id != share_id);
+                }
+            }
+            "share-path-update" => {
+                let share_id = entry["share_id"].as_str().unwrap_or_default();
+                let new_path = entry["new_path"].as_str().unwrap_or_default();
+                let mut grants = self.share_grants.lock().unwrap();
+                if let Some(grant) = grants.iter_mut().find(|g| g.share_id == share_id) {
+                    grant.path = new_path.to_string();
                 }
             }
             "domain" => {
@@ -761,6 +795,33 @@ mod tests {
             store2.allowed_domains.lock().unwrap().clone(),
             vec!["co.com".to_string()]
         );
+    }
+
+    #[test]
+    fn update_share_paths_on_rename() {
+        let store = make_test_store(&[]);
+        store.add_share_grant(ShareGrant {
+            share_id: "s1".into(),
+            owner_email: "alice@co.com".into(),
+            path: "alice@co.com/proj".into(),
+            grantee_email: "bob@co.com".into(),
+            permission: "read".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+        store.add_share_grant(ShareGrant {
+            share_id: "s2".into(),
+            owner_email: "alice@co.com".into(),
+            path: "alice@co.com/proj/sub".into(),
+            grantee_email: "carol@co.com".into(),
+            permission: "read-write".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+
+        store.update_share_paths("alice@co.com/proj", "alice@co.com/work");
+
+        let grants = store.share_grants.lock().unwrap();
+        assert_eq!(grants[0].path, "alice@co.com/work");
+        assert_eq!(grants[1].path, "alice@co.com/work/sub");
     }
 
     fn make_test_store(domains: &[String]) -> AuthStore {

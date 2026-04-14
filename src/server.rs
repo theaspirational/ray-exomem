@@ -951,6 +951,11 @@ async fn api_rename(
     }
     match crate::tree::rename_last_segment(&tree_root, &path, &new_segment) {
         Ok(new_path) => {
+            if let Some(ref auth_store) = state.auth_store {
+                let old_slash = path.to_slash_string();
+                let new_slash = new_path.to_slash_string();
+                auth_store.update_share_paths(&old_slash, &new_slash);
+            }
             emit_tree_changed(&state);
             Json(serde_json::json!({"ok": true, "new_path": new_path.to_slash_string()}))
                 .into_response()
