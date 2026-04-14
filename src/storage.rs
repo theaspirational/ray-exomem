@@ -735,6 +735,16 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
                     system_schema::attrs::tx::TIME,
                     &tx.tx_time,
                 )?;
+                if let Some(ref email) = tx.user_email {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::USER_EMAIL,
+                        email,
+                    )?;
+                }
                 push_datom_row(
                     &mut e_col,
                     &mut a_col,
@@ -1475,7 +1485,7 @@ pub fn load_beliefs(table: &RayObj) -> Result<Vec<Belief>> {
 // ---------------------------------------------------------------------------
 
 pub fn build_tx_table(txs: &[Tx]) -> RayObj {
-    let mut b = TableBuilder::new(9);
+    let mut b = TableBuilder::new(10);
 
     let tx_ids: Vec<i64> = txs.iter().map(|t| t.tx_id as i64).collect();
     let times: Vec<&str> = txs.iter().map(|t| t.tx_time.as_str()).collect();
@@ -1501,6 +1511,7 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
     let parent_nulls: Vec<bool> = txs.iter().map(|t| t.parent_tx_id.is_none()).collect();
     let branches: Vec<&str> = txs.iter().map(|t| t.branch_id.as_str()).collect();
     let sessions: Vec<Option<&str>> = txs.iter().map(|t| t.session.as_deref()).collect();
+    let user_emails: Vec<Option<&str>> = txs.iter().map(|t| t.user_email.as_deref()).collect();
 
     b.add_i64_col("tx_id", &tx_ids, None);
     b.add_str_col("tx_time", &times);
@@ -1511,6 +1522,7 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
     b.add_i64_col("parent_tx_id", &parent_ids, Some(&parent_nulls));
     b.add_sym_col("branch_id", &branches);
     b.add_sym_col_nullable("session", &sessions);
+    b.add_sym_col_nullable("user_email", &user_emails);
 
     b.finish()
 }
@@ -1533,6 +1545,11 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
     } else {
         vec![None; nrows as usize]
     };
+    let user_emails = if ncols >= 10 {
+        read_sym_nullable_col(tbl, 9, nrows)?
+    } else {
+        vec![None; nrows as usize]
+    };
 
     let mut txs = Vec::with_capacity(nrows as usize);
     for i in 0..nrows as usize {
@@ -1548,6 +1565,7 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
         txs.push(Tx {
             tx_id: tx_ids[i] as u64,
             tx_time: times[i].clone(),
+            user_email: user_emails[i].clone(),
             actor: actors[i].clone(),
             action,
             refs: decode_string_vec(&refs_raw[i]),

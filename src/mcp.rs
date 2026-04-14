@@ -427,6 +427,7 @@ fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<String
         actor: "mcp".into(),
         session: None,
         model: None,
+        user_email: None,
     };
 
     let result = crate::server::mutate_exom(state, &exom_slash, |es| {
@@ -596,6 +597,7 @@ fn tool_create_branch(
         actor: "mcp".into(),
         session: None,
         model: None,
+        user_email: None,
     };
 
     let result = crate::server::mutate_exom(state, &exom_slash, |es| {

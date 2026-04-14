@@ -1042,10 +1042,12 @@ async fn api_assert_fact(
         }
     }
 
+    let user_email = maybe_user.0.as_ref().map(|u| u.email.clone());
     let write_ctx = MutationContext {
         actor: actor_str.clone(),
         session: None,
         model: None,
+        user_email,
     };
 
     let fact_id = req.fact_id.clone().unwrap_or_else(|| req.predicate.clone());
@@ -1412,6 +1414,7 @@ async fn api_eval(
             actor,
             session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
             model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            user_email: None,
         }
     };
     api_eval_inner(state, maybe_user, ctx, body).await
@@ -2003,6 +2006,7 @@ async fn api_create_branch(
             actor: actor.clone(),
             session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
             model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            user_email: None,
         }
     };
 
@@ -2103,6 +2107,7 @@ async fn api_delete_branch_handler(
         actor: actor.clone(),
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
     };
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
@@ -2253,6 +2258,7 @@ async fn api_merge_branch_handler(
             actor,
             session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
             model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            user_email: None,
         }
     };
     let policy = match body.policy.as_deref().unwrap_or("last-writer-wins") {
@@ -2526,6 +2532,7 @@ async fn api_import_json(
         actor: actor.clone(),
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
         model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
     };
 
     let result = mutate_exom(&state, &exom_slash, move |ex| {
@@ -2593,6 +2600,7 @@ async fn api_retract_all(
             actor: actor.clone(),
             session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
             model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            user_email: None,
         }
     };
     let actor = ctx.actor.clone();

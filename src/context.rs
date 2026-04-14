@@ -5,6 +5,8 @@ pub struct MutationContext {
     pub actor: String,
     pub session: Option<String>,
     pub model: Option<String>,
+    /// Authenticated user email when the mutation runs in an identified session.
+    pub user_email: Option<String>,
 }
 
 impl MutationContext {
@@ -15,6 +17,7 @@ impl MutationContext {
             actor: user.email.clone(),
             session: user.session_id.clone(),
             model,
+            user_email: Some(user.email.clone()),
         }
     }
 }
@@ -25,6 +28,7 @@ impl Default for MutationContext {
             actor: "unknown".into(),
             session: None,
             model: None,
+            user_email: None,
         }
     }
 }
@@ -47,5 +51,6 @@ mod tests {
         assert_eq!(ctx.actor, "alice@co.com");
         assert_eq!(ctx.session, Some("sess-1".into()));
         assert_eq!(ctx.model, Some("claude-4".into()));
+        assert_eq!(ctx.user_email, Some("alice@co.com".into()));
     }
 }

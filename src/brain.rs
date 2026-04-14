@@ -92,6 +92,8 @@ impl std::fmt::Display for BeliefStatus {
 pub struct Tx {
     pub tx_id: TxId,
     pub tx_time: String,
+    #[serde(default)]
+    pub user_email: Option<String>,
     pub actor: String,
     pub action: TxAction,
     pub refs: Vec<EntityId>,
@@ -486,6 +488,7 @@ impl Brain {
         let tx = Tx {
             tx_id,
             tx_time: tx_time.clone(),
+            user_email: ctx.user_email.clone(),
             actor: ctx.actor.clone(),
             action,
             refs,

@@ -66,10 +66,11 @@ fn txid_to_i64(id: TxId) -> i64 {
 }
 
 fn tx_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Tx> {
-    let _user_email: Option<String> = row.get("user_email");
+    let user_email: Option<String> = row.get("user_email");
     Ok(Tx {
         tx_id: i64_to_txid(row.get::<i64, _>("tx_id"))?,
         tx_time: row.get::<DateTime<Utc>, _>("tx_time").to_rfc3339(),
+        user_email,
         actor: row
             .get::<Option<String>, _>("actor")
             .unwrap_or_default(),
@@ -169,7 +170,7 @@ async fn insert_transaction<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>
     .bind(exom_path)
     .bind(txid_to_i64(tx.tx_id))
     .bind(tx_time)
-    .bind(None::<String>)
+    .bind(tx.user_email.clone())
     .bind(if tx.actor.is_empty() {
         None::<String>
     } else {

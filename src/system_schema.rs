@@ -25,6 +25,7 @@ pub mod attrs {
     pub mod tx {
         pub const ID: &str = "tx/id";
         pub const TIME: &str = "tx/time";
+        pub const USER_EMAIL: &str = "tx/user-email";
         pub const ACTOR: &str = "tx/actor";
         pub const ACTION: &str = "tx/action";
         pub const BRANCH: &str = "tx/branch";
@@ -189,6 +190,13 @@ pub fn system_attributes() -> Vec<OntologyAttribute> {
             value_kind: "string".into(),
             category: "tx".into(),
             description: "Actor that created the transaction.".into(),
+        },
+        OntologyAttribute {
+            name: attrs::tx::USER_EMAIL.to_string(),
+            entity_kind: "tx".into(),
+            value_kind: "string".into(),
+            category: "tx".into(),
+            description: "Email of the authenticated user for this transaction, when known.".into(),
         },
         OntologyAttribute {
             name: attrs::tx::ACTION.to_string(),
