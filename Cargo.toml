@@ -7,9 +7,10 @@ build = "build.rs"
 license = "MIT"
 
 [features]
-default = []
+default = ["postgres"]
 daemon = []
 test-auth = []
+postgres = ["sqlx"]
 
 [dependencies]
 anyhow = "1"
@@ -35,6 +36,8 @@ rand = "0.8"
 base64 = "0.22"
 hex = "0.4"
 chrono = "0.4"
+async-trait = "0.1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate", "chrono"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
