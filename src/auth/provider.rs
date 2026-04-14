@@ -12,6 +12,7 @@ pub trait AuthProvider: Send + Sync {
         token: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<AuthIdentity>> + Send + 'a>>;
     fn provider_name(&self) -> &str;
+    fn client_id(&self) -> Option<&str> { None }
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,10 @@ impl AuthProvider for GoogleAuthProvider {
 
     fn provider_name(&self) -> &str {
         "google"
+    }
+
+    fn client_id(&self) -> Option<&str> {
+        Some(&self.client_id)
     }
 }
 

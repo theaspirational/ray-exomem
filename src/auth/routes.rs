@@ -22,6 +22,7 @@ use crate::server::AppState;
 
 pub fn auth_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/info", get(auth_info))
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/me", get(me))
@@ -117,6 +118,27 @@ fn role_label(role: &UserRole) -> &'static str {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// GET /auth/info
+///
+/// Public (no session required). Returns auth provider info so the login page
+/// knows which providers are available and can initialize GSI.
+async fn auth_info(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let (provider, google_client_id) = match &state.auth_provider {
+        Some(p) => {
+            let name = p.provider_name().to_string();
+            let cid = p.client_id().map(|s| s.to_string());
+            (Some(name), cid)
+        }
+        None => (None, None),
+    };
+    Json(serde_json::json!({
+        "provider": provider,
+        "google_client_id": google_client_id,
+    }))
+}
 
 /// POST /auth/login
 ///
