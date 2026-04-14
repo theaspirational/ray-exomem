@@ -307,22 +307,35 @@ fn share_readwrite_allows_mutation() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: system_path_always_denied
-//
-// `_system/*` paths must be denied even for top-admin (handled in resolve_access).
+// Test 6: system_path — top-admin gets read access, regular user denied
 // ---------------------------------------------------------------------------
 
 #[test]
-fn system_path_always_denied() {
+fn system_path_top_admin_can_read() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
     // First user = top-admin.
     let admin = daemon.mock_login("admin@co.com", "Admin");
 
     let resp = query_exom(&daemon.base_url, &admin, "_system/auth", "user");
+    let status = status_of(&resp);
+    // 200 = query succeeded, 400 = exom may not exist but access was allowed
+    assert!(
+        status == 200 || status == 400,
+        "top-admin should be able to read _system/auth, got {status}"
+    );
+}
+
+#[test]
+fn system_path_regular_user_denied() {
+    let daemon = TestDaemonBuilder::new().with_auth().start();
+    let _admin = daemon.mock_login("admin@co.com", "Admin");
+    let regular = daemon.mock_login("user@co.com", "User");
+
+    let resp = query_exom(&daemon.base_url, &regular, "_system/auth", "user");
     assert_eq!(
         status_of(&resp),
         403,
-        "even top-admin should be denied access to _system/auth"
+        "regular user should be denied access to _system/auth"
     );
 }
 

@@ -26,18 +26,25 @@ fn access_level_label(level: AccessLevel) -> &'static str {
 /// Resolve the effective access level for `user` at `path`.
 ///
 /// Evaluation order:
-/// 1. `_system` prefix -> Denied (always, even for admins)
-/// 2. Admin or TopAdmin -> FullAccess
-/// 3. Path starts with user's email -> FullAccess (owner)
-/// 4. Share grants for (path, user.email) -> best match
-/// 5. Denied
+/// 1. TopAdmin on `_system` -> ReadOnly
+/// 2. `_system` prefix -> Denied for everyone else
+/// 3. Admin or TopAdmin -> FullAccess
+/// 4. Path starts with user's email -> FullAccess (owner)
+/// 5. Share grants for (path, user.email) -> best match
+/// 6. Denied
 pub fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
-    // 1. _system is always denied
-    if path == "_system" || path.starts_with("_system/") {
-        return AccessLevel::Denied;
+    let is_system = path == "_system" || path.starts_with("_system/");
+
+    // 1-2. _system: top-admin gets read-only, everyone else denied
+    if is_system {
+        return if user.is_top_admin() {
+            AccessLevel::ReadOnly
+        } else {
+            AccessLevel::Denied
+        };
     }
 
-    // 2. Admins get full access
+    // 3. Admins get full access to non-system paths
     if user.is_admin() {
         return AccessLevel::FullAccess;
     }
@@ -214,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn system_path_denied_even_for_admin() {
+    fn system_path_denied_for_regular_admin() {
         let admin = user("admin@co.com", UserRole::Admin);
         let store = make_test_store();
         assert_eq!(
@@ -224,6 +231,20 @@ mod tests {
         assert_eq!(
             resolve_access(&admin, "_system/auth", &store),
             AccessLevel::Denied
+        );
+    }
+
+    #[test]
+    fn system_path_readonly_for_top_admin() {
+        let top = user("top@co.com", UserRole::TopAdmin);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(&top, "_system", &store),
+            AccessLevel::ReadOnly
+        );
+        assert_eq!(
+            resolve_access(&top, "_system/auth", &store),
+            AccessLevel::ReadOnly
         );
     }
 
