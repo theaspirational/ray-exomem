@@ -59,7 +59,8 @@ async function handle401(res: Response): Promise<void> {
 	if (res.status === 401) {
 		if (browser) {
 			const { goto } = await import('$app/navigation');
-			goto('/login');
+			const { base } = await import('$app/paths');
+			goto(`${base}/login`);
 		}
 		throw new Error('Authentication required');
 	}

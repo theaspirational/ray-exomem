@@ -1,5 +1,6 @@
 import { browser } from '$app/environment';
 import { goto } from '$app/navigation';
+import { base } from '$app/paths';
 import { getExomemBaseUrl } from '$lib/exomem.svelte';
 
 export interface AuthUser {
@@ -7,6 +8,10 @@ export interface AuthUser {
 	display_name: string;
 	provider: string;
 	role: string;
+}
+
+function authApiBase(): string {
+	return getExomemBaseUrl().replace('/ray-exomem', '');
 }
 
 class AuthState {
@@ -30,8 +35,7 @@ class AuthState {
 		if (!browser) return;
 		this.loading = true;
 		try {
-			const base = getExomemBaseUrl().replace('/ray-exomem', '');
-			const resp = await fetch(`${base}/auth/me`, { credentials: 'include' });
+			const resp = await fetch(`${authApiBase()}/auth/me`, { credentials: 'include' });
 			if (resp.ok) {
 				this.user = await resp.json();
 			} else {
@@ -45,13 +49,12 @@ class AuthState {
 	}
 
 	async logout() {
-		const base = getExomemBaseUrl().replace('/ray-exomem', '');
-		await fetch(`${base}/auth/logout`, {
+		await fetch(`${authApiBase()}/auth/logout`, {
 			method: 'POST',
 			credentials: 'include'
 		});
 		this.user = null;
-		goto('/login');
+		goto(`${base}/login`);
 	}
 }
 
