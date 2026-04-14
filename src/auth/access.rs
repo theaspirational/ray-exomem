@@ -291,14 +291,21 @@ mod tests {
 
     fn make_test_store() -> AuthStore {
         use dashmap::DashMap;
+        use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Mutex;
         AuthStore {
             exom_disk: PathBuf::from("/tmp/fake"),
+            jsonl_path: PathBuf::from("/tmp/fake/auth.jsonl"),
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
             share_grants: Mutex::new(Vec::new()),
+            users: Mutex::new(HashMap::new()),
+            api_keys: Mutex::new(HashMap::new()),
+            api_key_by_hash: Mutex::new(HashMap::new()),
+            top_admin: Mutex::new(None),
+            admins: Mutex::new(HashSet::new()),
         }
     }
 }

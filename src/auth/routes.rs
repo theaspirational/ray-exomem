@@ -149,7 +149,10 @@ async fn login(
     }
 
     // Resolve role. First user ever (empty session + api_key caches) becomes top-admin.
-    let role = if store.session_cache.is_empty() && store.api_key_cache.is_empty() {
+    let role = if store.top_admin.lock().unwrap().is_none()
+        && store.session_cache.is_empty()
+        && store.api_key_cache.is_empty()
+    {
         UserRole::TopAdmin
     } else {
         store.resolve_role(&identity.email)
@@ -168,6 +171,14 @@ async fn login(
 
     // Cache the session.
     store.session_cache.insert(session_id.clone(), user.clone());
+
+    // Persist user record.
+    store.record_user(&identity.email, &identity.display_name, &identity.provider);
+
+    // First user ever becomes persisted top-admin.
+    if role == UserRole::TopAdmin {
+        store.set_top_admin(&identity.email);
+    }
 
     // Determine if we should set Secure flag on the cookie.
     let secure = state
@@ -233,6 +244,9 @@ async fn create_api_key(
     let (key_id, raw_key) = store.generate_api_key(&user.email, &body.label);
     let key_hash = AuthStore::hash_api_key(&raw_key);
 
+    // Persist the API key.
+    store.record_api_key(&key_id, &key_hash, &user.email, &body.label);
+
     // Cache the key -> user mapping.
     let api_user = User {
         session_id: None,
@@ -264,18 +278,45 @@ async fn create_api_key(
 }
 
 /// GET /auth/api-keys
-async fn list_api_keys(_user: User) -> impl IntoResponse {
-    // TODO: query system exom for user's keys
-    Json(serde_json::json!({ "keys": [] }))
+async fn list_api_keys(
+    State(state): State<Arc<AppState>>,
+    user: User,
+) -> Result<impl IntoResponse, ApiError> {
+    let store = require_auth_store(&state)?;
+    let keys: Vec<serde_json::Value> = store
+        .list_api_keys_for_user(&user.email)
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "key_id": k.key_id,
+                "label": k.label,
+                "created_at": k.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "keys": keys })))
 }
 
 /// DELETE /auth/api-keys/:key_id
 async fn revoke_api_key(
-    _user: User,
-    AxumPath(_key_id): AxumPath<String>,
-) -> impl IntoResponse {
-    // TODO: revoke key from system exom and evict from cache
-    Json(serde_json::json!({ "ok": true }))
+    State(state): State<Arc<AppState>>,
+    user: User,
+    AxumPath(key_id): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let store = require_auth_store(&state)?;
+
+    // Verify the key belongs to this user (unless admin).
+    if !user.is_admin() {
+        let keys = store.list_api_keys_for_user(&user.email);
+        if !keys.iter().any(|k| k.key_id == key_id) {
+            return Err(
+                ApiError::new("not_found", "API key not found").with_status(404),
+            );
+        }
+    }
+
+    store.revoke_api_key_by_id(&key_id);
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// POST /auth/shares
@@ -338,18 +379,47 @@ async fn create_share(
 }
 
 /// GET /auth/shares
-async fn list_shares(_user: User) -> impl IntoResponse {
-    // TODO: query system exom for user's shares
-    Json(serde_json::json!({ "shares": [] }))
+async fn list_shares(
+    State(state): State<Arc<AppState>>,
+    user: User,
+) -> Result<impl IntoResponse, ApiError> {
+    let store = require_auth_store(&state)?;
+    let shares: Vec<serde_json::Value> = store
+        .list_shares_for_owner(&user.email)
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "share_id": g.share_id,
+                "path": g.path,
+                "grantee_email": g.grantee_email,
+                "permission": g.permission,
+                "created_at": g.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "shares": shares })))
 }
 
 /// DELETE /auth/shares/:share_id
 async fn revoke_share(
-    _user: User,
-    AxumPath(_share_id): AxumPath<String>,
-) -> impl IntoResponse {
-    // TODO: revoke share from system exom
-    Json(serde_json::json!({ "ok": true }))
+    State(state): State<Arc<AppState>>,
+    user: User,
+    AxumPath(share_id): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let store = require_auth_store(&state)?;
+
+    // Verify the share belongs to this user (unless admin).
+    if !user.is_admin() {
+        let shares = store.list_shares_for_owner(&user.email);
+        if !shares.iter().any(|s| s.share_id == share_id) {
+            return Err(
+                ApiError::new("not_found", "share not found").with_status(404),
+            );
+        }
+    }
+
+    store.revoke_share_by_id(&share_id);
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// GET /auth/shared-with-me

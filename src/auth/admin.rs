@@ -11,7 +11,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::auth::store::AuthStore;
-use crate::auth::User;
+use crate::auth::{User, UserRole};
 use crate::http_error::ApiError;
 use crate::server::AppState;
 
@@ -87,49 +87,78 @@ struct AddDomainRequest {
 // ---------------------------------------------------------------------------
 
 /// GET /auth/admin/users
-async fn list_users(user: User) -> Result<impl IntoResponse, ApiError> {
+async fn list_users(
+    State(state): State<Arc<AppState>>,
+    user: User,
+) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
-    // TODO: query system exom for all users
-    Ok(Json(serde_json::json!({ "users": [] })))
+    let store = require_auth_store(&state)?;
+    let users: Vec<serde_json::Value> = store
+        .list_users()
+        .iter()
+        .map(|u| {
+            serde_json::json!({
+                "email": u.email,
+                "display_name": u.display_name,
+                "provider": u.provider,
+                "created_at": u.created_at,
+                "active": u.active,
+                "role": match store.resolve_role(&u.email) {
+                    UserRole::TopAdmin => "top-admin",
+                    UserRole::Admin => "admin",
+                    UserRole::Regular => "regular",
+                },
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "users": users })))
 }
 
 /// DELETE /auth/admin/users/:email
 async fn deactivate_user(
+    State(state): State<Arc<AppState>>,
     user: User,
-    AxumPath(_email): AxumPath<String>,
+    AxumPath(email): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
-    // TODO: mark user as deactivated in system exom
+    let store = require_auth_store(&state)?;
+    store.deactivate_user(&email);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// POST /auth/admin/users/:email/activate
 async fn activate_user(
+    State(state): State<Arc<AppState>>,
     user: User,
-    AxumPath(_email): AxumPath<String>,
+    AxumPath(email): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
-    // TODO: re-activate user in system exom
+    let store = require_auth_store(&state)?;
+    store.activate_user(&email);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// POST /auth/admin/admins
 async fn grant_admin(
+    State(state): State<Arc<AppState>>,
     user: User,
-    Json(_body): Json<GrantAdminRequest>,
+    Json(body): Json<GrantAdminRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_top_admin(&user)?;
-    // TODO: update user role to Admin in system exom
+    let store = require_auth_store(&state)?;
+    store.grant_admin(&body.email);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// DELETE /auth/admin/admins/:email
 async fn revoke_admin(
+    State(state): State<Arc<AppState>>,
     user: User,
-    AxumPath(_email): AxumPath<String>,
+    AxumPath(email): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_top_admin(&user)?;
-    // TODO: downgrade user from Admin to Regular in system exom
+    let store = require_auth_store(&state)?;
+    store.revoke_admin(&email);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -171,27 +200,61 @@ async fn kill_session(
 }
 
 /// GET /auth/admin/api-keys
-async fn list_all_api_keys(user: User) -> Result<impl IntoResponse, ApiError> {
+async fn list_all_api_keys(
+    State(state): State<Arc<AppState>>,
+    user: User,
+) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
-    // TODO: query system exom for all api keys
-    Ok(Json(serde_json::json!({ "keys": [] })))
+    let store = require_auth_store(&state)?;
+    let keys: Vec<serde_json::Value> = store
+        .list_api_keys()
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "key_id": k.key_id,
+                "email": k.email,
+                "label": k.label,
+                "created_at": k.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "keys": keys })))
 }
 
 /// DELETE /auth/admin/api-keys/:key_id
 async fn revoke_any_api_key(
+    State(state): State<Arc<AppState>>,
     user: User,
-    AxumPath(_key_id): AxumPath<String>,
+    AxumPath(key_id): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
-    // TODO: revoke key from system exom and evict from cache
+    let store = require_auth_store(&state)?;
+    store.revoke_api_key_by_id(&key_id);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// GET /auth/admin/shares
-async fn list_all_shares(user: User) -> Result<impl IntoResponse, ApiError> {
+async fn list_all_shares(
+    State(state): State<Arc<AppState>>,
+    user: User,
+) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
-    // TODO: query system exom for all shares
-    Ok(Json(serde_json::json!({ "shares": [] })))
+    let store = require_auth_store(&state)?;
+    let shares: Vec<serde_json::Value> = store
+        .list_all_shares()
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "share_id": g.share_id,
+                "owner_email": g.owner_email,
+                "path": g.path,
+                "grantee_email": g.grantee_email,
+                "permission": g.permission,
+                "created_at": g.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "shares": shares })))
 }
 
 /// GET /auth/admin/allowed-domains
@@ -219,12 +282,7 @@ async fn add_domain(
         return Err(ApiError::new("invalid_domain", "domain must not be empty").with_status(400));
     }
 
-    {
-        let mut domains = store.allowed_domains.lock().unwrap();
-        if !domains.contains(&domain) {
-            domains.push(domain.clone());
-        }
-    }
+    store.add_domain(&domain);
 
     Ok(Json(serde_json::json!({ "ok": true, "domain": domain })))
 }
@@ -238,10 +296,7 @@ async fn remove_domain(
     require_top_admin(&user)?;
     let store = require_auth_store(&state)?;
 
-    {
-        let mut domains = store.allowed_domains.lock().unwrap();
-        domains.retain(|d| d != &domain);
-    }
+    store.remove_domain(&domain);
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
