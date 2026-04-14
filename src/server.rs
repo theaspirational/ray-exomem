@@ -320,6 +320,8 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
     let app = Router::new()
         // Nested under /ray-exomem/api
         .nest("/ray-exomem/api", api_router())
+        // MCP JSON-RPC endpoint
+        .route("/mcp", post(crate::mcp::mcp_handler))
         // Auth routes
         .nest("/auth", crate::auth::routes::auth_router())
         .nest("/auth/admin", crate::auth::admin::admin_router())
@@ -371,7 +373,7 @@ fn get_or_load_exom<'a>(
     Err(anyhow::anyhow!("unknown exom '{}'", slash_key))
 }
 
-fn load_exom_from_tree_path(
+pub fn load_exom_from_tree_path(
     exom_disk: &std::path::Path,
     sym_path: &std::path::Path,
     slash_key: &str,
@@ -450,7 +452,7 @@ fn refresh_exom_binding(state: &AppState, exoms: &mut HashMap<String, ExomState>
     Ok(())
 }
 
-fn mutate_exom<T>(
+pub fn mutate_exom<T>(
     state: &AppState,
     exom_name: &str,
     f: impl FnOnce(&mut ExomState) -> anyhow::Result<T>,
@@ -964,12 +966,12 @@ async fn api_assert_fact(
 // Query helpers (shared by query + eval + expand-query handlers)
 // ---------------------------------------------------------------------------
 
-struct ExpandedQuery {
-    original_source: String,
-    normalized_query: String,
-    expanded_query: String,
+pub struct ExpandedQuery {
+    pub original_source: String,
+    pub normalized_query: String,
+    pub expanded_query: String,
     #[allow(dead_code)]
-    exom_name: String,
+    pub exom_name: String,
 }
 
 fn lower_query_request(
@@ -1056,7 +1058,7 @@ fn expand_canonical_query(
     })
 }
 
-fn expand_query(
+pub fn expand_query(
     exoms: &HashMap<String, ExomState>,
     engine: &crate::backend::RayforceEngine,
     source: &str,
