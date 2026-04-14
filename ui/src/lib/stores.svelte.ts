@@ -7,27 +7,18 @@ import {
 	DEFAULT_EXOM,
 	ExomemLiveState,
 	fetchExomemStatus,
-	fetchExoms,
 	getExomemBaseUrl
 } from '$lib/exomem.svelte';
-import type { ExomEntry } from '$lib/types';
 
 class AppState {
 	selectedExom = $state(DEFAULT_EXOM);
-	exoms = $state<ExomEntry[]>([]);
 	baseUrl = $state(getExomemBaseUrl());
 	/** Server process uptime for the selected exom (seconds), from `/status`. */
 	serverUptimeSec = $state<number | null>(null);
 	live = new ExomemLiveState();
 
-	activeExoms = $derived(this.exoms.filter((e) => !e.archived));
-
 	async refreshExoms() {
-		try {
-			this.exoms = await fetchExoms();
-		} catch {
-			// silently fail — individual pages handle errors
-		}
+		// No-op: tree UI uses fetchTree() directly. Old /api/exoms endpoint removed.
 	}
 
 	switchExom(name: string) {

@@ -327,6 +327,7 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
         .nest("/auth", crate::auth::routes::auth_router())
         .nest("/auth/admin", crate::auth::admin::admin_router())
         // SSE event stream
+        .route("/ray-exomem/events", get(api_sse))
         .route("/sse", get(api_sse))
         // Compat shim: smoke test calls /api/status
         .route("/api/status", get(api_status))
