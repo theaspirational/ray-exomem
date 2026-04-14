@@ -93,24 +93,22 @@ async fn list_users(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-    let users: Vec<serde_json::Value> = store
-        .list_users()
-        .iter()
-        .map(|u| {
-            serde_json::json!({
-                "email": u.email,
-                "display_name": u.display_name,
-                "provider": u.provider,
-                "created_at": u.created_at,
-                "active": u.active,
-                "role": match store.resolve_role(&u.email) {
-                    UserRole::TopAdmin => "top-admin",
-                    UserRole::Admin => "admin",
-                    UserRole::Regular => "regular",
-                },
-            })
-        })
-        .collect();
+    let mut users: Vec<serde_json::Value> = Vec::new();
+    for u in store.list_users().await {
+        let role = store.resolve_role(&u.email).await;
+        users.push(serde_json::json!({
+            "email": u.email,
+            "display_name": u.display_name,
+            "provider": u.provider,
+            "created_at": u.created_at,
+            "active": u.active,
+            "role": match role {
+                UserRole::TopAdmin => "top-admin",
+                UserRole::Admin => "admin",
+                UserRole::Regular => "regular",
+            },
+        }));
+    }
     Ok(Json(serde_json::json!({ "users": users })))
 }
 
@@ -122,7 +120,7 @@ async fn deactivate_user(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-    store.deactivate_user(&email);
+    store.deactivate_user(&email).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -134,7 +132,7 @@ async fn activate_user(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-    store.activate_user(&email);
+    store.activate_user(&email).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -146,7 +144,7 @@ async fn grant_admin(
 ) -> Result<impl IntoResponse, ApiError> {
     require_top_admin(&user)?;
     let store = require_auth_store(&state)?;
-    store.grant_admin(&body.email);
+    store.grant_admin(&body.email).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -158,7 +156,7 @@ async fn revoke_admin(
 ) -> Result<impl IntoResponse, ApiError> {
     require_top_admin(&user)?;
     let store = require_auth_store(&state)?;
-    store.revoke_admin(&email);
+    store.revoke_admin(&email).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -208,6 +206,7 @@ async fn list_all_api_keys(
     let store = require_auth_store(&state)?;
     let keys: Vec<serde_json::Value> = store
         .list_api_keys()
+        .await
         .iter()
         .map(|k| {
             serde_json::json!({
@@ -229,7 +228,7 @@ async fn revoke_any_api_key(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-    store.revoke_api_key_by_id(&key_id);
+    store.revoke_api_key_by_id(&key_id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -242,6 +241,7 @@ async fn list_all_shares(
     let store = require_auth_store(&state)?;
     let shares: Vec<serde_json::Value> = store
         .list_all_shares()
+        .await
         .iter()
         .map(|g| {
             serde_json::json!({
@@ -264,7 +264,7 @@ async fn list_domains(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-    let domains = store.list_allowed_domains();
+    let domains = store.list_allowed_domains().await;
     Ok(Json(serde_json::json!({ "domains": domains })))
 }
 
@@ -282,7 +282,7 @@ async fn add_domain(
         return Err(ApiError::new("invalid_domain", "domain must not be empty").with_status(400));
     }
 
-    store.add_domain(&domain);
+    store.add_domain(&domain).await;
 
     Ok(Json(serde_json::json!({ "ok": true, "domain": domain })))
 }
@@ -296,7 +296,7 @@ async fn remove_domain(
     require_top_admin(&user)?;
     let store = require_auth_store(&state)?;
 
-    store.remove_domain(&domain);
+    store.remove_domain(&domain).await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

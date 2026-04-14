@@ -30,7 +30,7 @@ fn access_level_label(level: AccessLevel) -> &'static str {
 /// 2. Path starts with user's email -> FullAccess (owner)
 /// 3. Share grants for (path, user.email) -> best match
 /// 4. Denied
-pub fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
+pub async fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
     // 1. Admins get full access
     if user.is_admin() {
         return AccessLevel::FullAccess;
@@ -42,7 +42,7 @@ pub fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel
     }
 
     // 3. Check share grants
-    let grants = store.shares_for_grantee(&user.email);
+    let grants = store.shares_for_grantee(&user.email).await;
     resolve_from_grants(path, &grants)
 }
 
@@ -85,7 +85,7 @@ pub fn resolve_from_grants(path: &str, grants: &[ShareGrant]) -> AccessLevel {
 /// Extracts the exom path and operation kind from each canonical form,
 /// calls `resolve_access`, and rejects the entire batch if any path is
 /// denied or insufficiently privileged.
-pub fn authorize_rayfall(
+pub async fn authorize_rayfall(
     user: &User,
     forms: &[CanonicalForm],
     store: &AuthStore,
@@ -107,7 +107,7 @@ pub fn authorize_rayfall(
             });
         }
 
-        let level = resolve_access(user, path, store);
+        let level = resolve_access(user, path, store).await;
 
         if is_write && !level.can_write() {
             return Err(AuthzError::Denied {
@@ -207,46 +207,46 @@ mod tests {
         );
     }
 
-    #[test]
-    fn admin_gets_full_access() {
+    #[tokio::test]
+    async fn admin_gets_full_access() {
         let admin = user("admin@co.com", UserRole::Admin);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&admin, "alice@co.com/proj", &store),
+            resolve_access(&admin, "alice@co.com/proj", &store).await,
             AccessLevel::FullAccess
         );
     }
 
-    #[test]
-    fn top_admin_gets_full_access() {
+    #[tokio::test]
+    async fn top_admin_gets_full_access() {
         let top = user("top@co.com", UserRole::TopAdmin);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&top, "alice@co.com/proj", &store),
+            resolve_access(&top, "alice@co.com/proj", &store).await,
             AccessLevel::FullAccess
         );
     }
 
-    #[test]
-    fn owner_gets_full_access() {
+    #[tokio::test]
+    async fn owner_gets_full_access() {
         let alice = user("alice@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&alice, "alice@co.com", &store),
+            resolve_access(&alice, "alice@co.com", &store).await,
             AccessLevel::FullAccess
         );
         assert_eq!(
-            resolve_access(&alice, "alice@co.com/proj", &store),
+            resolve_access(&alice, "alice@co.com/proj", &store).await,
             AccessLevel::FullAccess
         );
     }
 
-    #[test]
-    fn regular_user_denied_without_grants() {
+    #[tokio::test]
+    async fn regular_user_denied_without_grants() {
         let bob = user("bob@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&bob, "alice@co.com/proj", &store),
+            resolve_access(&bob, "alice@co.com/proj", &store).await,
             AccessLevel::Denied
         );
     }

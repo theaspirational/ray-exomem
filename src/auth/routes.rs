@@ -162,7 +162,7 @@ async fn login(
         })?;
 
     // Check domain restriction.
-    if !store.check_domain(&identity.email) {
+    if !store.check_domain(&identity.email).await {
         return Err(
             ApiError::new("domain_not_allowed", "your email domain is not allowed")
                 .with_status(403)
@@ -177,7 +177,7 @@ async fn login(
     {
         UserRole::TopAdmin
     } else {
-        store.resolve_role(&identity.email)
+        store.resolve_role(&identity.email).await
     };
 
     // Create session.
@@ -195,11 +195,13 @@ async fn login(
     store.session_cache.insert(session_id.clone(), user.clone());
 
     // Persist user record.
-    store.record_user(&identity.email, &identity.display_name, &identity.provider);
+    store
+        .record_user(&identity.email, &identity.display_name, &identity.provider)
+        .await;
 
     // First user ever becomes persisted top-admin.
     if role == UserRole::TopAdmin {
-        store.set_top_admin(&identity.email);
+        store.set_top_admin(&identity.email).await;
     }
 
     // Determine if we should set Secure flag on the cookie.
@@ -267,7 +269,9 @@ async fn create_api_key(
     let key_hash = AuthStore::hash_api_key(&raw_key);
 
     // Persist the API key.
-    store.record_api_key(&key_id, &key_hash, &user.email, &body.label);
+    store
+        .record_api_key(&key_id, &key_hash, &user.email, &body.label)
+        .await;
 
     // Cache the key -> user mapping.
     let api_user = User {
@@ -307,6 +311,7 @@ async fn list_api_keys(
     let store = require_auth_store(&state)?;
     let keys: Vec<serde_json::Value> = store
         .list_api_keys_for_user(&user.email)
+        .await
         .iter()
         .map(|k| {
             serde_json::json!({
@@ -329,7 +334,7 @@ async fn revoke_api_key(
 
     // Verify the key belongs to this user (unless admin).
     if !user.is_admin() {
-        let keys = store.list_api_keys_for_user(&user.email);
+        let keys = store.list_api_keys_for_user(&user.email).await;
         if !keys.iter().any(|k| k.key_id == key_id) {
             return Err(
                 ApiError::new("not_found", "API key not found").with_status(404),
@@ -337,7 +342,7 @@ async fn revoke_api_key(
         }
     }
 
-    store.revoke_api_key_by_id(&key_id);
+    store.revoke_api_key_by_id(&key_id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -380,14 +385,16 @@ async fn create_share(
             .unwrap_or(0)
     );
 
-    store.add_share_grant(crate::auth::store::ShareGrant {
-        share_id: share_id.clone(),
-        owner_email: user.email.clone(),
-        path: body.path.clone(),
-        grantee_email: body.grantee_email.clone(),
-        permission: body.permission.clone(),
-        created_at,
-    });
+    store
+        .add_share_grant(crate::auth::store::ShareGrant {
+            share_id: share_id.clone(),
+            owner_email: user.email.clone(),
+            path: body.path.clone(),
+            grantee_email: body.grantee_email.clone(),
+            permission: body.permission.clone(),
+            created_at,
+        })
+        .await;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -408,6 +415,7 @@ async fn list_shares(
     let store = require_auth_store(&state)?;
     let shares: Vec<serde_json::Value> = store
         .list_shares_for_owner(&user.email)
+        .await
         .iter()
         .map(|g| {
             serde_json::json!({
@@ -432,7 +440,7 @@ async fn revoke_share(
 
     // Verify the share belongs to this user (unless admin).
     if !user.is_admin() {
-        let shares = store.list_shares_for_owner(&user.email);
+        let shares = store.list_shares_for_owner(&user.email).await;
         if !shares.iter().any(|s| s.share_id == share_id) {
             return Err(
                 ApiError::new("not_found", "share not found").with_status(404),
@@ -440,7 +448,7 @@ async fn revoke_share(
         }
     }
 
-    store.revoke_share_by_id(&share_id);
+    store.revoke_share_by_id(&share_id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -450,7 +458,7 @@ async fn shared_with_me(
     user: User,
 ) -> Result<impl IntoResponse, ApiError> {
     let store = require_auth_store(&state)?;
-    let grants = store.shares_for_grantee(&user.email);
+    let grants = store.shares_for_grantee(&user.email).await;
     let items: Vec<serde_json::Value> = grants
         .iter()
         .map(|g| {

@@ -1489,6 +1489,38 @@ fn main() {
 
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
+            #[cfg(feature = "postgres")]
+            let postgres_pool: Option<sqlx::PgPool> =
+                if let Some(ref db_url) = database_url {
+                    match rt.block_on(ray_exomem::db::create_pool(db_url)) {
+                        Ok(pool) => Some(pool),
+                        Err(e) => {
+                            eprintln!("error: database connection failed: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    None
+                };
+            #[cfg(not(feature = "postgres"))]
+            {
+                if database_url.is_some() {
+                    eprintln!("error: --database-url requires postgres feature");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(feature = "postgres"))]
+            let _postgres_pool: Option<()> = None;
+
+            #[cfg(feature = "postgres")]
+            if let Some(ref pool) = postgres_pool {
+                let s = std::sync::Arc::get_mut(&mut state)
+                    .expect("state Arc refcount should be 1 at init");
+                s.exom_db = Some(std::sync::Arc::new(ray_exomem::db::pg_exom::PgExomDb::new(
+                    pool.clone(),
+                )));
+            }
+
             // Wire auth provider + store if --auth-provider is set.
             if let Some(ref provider_name) = auth_provider {
                 let domains = allowed_domains.unwrap_or_default();
@@ -1497,9 +1529,11 @@ fn main() {
                     if database_url.is_some() {
                         #[cfg(feature = "postgres")]
                         {
-                            let db_url = database_url.as_ref().expect("database_url");
+                            let pool = postgres_pool
+                                .as_ref()
+                                .expect("database_url implies postgres pool")
+                                .clone();
                             match rt.block_on(async {
-                                let pool = ray_exomem::db::create_pool(db_url).await?;
                                 let auth_db: std::sync::Arc<dyn ray_exomem::db::AuthDb> =
                                     std::sync::Arc::new(ray_exomem::db::pg_auth::PgAuthDb::new(
                                         pool,
@@ -1508,7 +1542,7 @@ fn main() {
                                     ray_exomem::auth::store::AuthStore::with_auth_db(auth_db)
                                         .await?;
                                 for d in &domains {
-                                    store.add_domain(d);
+                                    store.add_domain(d).await;
                                 }
                                 anyhow::Ok(store)
                             }) {
@@ -1531,7 +1565,10 @@ fn main() {
                             );
                             std::process::exit(1);
                         });
-                        match ray_exomem::auth::store::AuthStore::bootstrap(&tree_root, &domains) {
+                        match rt.block_on(ray_exomem::auth::store::AuthStore::bootstrap(
+                            &tree_root,
+                            &domains,
+                        )) {
                             Ok(s) => std::sync::Arc::new(s),
                             Err(err) => {
                                 eprintln!("error bootstrapping auth store: {}", err);

@@ -42,7 +42,7 @@ impl FromRequestParts<Arc<AppState>> for User {
         }
 
         // 2. Try session cookie
-        if let Some(user) = try_session_cookie(parts, auth_store) {
+        if let Some(user) = try_session_cookie(parts, auth_store).await {
             return Ok(user);
         }
 
@@ -72,7 +72,7 @@ impl FromRequestParts<Arc<AppState>> for MaybeUser {
         if let Some(user) = try_bearer(parts, auth_store) {
             return Ok(MaybeUser(Some(user)));
         }
-        if let Some(user) = try_session_cookie(parts, auth_store) {
+        if let Some(user) = try_session_cookie(parts, auth_store).await {
             return Ok(MaybeUser(Some(user)));
         }
 
@@ -94,10 +94,10 @@ fn try_bearer(parts: &Parts, store: &AuthStore) -> Option<User> {
     store.get_user_by_key_hash(&key_hash)
 }
 
-fn try_session_cookie(parts: &Parts, store: &AuthStore) -> Option<User> {
+async fn try_session_cookie(parts: &Parts, store: &AuthStore) -> Option<User> {
     let cookie_header = parts.headers.get("cookie")?.to_str().ok()?;
     let session_id = extract_session_cookie(cookie_header)?;
-    store.get_user_by_session(&session_id)
+    store.get_user_by_session(&session_id).await
 }
 
 // ---------------------------------------------------------------------------

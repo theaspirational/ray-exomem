@@ -73,6 +73,7 @@ pub struct AppState {
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
     pub bind_addr: Option<String>,
+    pub exom_db: Option<Arc<dyn crate::db::ExomDb>>,
 }
 
 impl AppState {
@@ -81,6 +82,7 @@ impl AppState {
         exoms: HashMap<String, ExomState>,
         tree_root: Option<PathBuf>,
         sym_path: Option<PathBuf>,
+        exom_db: Option<Arc<dyn crate::db::ExomDb>>,
     ) -> Self {
         let (sse_tx, _) = broadcast::channel(512);
         Self {
@@ -93,6 +95,7 @@ impl AppState {
             auth_store: None,
             auth_provider: None,
             bind_addr: None,
+            exom_db,
         }
     }
 
@@ -143,7 +146,7 @@ impl AppState {
             engine.bind_named_db(storage::sym_intern(name), &es.datoms)?;
         }
 
-        Ok(Arc::new(AppState::new(engine, exoms, tree_root, sym_path)))
+        Ok(Arc::new(AppState::new(engine, exoms, tree_root, sym_path, None)))
     }
 }
 
@@ -498,14 +501,14 @@ fn emit_tree_changed(state: &AppState) {
         .send(r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string());
 }
 
-fn guard_read(
+async fn guard_read(
     state: &AppState,
     maybe_user: &MaybeUser,
     exom_slash: &str,
 ) -> Option<axum::response::Response> {
     if let Some(ref auth_store) = state.auth_store {
         if let Some(ref user) = maybe_user.0 {
-            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store);
+            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
             if !level.can_read() {
                 return Some(
                     ApiError::new("forbidden", format!("read access denied to {}", exom_slash))
@@ -518,14 +521,14 @@ fn guard_read(
     None
 }
 
-fn guard_write(
+async fn guard_write(
     state: &AppState,
     maybe_user: &MaybeUser,
     exom_slash: &str,
 ) -> Option<axum::response::Response> {
     if let Some(ref auth_store) = state.auth_store {
         if let Some(ref user) = maybe_user.0 {
-            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store);
+            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
             if !level.can_write() {
                 return Some(
                     ApiError::new("forbidden", format!("write access denied to {}", exom_slash))
@@ -538,14 +541,14 @@ fn guard_write(
     None
 }
 
-fn guard_owner(
+async fn guard_owner(
     state: &AppState,
     maybe_user: &MaybeUser,
     exom_slash: &str,
 ) -> Option<axum::response::Response> {
     if let Some(ref auth_store) = state.auth_store {
         if let Some(ref user) = maybe_user.0 {
-            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store);
+            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
             if !level.is_owner() {
                 return Some(
                     ApiError::new(
@@ -570,7 +573,7 @@ async fn api_status(
     maybe_user: MaybeUser,
 ) -> impl IntoResponse {
     let exom = DEFAULT_EXOM;
-    if let Some(resp) = guard_read(&state, &maybe_user, exom) {
+    if let Some(resp) = guard_read(&state, &maybe_user, exom).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -671,7 +674,7 @@ async fn api_tree(
         Some(p) => match p.parse::<crate::path::TreePath>() {
             Ok(tp) => {
                 let path_slash = tp.to_slash_string();
-                if let Some(resp) = guard_read(&state, &maybe_user, &path_slash) {
+                if let Some(resp) = guard_read(&state, &maybe_user, &path_slash).await {
                     return resp;
                 }
                 crate::tree::walk(&tree_root, &tp, &opts)
@@ -719,7 +722,7 @@ async fn api_init(
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
     let path_slash = path.to_slash_string();
-    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash).await {
         return resp;
     }
     let tree_root = server_tree_root(&state);
@@ -743,7 +746,7 @@ async fn api_exom_new(
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
     let path_slash = path.to_slash_string();
-    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash).await {
         return resp;
     }
     let tree_root = server_tree_root(&state);
@@ -777,7 +780,7 @@ async fn api_session_new(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
-    if let Some(resp) = guard_write(&state, &maybe_user, &project_path.to_slash_string()) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &project_path.to_slash_string()).await {
         return resp;
     }
     let session_type = match body.session_type.as_deref().unwrap_or("") {
@@ -832,7 +835,7 @@ async fn api_session_join(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
-    if let Some(resp) = guard_write(&state, &maybe_user, &session_path.to_slash_string()) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &session_path.to_slash_string()).await {
         return resp;
     }
     if actor.is_empty() {
@@ -876,7 +879,7 @@ async fn api_branch_create(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_path.to_slash_string()) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_path.to_slash_string()).await {
         return resp;
     }
     if branch_name.is_empty() {
@@ -948,7 +951,7 @@ async fn api_rename(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
-    if let Some(resp) = guard_write(&state, &maybe_user, &path.to_slash_string()) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &path.to_slash_string()).await {
         return resp;
     }
     let tree_root = server_tree_root(&state);
@@ -969,7 +972,9 @@ async fn api_rename(
             if let Some(ref auth_store) = state.auth_store {
                 let old_slash = path.to_slash_string();
                 let new_slash = new_path.to_slash_string();
-                auth_store.update_share_paths(&old_slash, &new_slash);
+                auth_store
+                    .update_share_paths(&old_slash, &new_slash)
+                    .await;
             }
             emit_tree_changed(&state);
             Json(serde_json::json!({"ok": true, "new_path": new_path.to_slash_string()}))
@@ -1018,7 +1023,7 @@ async fn api_assert_fact(
     };
     let exom_slash = exom_path.to_slash_string();
 
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
 
@@ -1283,7 +1288,7 @@ async fn api_query_post(
                 .into_response();
         }
     };
-    if let Some(resp) = guard_read(&state, &maybe_user, &query.exom) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &query.exom).await {
         return resp;
     }
     let exoms = state.exoms.lock().unwrap();
@@ -1365,7 +1370,7 @@ async fn api_expand_query(
                 .into_response();
         }
     };
-    if let Some(resp) = guard_read(&state, &maybe_user, &query.exom) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &query.exom).await {
         return resp;
     }
     let exoms = state.exoms.lock().unwrap();
@@ -1447,8 +1452,12 @@ async fn api_eval_inner(
                 })
                 .collect();
             if !canonical_forms.is_empty() {
-                if let Err(e) =
-                    crate::auth::access::authorize_rayfall(user, &canonical_forms, auth_store)
+                if let Err(e) = crate::auth::access::authorize_rayfall(
+                    user,
+                    &canonical_forms,
+                    auth_store,
+                )
+                .await
                 {
                     return ApiError::new("forbidden", e.to_string())
                         .with_status(403)
@@ -1626,7 +1635,7 @@ async fn api_facts_valid_at(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -1682,7 +1691,7 @@ async fn api_facts_bitemporal(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -1724,7 +1733,7 @@ async fn api_fact_detail(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -1862,7 +1871,7 @@ async fn api_facts_list(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -1946,7 +1955,7 @@ async fn api_list_branches(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -2017,7 +2026,7 @@ async fn api_create_branch(
     };
     let exom_slash = exom_path.to_slash_string();
 
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
 
@@ -2054,7 +2063,7 @@ async fn api_branch_detail(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -2115,7 +2124,7 @@ async fn api_delete_branch_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let bid = branch_id.clone();
@@ -2155,7 +2164,7 @@ async fn api_switch_branch_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let bid = branch_id.clone();
@@ -2195,7 +2204,7 @@ async fn api_branch_diff_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -2273,7 +2282,7 @@ async fn api_merge_branch_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let src = source_branch.clone();
@@ -2320,7 +2329,7 @@ async fn api_explain(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let predicate = q.predicate.as_deref().unwrap_or("").to_string();
@@ -2393,7 +2402,7 @@ async fn api_export(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -2445,7 +2454,7 @@ async fn api_export_json(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -2519,7 +2528,7 @@ async fn api_import_json(
     };
     let exom_slash = exom_path.to_slash_string();
 
-    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
 
@@ -2611,7 +2620,7 @@ async fn api_retract_all(
     };
     let exom_slash = exom_path.to_slash_string();
 
-    if let Some(resp) = guard_owner(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_owner(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
 
@@ -2667,7 +2676,7 @@ async fn api_wipe(
     };
     let exom_slash = exom_path.to_slash_string();
 
-    if let Some(resp) = guard_owner(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_owner(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
 
@@ -2777,7 +2786,7 @@ async fn api_schema(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let include_samples = q.include_samples.as_deref() == Some("true");
@@ -2945,7 +2954,7 @@ async fn api_graph(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let limit = q.limit.unwrap_or(500);
@@ -2993,7 +3002,7 @@ async fn api_clusters(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -3031,7 +3040,7 @@ async fn api_cluster_detail_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -3072,7 +3081,7 @@ async fn api_logs(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -3104,7 +3113,7 @@ async fn api_provenance(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -3146,7 +3155,7 @@ async fn api_relation_graph(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -3188,7 +3197,7 @@ async fn api_derived_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
@@ -3235,7 +3244,7 @@ async fn api_belief_support_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
-    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let bid = belief_id.trim().to_string();
