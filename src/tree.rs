@@ -143,6 +143,9 @@ pub fn walk_root(tree_root: &std::path::Path, opts: &WalkOptions) -> std::io::Re
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let name = entry.file_name().to_string_lossy().to_string();
+            if name == "_system" {
+                continue;
+            }
             if entry.path().is_dir() {
                 let p: crate::path::TreePath = name.parse().map_err(|e: crate::path::PathError|
                     std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;

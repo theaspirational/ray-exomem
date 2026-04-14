@@ -307,40 +307,7 @@ fn share_readwrite_allows_mutation() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: system_path — top-admin gets read access, regular user denied
-// ---------------------------------------------------------------------------
-
-#[test]
-fn system_path_top_admin_can_read() {
-    let daemon = TestDaemonBuilder::new().with_auth().start();
-    // First user = top-admin.
-    let admin = daemon.mock_login("admin@co.com", "Admin");
-
-    let resp = query_exom(&daemon.base_url, &admin, "_system/auth", "user");
-    let status = status_of(&resp);
-    // 200 = query succeeded, 400 = exom may not exist but access was allowed
-    assert!(
-        status == 200 || status == 400,
-        "top-admin should be able to read _system/auth, got {status}"
-    );
-}
-
-#[test]
-fn system_path_regular_user_denied() {
-    let daemon = TestDaemonBuilder::new().with_auth().start();
-    let _admin = daemon.mock_login("admin@co.com", "Admin");
-    let regular = daemon.mock_login("user@co.com", "User");
-
-    let resp = query_exom(&daemon.base_url, &regular, "_system/auth", "user");
-    assert_eq!(
-        status_of(&resp),
-        403,
-        "regular user should be denied access to _system/auth"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 7: non_owner_cannot_create_share
+// Test 6: non_owner_cannot_create_share
 //
 // The /auth/shares POST handler DOES enforce ownership checks today.
 // This test verifies that bob cannot create a share on alice's path.
@@ -371,7 +338,7 @@ fn non_owner_cannot_create_share() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 8: share_invalid_permission_rejected
+// Test 7: share_invalid_permission_rejected
 //
 // Validates the permission enum at the /auth/shares endpoint.
 // ---------------------------------------------------------------------------
@@ -399,7 +366,7 @@ fn share_invalid_permission_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 9: shared_with_me_returns_200
+// Test 8: shared_with_me_returns_200
 //
 // Basic endpoint connectivity: /auth/shared-with-me returns 200 for an
 // authenticated user with an empty shares list.

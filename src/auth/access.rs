@@ -26,35 +26,22 @@ fn access_level_label(level: AccessLevel) -> &'static str {
 /// Resolve the effective access level for `user` at `path`.
 ///
 /// Evaluation order:
-/// 1. TopAdmin on `_system` -> ReadOnly
-/// 2. `_system` prefix -> Denied for everyone else
-/// 3. Admin or TopAdmin -> FullAccess
-/// 4. Path starts with user's email -> FullAccess (owner)
-/// 5. Share grants for (path, user.email) -> best match
-/// 6. Denied
+/// 1. Admin or TopAdmin -> FullAccess
+/// 2. Path starts with user's email -> FullAccess (owner)
+/// 3. Share grants for (path, user.email) -> best match
+/// 4. Denied
 pub fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
-    let is_system = path == "_system" || path.starts_with("_system/");
-
-    // 1-2. _system: top-admin gets read-only, everyone else denied
-    if is_system {
-        return if user.is_top_admin() {
-            AccessLevel::ReadOnly
-        } else {
-            AccessLevel::Denied
-        };
-    }
-
-    // 3. Admins get full access to non-system paths
+    // 1. Admins get full access
     if user.is_admin() {
         return AccessLevel::FullAccess;
     }
 
-    // 3. Owner namespace
+    // 2. Owner namespace
     if path == user.email || path.starts_with(&format!("{}/", user.email)) {
         return AccessLevel::FullAccess;
     }
 
-    // 4+5. Check share grants
+    // 3. Check share grants
     let grants = store.shares_for_grantee(&user.email);
     resolve_from_grants(path, &grants)
 }
@@ -217,34 +204,6 @@ mod tests {
         assert_eq!(
             resolve_from_grants("alice@co.com/projects", &grants),
             AccessLevel::Denied
-        );
-    }
-
-    #[test]
-    fn system_path_denied_for_regular_admin() {
-        let admin = user("admin@co.com", UserRole::Admin);
-        let store = make_test_store();
-        assert_eq!(
-            resolve_access(&admin, "_system", &store),
-            AccessLevel::Denied
-        );
-        assert_eq!(
-            resolve_access(&admin, "_system/auth", &store),
-            AccessLevel::Denied
-        );
-    }
-
-    #[test]
-    fn system_path_readonly_for_top_admin() {
-        let top = user("top@co.com", UserRole::TopAdmin);
-        let store = make_test_store();
-        assert_eq!(
-            resolve_access(&top, "_system", &store),
-            AccessLevel::ReadOnly
-        );
-        assert_eq!(
-            resolve_access(&top, "_system/auth", &store),
-            AccessLevel::ReadOnly
         );
     }
 
