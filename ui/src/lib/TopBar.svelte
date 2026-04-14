@@ -2,12 +2,18 @@
 	import { browser } from '$app/environment';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { ChevronRight, MoreHorizontal } from '@lucide/svelte';
+	import { ChevronRight, LogOut, MoreHorizontal, Shield, User } from '@lucide/svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
+	import { auth } from '$lib/auth.svelte';
 
 	let actor = $state('—');
 	let overflowOpen = $state(false);
+	let userMenuOpen = $state(false);
+
+	const userInitial = $derived(
+		auth.user?.display_name?.charAt(0).toUpperCase() ?? auth.user?.email?.charAt(0).toUpperCase() ?? '?'
+	);
 
 	const branchLabel = $derived(page.url.searchParams.get('branch') ?? 'main');
 
@@ -40,6 +46,13 @@
 	$effect(() => {
 		if (!overflowOpen || !browser) return;
 		const handler = () => { overflowOpen = false; };
+		setTimeout(() => document.addEventListener('click', handler, { once: true }), 0);
+		return () => document.removeEventListener('click', handler);
+	});
+
+	$effect(() => {
+		if (!userMenuOpen || !browser) return;
+		const handler = () => { userMenuOpen = false; };
 		setTimeout(() => document.addEventListener('click', handler, { once: true }), 0);
 		return () => document.removeEventListener('click', handler);
 	});
@@ -95,9 +108,57 @@
 	</Badge>
 
 	<div class="min-w-0 shrink-0 text-right">
-		<span class="inline-block max-w-[20vw] truncate font-sans text-xs text-zinc-300" title={actor}>
+		<span class="inline-block max-w-[14vw] truncate font-sans text-xs text-zinc-300" title={actor}>
 			<span class="text-zinc-500">actor</span>
 			<span class="ml-1.5 font-mono text-zinc-100">{actor}</span>
 		</span>
+	</div>
+
+	<div class="relative shrink-0">
+		<button
+			type="button"
+			class="flex size-7 items-center justify-center rounded-full bg-zinc-700 text-xs font-medium text-zinc-100 hover:bg-zinc-600"
+			onclick={(e) => { e.stopPropagation(); userMenuOpen = !userMenuOpen; }}
+			aria-label="User menu"
+			title={auth.user?.display_name ?? auth.user?.email ?? 'User'}
+		>
+			{userInitial}
+		</button>
+		{#if userMenuOpen}
+			<div class="absolute right-0 top-full z-30 mt-1 min-w-[13rem] rounded-md border border-zinc-700 bg-zinc-900 py-1 shadow-lg">
+				{#if auth.user?.email}
+					<div class="px-3 py-1.5 text-[11px] text-zinc-500 truncate" title={auth.user.email}>
+						{auth.user.email}
+					</div>
+				{/if}
+				<a
+					href="{base}/profile"
+					class="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+					onclick={() => { userMenuOpen = false; }}
+				>
+					<User class="size-3.5" />
+					Profile
+				</a>
+				{#if auth.isAdmin}
+					<a
+						href="{base}/admin"
+						class="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+						onclick={() => { userMenuOpen = false; }}
+					>
+						<Shield class="size-3.5" />
+						Admin
+					</a>
+				{/if}
+				<div class="my-1 border-t border-zinc-700"></div>
+				<button
+					type="button"
+					class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+					onclick={() => { userMenuOpen = false; auth.logout(); }}
+				>
+					<LogOut class="size-3.5" />
+					Logout
+				</button>
+			</div>
+		{/if}
 	</div>
 </header>
