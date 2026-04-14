@@ -88,8 +88,8 @@ pub fn validate_segment(seg: &str) -> Result<(), PathError> {
         return Err(PathError::InvalidSegment(seg.to_string(), "first char must be [_A-Za-z0-9-]"));
     }
     for c in chars {
-        if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
-            return Err(PathError::InvalidSegment(seg.to_string(), "chars must be [_A-Za-z0-9.-]"));
+        if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '@') {
+            return Err(PathError::InvalidSegment(seg.to_string(), "chars must be [_A-Za-z0-9.@-]"));
         }
     }
     Ok(())
@@ -159,5 +159,34 @@ mod tests {
         let p: TreePath = "work::ath".parse().unwrap();
         let root = PathBuf::from("/root/tree");
         assert_eq!(p.to_disk_path(&root), PathBuf::from("/root/tree/work/ath"));
+    }
+
+    #[test]
+    fn email_segment_is_valid() {
+        let p: TreePath = "alice@company.com/projects/main".parse().unwrap();
+        assert_eq!(p.segments(), &["alice@company.com", "projects", "main"]);
+    }
+
+    #[test]
+    fn at_sign_not_allowed_as_first_char() {
+        let err = "@alice".parse::<TreePath>().unwrap_err();
+        assert!(matches!(err, PathError::InvalidSegment(_, _)));
+    }
+
+    #[test]
+    fn email_segment_in_join() {
+        let root = TreePath::root();
+        let p = root.join("alice@company.com").unwrap();
+        assert_eq!(p.segments(), &["alice@company.com"]);
+    }
+
+    #[test]
+    fn email_to_disk_path() {
+        let p: TreePath = "alice@company.com/projects".parse().unwrap();
+        let root = std::path::PathBuf::from("/root/tree");
+        assert_eq!(
+            p.to_disk_path(&root),
+            std::path::PathBuf::from("/root/tree/alice@company.com/projects")
+        );
     }
 }
