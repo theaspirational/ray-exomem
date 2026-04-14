@@ -55,6 +55,16 @@ function fetchTimedOutMessage(): string {
 	return `Request timed out after ${DEFAULT_FETCH_TIMEOUT_MS / 1000}s. Run ray-exomem daemon, then reload this page.`;
 }
 
+async function handle401(res: Response): Promise<void> {
+	if (res.status === 401) {
+		if (browser) {
+			const { goto } = await import('$app/navigation');
+			goto('/login');
+		}
+		throw new Error('Authentication required');
+	}
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
 	const trimmed = baseUrl.trim().replace(/\/+$/, '');
 	return trimmed.endsWith('/ray-exomem') ? trimmed : `${trimmed}/ray-exomem`;
@@ -127,7 +137,7 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	let res: Response;
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS, init?.signal ?? null);
 	try {
-		res = await fetch(endpoint(path), { ...init, signal });
+		res = await fetch(endpoint(path), { ...init, signal, credentials: 'include' });
 		clear();
 	} catch (e) {
 		clear();
@@ -146,6 +156,7 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 		}
 		throw e instanceof Error ? e : new Error(msg);
 	}
+	await handle401(res);
 	if (!res.ok) {
 		throw new Error(`Request failed: ${res.status} ${res.statusText}`);
 	}
@@ -185,7 +196,8 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 			method: 'POST',
 			headers: mutationHeaders(),
 			body: body !== undefined ? JSON.stringify(body) : undefined,
-			signal
+			signal,
+			credentials: 'include'
 		});
 		clear();
 	} catch (e) {
@@ -194,6 +206,7 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 		const msg = e instanceof Error ? e.message : String(e);
 		throw new Error(msg);
 	}
+	await handle401(res);
 	if (!res.ok) {
 		throw new Error(`Action failed: ${res.status} ${res.statusText}`);
 	}
@@ -215,7 +228,8 @@ async function postText<T>(path: string, body: string): Promise<T> {
 			method: 'POST',
 			headers: evalHeaders(),
 			body,
-			signal
+			signal,
+			credentials: 'include'
 		});
 		clear();
 	} catch (e) {
@@ -223,6 +237,7 @@ async function postText<T>(path: string, body: string): Promise<T> {
 		if (signal.aborted) throw new Error(fetchTimedOutMessage());
 		throw e instanceof Error ? e : new Error(String(e));
 	}
+	await handle401(res);
 	if (!res.ok) throw new Error(`Action failed: ${res.status} ${res.statusText}`);
 	return res.json();
 }
@@ -392,7 +407,7 @@ export async function fetchGuideMarkdown(signal?: AbortSignal): Promise<string> 
 	const { signal: merged, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS, signal);
 	let res: Response;
 	try {
-		res = await fetch(url, { signal: merged });
+		res = await fetch(url, { signal: merged, credentials: 'include' });
 		clear();
 	} catch (e) {
 		clear();
@@ -402,6 +417,7 @@ export async function fetchGuideMarkdown(signal?: AbortSignal): Promise<string> 
 		}
 		throw e instanceof Error ? e : new Error(String(e));
 	}
+	await handle401(res);
 	if (!res.ok) throw new Error(`Guide failed: ${res.status} ${res.statusText}`);
 	return res.text();
 }
@@ -513,13 +529,14 @@ export async function exportBackup(exom = DEFAULT_EXOM): Promise<void> {
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
 	let res: Response;
 	try {
-		res = await fetch(url, { signal });
+		res = await fetch(url, { signal, credentials: 'include' });
 		clear();
 	} catch (e) {
 		clear();
 		if (signal.aborted) throw new Error(fetchTimedOutMessage());
 		throw e instanceof Error ? e : new Error(String(e));
 	}
+	await handle401(res);
 	if (!res.ok) throw new Error(`Export failed: ${res.status}`);
 	const text = await res.text();
 	const blob = new Blob([text], { type: 'text/plain' });
@@ -535,7 +552,7 @@ export async function exportBackupText(exom = DEFAULT_EXOM, signal?: AbortSignal
 	const { signal: merged, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS, signal);
 	let res: Response;
 	try {
-		res = await fetch(url, { signal: merged });
+		res = await fetch(url, { signal: merged, credentials: 'include' });
 		clear();
 	} catch (e) {
 		clear();
@@ -545,6 +562,7 @@ export async function exportBackupText(exom = DEFAULT_EXOM, signal?: AbortSignal
 		}
 		throw e instanceof Error ? e : new Error(String(e));
 	}
+	await handle401(res);
 	if (!res.ok) throw new Error(`Export failed: ${res.status}`);
 	return res.text();
 }
@@ -1084,7 +1102,8 @@ async function deleteRequest(path: string): Promise<void> {
 		res = await fetch(endpoint(path), {
 			method: 'DELETE',
 			headers: actorHeaders(),
-			signal
+			signal,
+			credentials: 'include'
 		});
 		clear();
 	} catch (e) {
@@ -1092,6 +1111,7 @@ async function deleteRequest(path: string): Promise<void> {
 		if (signal.aborted) throw new Error(fetchTimedOutMessage());
 		throw e instanceof Error ? e : new Error(String(e));
 	}
+	await handle401(res);
 	if (!res.ok) throw new Error(`Delete failed: ${res.status} ${res.statusText}`);
 }
 
