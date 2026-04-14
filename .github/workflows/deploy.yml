@@ -1,0 +1,65 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  BINARY_NAME: ray-exomem
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Deploy to server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SERVER_HOST_KEY }}" >> ~/.ssh/known_hosts
+
+          # Upload binary
+          scp -i ~/.ssh/deploy_key \
+            target/release/$BINARY_NAME \
+            ${SERVER_USER}@${SERVER_HOST}:/home/${SERVER_USER}/apps/ray-exomem/bin/${BINARY_NAME}.new
+
+          # Atomic swap + restart
+          ssh -i ~/.ssh/deploy_key ${SERVER_USER}@${SERVER_HOST} '
+            cd ~/apps/ray-exomem/bin
+            mv ray-exomem.new ray-exomem
+            chmod +x ray-exomem
+            systemctl --user restart ray-exomem.service
+            sleep 2
+            systemctl --user is-active ray-exomem.service
+          '
