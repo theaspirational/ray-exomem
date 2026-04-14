@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -148,6 +148,42 @@ impl AppState {
 
         Ok(Arc::new(AppState::new(engine, exoms, tree_root, sym_path, None)))
     }
+
+    /// Re-load exom data from ExomDb when available. Call after initial disk loading.
+    pub async fn reload_exoms_from_db(&self) {
+        let Some(ref exom_db) = self.exom_db else {
+            return;
+        };
+        let Some(ref tree_root) = self.tree_root else {
+            return;
+        };
+        let Some(ref sym_path) = self.sym_path else {
+            return;
+        };
+
+        let keys: Vec<String> = {
+            let exoms = self.exoms.lock().unwrap();
+            exoms.keys().cloned().collect()
+        };
+
+        for key in keys {
+            let disk = tree_root.join(&key);
+            match load_exom_preferring_db(Some(exom_db), &disk, sym_path, &key).await {
+                Ok(es) => {
+                    let mut exoms = self.exoms.lock().unwrap();
+                    exoms.insert(key.clone(), es);
+                    let datoms = &exoms.get(&key).expect("just inserted").datoms;
+                    let _ = self
+                        .engine
+                        .bind_named_db(storage::sym_intern(&key), datoms);
+                }
+                Err(e) => eprintln!(
+                    "[ray-exomem] WARNING: DB reload for '{}': {}",
+                    key, e
+                ),
+            }
+        }
+    }
 }
 
 fn load_tree_exoms_into(
@@ -192,6 +228,114 @@ fn load_exom_from_tree_path_inner(
     slash_key: &str,
 ) -> anyhow::Result<ExomState> {
     load_exom_from_tree_path(exom_disk, sym_path, slash_key)
+}
+
+/// Load an exom, preferring Postgres data when ExomDb is available and has data.
+/// Falls back to disk (splay/JSONL) otherwise.
+async fn load_exom_preferring_db(
+    exom_db: Option<&Arc<dyn crate::db::ExomDb>>,
+    exom_disk: &std::path::Path,
+    sym_path: &std::path::Path,
+    slash_key: &str,
+) -> anyhow::Result<ExomState> {
+    if let Some(db) = exom_db {
+        let txs = db.load_transactions(slash_key).await?;
+        if !txs.is_empty() {
+            let mut brain =
+                Brain::open_exom_from_db(db.as_ref(), slash_key, exom_disk, sym_path).await?;
+
+            let meta_p = exom_disk.join(crate::exom::META_FILENAME);
+            if meta_p.exists() {
+                if let Ok(meta) = crate::exom::read_meta(exom_disk) {
+                    if brain
+                        .branches()
+                        .iter()
+                        .any(|b| b.branch_id == meta.current_branch && !b.archived)
+                    {
+                        let _ = brain.switch_branch(&meta.current_branch);
+                    }
+                }
+            }
+            let datoms = storage::build_datoms_table(&brain)?;
+            let rules_p = exom_disk.join("rules.ray");
+            let rules = if rules_p.exists() {
+                let src = std::fs::read_to_string(&rules_p)?;
+                let mut out = Vec::new();
+                for line in src.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    out.push(crate::rules::parse_rule_line(
+                        line,
+                        context::MutationContext::default(),
+                        String::new(),
+                    )?);
+                }
+                out
+            } else {
+                Vec::new()
+            };
+            let schema_p = exom_disk.join(system_schema::SCHEMA_FILENAME);
+            let ontology = system_schema::build_exom_ontology(slash_key, &brain, &rules);
+            let _ = system_schema::save_exom_ontology(&schema_p, &ontology);
+            return Ok(ExomState {
+                brain,
+                datoms,
+                rules,
+                exom_disk: Some(exom_disk.to_path_buf()),
+            });
+        }
+    }
+    load_exom_from_tree_path(exom_disk, sym_path, slash_key)
+}
+
+/// Same tree walk as [`load_tree_exoms_into`], but uses [`load_exom_preferring_db`].
+#[allow(dead_code)]
+async fn load_tree_exoms_into_async(
+    tree_root: &Path,
+    sym_path: &Path,
+    exom_db: Option<&Arc<dyn crate::db::ExomDb>>,
+    out: &mut HashMap<String, ExomState>,
+) {
+    fn collect_exom_paths(tree_root: &Path, current: &Path, paths: &mut Vec<(PathBuf, String)>) {
+        let Ok(rd) = std::fs::read_dir(current) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let disk = entry.path();
+            let rel = disk.strip_prefix(tree_root).unwrap_or(&disk);
+            let slash_key = rel
+                .components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .collect::<Vec<_>>()
+                .join("/");
+            if slash_key.is_empty() {
+                continue;
+            }
+            if disk.join(crate::exom::META_FILENAME).exists() {
+                paths.push((disk, slash_key));
+                continue;
+            }
+            collect_exom_paths(tree_root, &disk, paths);
+        }
+    }
+    let mut paths = Vec::new();
+    collect_exom_paths(tree_root, tree_root, &mut paths);
+    for (disk, slash_key) in paths {
+        eprintln!("[ray-exomem] loading tree exom '{}'", slash_key);
+        match load_exom_preferring_db(exom_db, &disk, sym_path, &slash_key).await {
+            Ok(es) => {
+                out.insert(slash_key, es);
+            }
+            Err(e) => eprintln!(
+                "[ray-exomem] WARNING: failed to load '{}': {}",
+                slash_key, e
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +474,8 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
             });
         }
     }
+
+    state.reload_exoms_from_db().await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
