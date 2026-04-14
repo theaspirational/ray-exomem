@@ -3,19 +3,14 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { ChevronRight, LogOut, MoreHorizontal, Shield, User } from '@lucide/svelte';
-	import { Badge } from '$lib/components/ui/badge/index.js';
-	import { actorPrompt } from '$lib/actorPrompt.svelte';
 	import { auth } from '$lib/auth.svelte';
 
-	let actor = $state('—');
 	let overflowOpen = $state(false);
 	let userMenuOpen = $state(false);
 
 	const userInitial = $derived(
 		auth.user?.display_name?.charAt(0).toUpperCase() ?? auth.user?.email?.charAt(0).toUpperCase() ?? '?'
 	);
-
-	const branchLabel = $derived(page.url.searchParams.get('branch') ?? 'main');
 
 	const crumbs = $derived.by(() => {
 		let pathname = String(page.url.pathname);
@@ -35,12 +30,6 @@
 				href: `${base}/tree/${segments.slice(0, i + 1).join('/')}`
 			}))
 		];
-	});
-
-	$effect(() => {
-		if (!browser) return;
-		actorPrompt.refreshSignal;
-		actor = localStorage.getItem('ray-exomem-actor')?.trim() || '—';
 	});
 
 	$effect(() => {
@@ -99,20 +88,6 @@
 			>{crumb.label}</a>
 		{/each}
 	</nav>
-
-	<Badge
-		variant="secondary"
-		class="shrink-0 border border-zinc-600 bg-zinc-800 font-mono text-[11px] text-zinc-100"
-	>
-		{branchLabel}
-	</Badge>
-
-	<div class="min-w-0 shrink-0 text-right">
-		<span class="inline-block max-w-[14vw] truncate font-sans text-xs text-zinc-300" title={actor}>
-			<span class="text-zinc-500">actor</span>
-			<span class="ml-1.5 font-mono text-zinc-100">{actor}</span>
-		</span>
-	</div>
 
 	<div class="relative shrink-0">
 		<button
