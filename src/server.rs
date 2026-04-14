@@ -39,6 +39,7 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9780";
 pub const DEFAULT_EXOM: &str = "main";
 
 use crate::{
+    auth::middleware::MaybeUser,
     backend::RayforceEngine,
     brain::{self, Brain, MergePolicy},
     context::{self, MutationContext},
@@ -481,12 +482,81 @@ fn emit_tree_changed(state: &AppState) {
         .send(r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string());
 }
 
+fn guard_read(
+    state: &AppState,
+    maybe_user: &MaybeUser,
+    exom_slash: &str,
+) -> Option<axum::response::Response> {
+    if let Some(ref auth_store) = state.auth_store {
+        if let Some(ref user) = maybe_user.0 {
+            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store);
+            if !level.can_read() {
+                return Some(
+                    ApiError::new("forbidden", format!("read access denied to {}", exom_slash))
+                        .with_status(403)
+                        .into_response(),
+                );
+            }
+        }
+    }
+    None
+}
+
+fn guard_write(
+    state: &AppState,
+    maybe_user: &MaybeUser,
+    exom_slash: &str,
+) -> Option<axum::response::Response> {
+    if let Some(ref auth_store) = state.auth_store {
+        if let Some(ref user) = maybe_user.0 {
+            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store);
+            if !level.can_write() {
+                return Some(
+                    ApiError::new("forbidden", format!("write access denied to {}", exom_slash))
+                        .with_status(403)
+                        .into_response(),
+                );
+            }
+        }
+    }
+    None
+}
+
+fn guard_owner(
+    state: &AppState,
+    maybe_user: &MaybeUser,
+    exom_slash: &str,
+) -> Option<axum::response::Response> {
+    if let Some(ref auth_store) = state.auth_store {
+        if let Some(ref user) = maybe_user.0 {
+            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store);
+            if !level.is_owner() {
+                return Some(
+                    ApiError::new(
+                        "forbidden",
+                        format!("owner access required for {}", exom_slash),
+                    )
+                    .with_status(403)
+                    .into_response(),
+                );
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn api_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn api_status(
+    State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
+) -> impl IntoResponse {
     let exom = DEFAULT_EXOM;
+    if let Some(resp) = guard_read(&state, &maybe_user, exom) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root_val = state.tree_root.as_deref();
     let sym_path_val = state.sym_path.as_deref();
@@ -497,7 +567,8 @@ async fn api_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "exom not found"})),
-        );
+        )
+            .into_response();
     };
     let brain = &es.brain;
     let uptime = state.start_time.elapsed().as_secs();
@@ -505,7 +576,10 @@ async fn api_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let beliefs = brain.current_beliefs();
     let all_rules = match combined_rules(exom, &es.rules) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                .into_response();
+        }
     };
     let derived_names: Vec<String> = rules::derived_predicates(&all_rules)
         .into_iter()
@@ -553,7 +627,7 @@ async fn api_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "user_predicates": ontology.user_predicates,
         }
     });
-    (StatusCode::OK, Json(status))
+    (StatusCode::OK, Json(status)).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -567,6 +641,7 @@ struct TreeQuery {
 
 async fn api_tree(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<TreeQuery>,
 ) -> impl IntoResponse {
     let tree_root = server_tree_root(&state);
@@ -579,7 +654,13 @@ async fn api_tree(
     let result = match q.path.as_deref().filter(|s| !s.is_empty()) {
         None => crate::tree::walk_root(&tree_root, &opts),
         Some(p) => match p.parse::<crate::path::TreePath>() {
-            Ok(tp) => crate::tree::walk(&tree_root, &tp, &opts),
+            Ok(tp) => {
+                let path_slash = tp.to_slash_string();
+                if let Some(resp) = guard_read(&state, &maybe_user, &path_slash) {
+                    return resp;
+                }
+                crate::tree::walk(&tree_root, &tp, &opts)
+            }
             Err(e) => {
                 let err = ApiError::new("bad_path", e.to_string());
                 return err.into_response();
@@ -614,6 +695,7 @@ struct PathBody {
 
 async fn api_init(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(body): Json<PathBody>,
 ) -> impl IntoResponse {
     let path_str = body.path.unwrap_or_default();
@@ -621,6 +703,10 @@ async fn api_init(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    let path_slash = path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash) {
+        return resp;
+    }
     let tree_root = server_tree_root(&state);
     match crate::scaffold::init_project(&tree_root, &path) {
         Ok(()) => {
@@ -633,6 +719,7 @@ async fn api_init(
 
 async fn api_exom_new(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(body): Json<PathBody>,
 ) -> impl IntoResponse {
     let path_str = body.path.unwrap_or_default();
@@ -640,6 +727,10 @@ async fn api_exom_new(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    let path_slash = path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash) {
+        return resp;
+    }
     let tree_root = server_tree_root(&state);
     match crate::scaffold::new_bare_exom(&tree_root, &path) {
         Ok(()) => {
@@ -663,6 +754,7 @@ struct SessionNewBody {
 
 async fn api_session_new(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(body): Json<SessionNewBody>,
 ) -> impl IntoResponse {
     let project_path_str = body.project_path.unwrap_or_default();
@@ -670,6 +762,9 @@ async fn api_session_new(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    if let Some(resp) = guard_write(&state, &maybe_user, &project_path.to_slash_string()) {
+        return resp;
+    }
     let session_type = match body.session_type.as_deref().unwrap_or("") {
         "multi" => crate::exom::SessionType::Multi,
         "single" => crate::exom::SessionType::Single,
@@ -682,7 +777,11 @@ async fn api_session_new(
         }
     };
     let label = body.label.unwrap_or_default();
-    let actor = body.actor.unwrap_or_default();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        body.actor.unwrap_or_default()
+    };
     let tree_root = server_tree_root(&state);
     match brain::session_new(&tree_root, &project_path, session_type, &label, &actor, &body.agents) {
         Ok(session_path) => {
@@ -705,14 +804,22 @@ struct SessionJoinBody {
 
 async fn api_session_join(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(body): Json<SessionJoinBody>,
 ) -> impl IntoResponse {
     let session_path_str = body.session_path.unwrap_or_default();
-    let actor = body.actor.unwrap_or_default();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        body.actor.unwrap_or_default()
+    };
     let session_path: crate::path::TreePath = match session_path_str.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    if let Some(resp) = guard_write(&state, &maybe_user, &session_path.to_slash_string()) {
+        return resp;
+    }
     if actor.is_empty() {
         return ApiError::new("actor_required", "actor required")
             .with_suggestion("pass actor in request body")
@@ -740,15 +847,23 @@ struct BranchCreateBody {
 
 async fn api_branch_create(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(body): Json<BranchCreateBody>,
 ) -> impl IntoResponse {
     let exom_path_str = body.exom_path.unwrap_or_default();
     let branch_name = body.branch_name.unwrap_or_default();
-    let actor = body.actor.unwrap_or_default();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        body.actor.unwrap_or_default()
+    };
     let exom_path: crate::path::TreePath = match exom_path_str.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_path.to_slash_string()) {
+        return resp;
+    }
     if branch_name.is_empty() {
         return ApiError::new("branch_name_required", "branch_name required").into_response();
     }
@@ -809,6 +924,7 @@ struct RenameBody {
 
 async fn api_rename(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(body): Json<RenameBody>,
 ) -> impl IntoResponse {
     let path_str = body.path.unwrap_or_default();
@@ -817,6 +933,9 @@ async fn api_rename(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    if let Some(resp) = guard_write(&state, &maybe_user, &path.to_slash_string()) {
+        return resp;
+    }
     let tree_root = server_tree_root(&state);
     let disk = path.to_disk_path(&tree_root);
     if crate::tree::classify(&disk) == crate::tree::NodeKind::Exom {
@@ -869,6 +988,7 @@ fn default_confidence() -> f64 {
 
 async fn api_assert_fact(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Json(req): Json<AssertFactBody>,
 ) -> impl IntoResponse {
     let exom_raw = req.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -878,10 +998,18 @@ async fn api_assert_fact(
     };
     let exom_slash = exom_path.to_slash_string();
 
-    let actor_str = match req.actor.as_deref().filter(|s| !s.is_empty()) {
-        Some(a) => a.to_string(),
-        None => {
-            return ApiError::from(brain::WriteError::ActorRequired).into_response();
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
+
+    let actor_str = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        match req.actor.as_deref().filter(|s| !s.is_empty()) {
+            Some(a) => a.to_string(),
+            None => {
+                return ApiError::from(brain::WriteError::ActorRequired).into_response();
+            }
         }
     };
 
@@ -1106,6 +1234,7 @@ struct QueryParams {
 
 async fn api_query_get(
     State(state): State<Arc<AppState>>,
+    _maybe_user: MaybeUser,
     Query(params): Query<QueryParams>,
 ) -> impl IntoResponse {
     // GET with body is non-standard; just return an error directing to POST
@@ -1118,11 +1247,25 @@ async fn api_query_get(
 
 async fn api_query_post(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let source = String::from_utf8_lossy(&body).into_owned();
+    let query = match lower_query_request(&source, None, "api/query") {
+        Ok(q) => q,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    if let Some(resp) = guard_read(&state, &maybe_user, &query.exom) {
+        return resp;
+    }
     let exoms = state.exoms.lock().unwrap();
-    let expanded = match expand_query(&exoms, &state.engine, &source, None, "api/query") {
+    let expanded = match expand_canonical_query(&exoms, &state.engine, source.clone(), &query) {
         Ok(e) => e,
         Err(err) => {
             return (
@@ -1186,11 +1329,25 @@ async fn api_query_post(
 
 async fn api_expand_query(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let source = String::from_utf8_lossy(&body).into_owned();
+    let query = match lower_query_request(&source, None, "api/expand-query") {
+        Ok(q) => q,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    if let Some(resp) = guard_read(&state, &maybe_user, &query.exom) {
+        return resp;
+    }
     let exoms = state.exoms.lock().unwrap();
-    match expand_query(&exoms, &state.engine, &source, None, "api/expand-query") {
+    match expand_canonical_query(&exoms, &state.engine, source.clone(), &query) {
         Ok(expanded) => Json(serde_json::json!({
             "ok": true,
             "original_source": expanded.original_source,
@@ -1213,24 +1370,36 @@ async fn api_expand_query(
 
 async fn api_eval(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
-    let ctx = MutationContext {
-        actor: actor.clone(),
-        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    let ctx = if let Some(ref user) = maybe_user.0 {
+        MutationContext::from_user(
+            user,
+            headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        )
+    } else {
+        let actor = headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string();
+        MutationContext {
+            actor,
+            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        }
     };
-    api_eval_inner(state, ctx, body).await
+    api_eval_inner(state, maybe_user, ctx, body).await
 }
 
 async fn api_eval_inner(
     state: Arc<AppState>,
+    maybe_user: MaybeUser,
     ctx: MutationContext,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
@@ -1245,6 +1414,26 @@ async fn api_eval_inner(
                 .into_response();
         }
     };
+    if let Some(ref auth_store) = state.auth_store {
+        if let Some(ref user) = maybe_user.0 {
+            let canonical_forms: Vec<_> = forms
+                .iter()
+                .filter_map(|f| match f {
+                    EvalForm::Canonical(c) => Some(c.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !canonical_forms.is_empty() {
+                if let Err(e) =
+                    crate::auth::access::authorize_rayfall(user, &canonical_forms, auth_store)
+                {
+                    return ApiError::new("forbidden", e.to_string())
+                        .with_status(403)
+                        .into_response();
+                }
+            }
+        }
+    }
     let mut last_result = String::new();
     let mut last_decoded: Option<serde_json::Value> = None;
     let mut exoms = state.exoms.lock().unwrap();
@@ -1368,7 +1557,10 @@ async fn api_evaluate_noop() -> impl IntoResponse {
 // POST /actions/consolidate-propose (501)
 // ---------------------------------------------------------------------------
 
-async fn api_consolidate_propose() -> impl IntoResponse {
+async fn api_consolidate_propose(
+    State(_state): State<Arc<AppState>>,
+    _maybe_user: MaybeUser,
+) -> impl IntoResponse {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({"ok": false, "error": "consolidation propose API is not implemented yet"})),
@@ -1392,6 +1584,7 @@ struct ValidAtQuery {
 
 async fn api_facts_valid_at(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ValidAtQuery>,
 ) -> impl IntoResponse {
     let timestamp = match q.timestamp.as_deref().filter(|s| !s.is_empty()) {
@@ -1410,6 +1603,9 @@ async fn api_facts_valid_at(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1445,6 +1641,7 @@ struct BitemporalQuery {
 
 async fn api_facts_bitemporal(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<BitemporalQuery>,
 ) -> impl IntoResponse {
     let timestamp = q.timestamp.as_deref().unwrap_or("");
@@ -1462,6 +1659,9 @@ async fn api_facts_bitemporal(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1491,6 +1691,7 @@ async fn api_facts_bitemporal(
 
 async fn api_fact_detail(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
@@ -1500,6 +1701,9 @@ async fn api_fact_detail(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1626,6 +1830,7 @@ struct FactsListQuery {
 
 async fn api_facts_list(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<FactsListQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -1634,6 +1839,9 @@ async fn api_facts_list(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1706,6 +1914,7 @@ async fn api_facts_list(
 
 async fn api_list_branches(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -1714,6 +1923,9 @@ async fn api_list_branches(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1749,18 +1961,29 @@ struct CreateBranchBody {
 
 async fn api_create_branch(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     headers: axum::http::HeaderMap,
     Json(body): Json<CreateBranchBody>,
 ) -> impl IntoResponse {
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
-    let ctx = MutationContext {
-        actor: actor.clone(),
-        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    let ctx = if let Some(ref user) = maybe_user.0 {
+        MutationContext::from_user(
+            user,
+            headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        )
+    } else {
+        let actor = headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string();
+        MutationContext {
+            actor: actor.clone(),
+            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        }
     };
 
     let exom_raw = body.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -1770,9 +1993,13 @@ async fn api_create_branch(
     };
     let exom_slash = exom_path.to_slash_string();
 
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
+
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
-        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &actor) {
+        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
             return ApiError::from(e).into_response();
         }
     }
@@ -1793,6 +2020,7 @@ async fn api_create_branch(
 
 async fn api_branch_detail(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(branch_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
@@ -1802,6 +2030,9 @@ async fn api_branch_detail(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1834,15 +2065,20 @@ async fn api_branch_detail(
 
 async fn api_delete_branch_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(branch_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string()
+    };
     let _ctx = MutationContext {
         actor: actor.clone(),
         session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
@@ -1854,6 +2090,9 @@ async fn api_delete_branch_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let bid = branch_id.clone();
     let result = mutate_exom(&state, &exom_slash, move |ex| {
         ex.brain.archive_branch(&bid)?;
@@ -1871,21 +2110,29 @@ async fn api_delete_branch_handler(
 
 async fn api_switch_branch_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(branch_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string()
+    };
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let bid = branch_id.clone();
     let result = mutate_exom(&state, &exom_slash, move |ex| {
         ex.brain.switch_branch(&bid)?;
@@ -1912,6 +2159,7 @@ struct DiffQuery {
 
 async fn api_branch_diff_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(branch_id): AxumPath<String>,
     Query(q): Query<DiffQuery>,
 ) -> impl IntoResponse {
@@ -1922,6 +2170,9 @@ async fn api_branch_diff_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -1959,15 +2210,30 @@ struct MergeBranchBody {
 
 async fn api_merge_branch_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(source_branch): AxumPath<String>,
     headers: axum::http::HeaderMap,
     Json(body): Json<MergeBranchBody>,
 ) -> impl IntoResponse {
-    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
-    let ctx = MutationContext {
-        actor: actor.clone(),
-        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    let ctx = if let Some(ref user) = maybe_user.0 {
+        MutationContext::from_user(
+            user,
+            headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        )
+    } else {
+        let actor = headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string();
+        MutationContext {
+            actor,
+            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        }
     };
     let policy = match body.policy.as_deref().unwrap_or("last-writer-wins") {
         "last-writer-wins" => MergePolicy::LastWriterWins,
@@ -1981,6 +2247,9 @@ async fn api_merge_branch_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let src = source_branch.clone();
     let result = mutate_exom(&state, &exom_slash, move |ex| {
         let target = ex.brain.current_branch_id().to_string();
@@ -2016,6 +2285,7 @@ struct ExplainQuery {
 
 async fn api_explain(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExplainQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2024,6 +2294,9 @@ async fn api_explain(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let predicate = q.predicate.as_deref().unwrap_or("").to_string();
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
@@ -2085,6 +2358,7 @@ async fn api_explain(
 
 async fn api_export(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2093,6 +2367,9 @@ async fn api_export(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2133,6 +2410,7 @@ async fn api_export(
 
 async fn api_export_json(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2141,6 +2419,9 @@ async fn api_export_json(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2175,6 +2456,7 @@ async fn api_export_json(
 
 async fn api_import_json(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -2195,13 +2477,25 @@ async fn api_import_json(
         rules: Vec<String>,
     }
 
-    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string()
+    };
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+
+    if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
 
     let payload: ImportPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
@@ -2257,15 +2551,31 @@ async fn api_import_json(
 
 async fn api_retract_all(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
-    let ctx = MutationContext {
-        actor: actor.clone(),
-        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+    let ctx = if let Some(ref user) = maybe_user.0 {
+        MutationContext::from_user(
+            user,
+            headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        )
+    } else {
+        let actor = headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string();
+        MutationContext {
+            actor: actor.clone(),
+            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        }
     };
+    let actor = ctx.actor.clone();
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
@@ -2273,9 +2583,13 @@ async fn api_retract_all(
     };
     let exom_slash = exom_path.to_slash_string();
 
+    if let Some(resp) = guard_owner(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
+
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
-        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &actor) {
+        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
             return ApiError::from(e).into_response();
         }
     }
@@ -2305,16 +2619,29 @@ async fn api_retract_all(
 
 async fn api_wipe(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string()
+    };
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+
+    if let Some(resp) = guard_owner(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
 
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
@@ -2350,9 +2677,27 @@ async fn api_wipe(
 
 async fn api_factory_reset(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).unwrap_or("anonymous").to_string();
+    if let Some(ref _auth_store) = state.auth_store {
+        if let Some(ref user) = maybe_user.0 {
+            if !user.is_admin() {
+                return ApiError::new("forbidden", "factory-reset requires admin access")
+                    .with_status(403)
+                    .into_response();
+            }
+        }
+    }
+    let actor = if let Some(ref user) = maybe_user.0 {
+        user.email.clone()
+    } else {
+        headers
+            .get("x-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string()
+    };
     let mut exoms = state.exoms.lock().unwrap();
     let old_names: Vec<String> = exoms.keys().cloned().collect();
     exoms.clear();
@@ -2395,6 +2740,7 @@ struct SchemaQuery {
 
 async fn api_schema(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<SchemaQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2403,6 +2749,9 @@ async fn api_schema(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let include_samples = q.include_samples.as_deref() == Some("true");
     let sample_limit = q.sample_limit.unwrap_or(10);
     let filter_relation = q.relation.clone();
@@ -2559,6 +2908,7 @@ struct GraphQuery {
 
 async fn api_graph(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<GraphQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2567,6 +2917,9 @@ async fn api_graph(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let limit = q.limit.unwrap_or(500);
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
@@ -2603,6 +2956,7 @@ async fn api_graph(
 
 async fn api_clusters(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2611,6 +2965,9 @@ async fn api_clusters(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2636,6 +2993,7 @@ async fn api_clusters(
 
 async fn api_cluster_detail_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
@@ -2645,6 +3003,9 @@ async fn api_cluster_detail_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2674,6 +3035,7 @@ async fn api_cluster_detail_handler(
 
 async fn api_logs(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2682,6 +3044,9 @@ async fn api_logs(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2702,6 +3067,7 @@ async fn api_logs(
 
 async fn api_provenance(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2710,6 +3076,9 @@ async fn api_provenance(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2740,6 +3109,7 @@ async fn api_provenance(
 
 async fn api_relation_graph(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2748,6 +3118,9 @@ async fn api_relation_graph(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2774,6 +3147,7 @@ async fn api_relation_graph(
 
 async fn api_derived_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(pred_name): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
@@ -2786,6 +3160,9 @@ async fn api_derived_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
@@ -2820,6 +3197,7 @@ async fn api_derived_handler(
 
 async fn api_belief_support_handler(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
     AxumPath(belief_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
@@ -2829,6 +3207,9 @@ async fn api_belief_support_handler(
         Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
     };
     let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash) {
+        return resp;
+    }
     let bid = belief_id.trim().to_string();
     if bid.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing belief id"}))).into_response();

@@ -298,6 +298,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            share_grants: Mutex::new(Vec::new()),
         }
     }
 }

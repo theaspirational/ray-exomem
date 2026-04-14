@@ -13,6 +13,8 @@ pub struct AuthStore {
     pub session_cache: DashMap<String, User>,
     pub api_key_cache: DashMap<String, User>,
     pub allowed_domains: Mutex<Vec<String>>,
+    /// In-memory share grants until persisted to the system exom (see TODO on create_share).
+    pub share_grants: Mutex<Vec<ShareGrant>>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,7 @@ impl AuthStore {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(domains),
+            share_grants: Mutex::new(Vec::new()),
         })
     }
 
@@ -118,9 +121,18 @@ impl AuthStore {
         UserRole::Regular
     }
 
-    /// Placeholder — returns empty.
-    pub fn shares_for_grantee(&self, _grantee_email: &str) -> Vec<ShareGrant> {
-        Vec::new()
+    pub fn add_share_grant(&self, grant: ShareGrant) {
+        self.share_grants.lock().unwrap().push(grant);
+    }
+
+    pub fn shares_for_grantee(&self, grantee_email: &str) -> Vec<ShareGrant> {
+        self.share_grants
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|g| g.grantee_email == grantee_email)
+            .cloned()
+            .collect()
     }
 
     /// Placeholder — returns empty.
@@ -191,6 +203,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(domains.to_vec()),
+            share_grants: Mutex::new(Vec::new()),
         }
     }
 }

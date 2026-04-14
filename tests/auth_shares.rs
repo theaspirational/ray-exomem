@@ -91,10 +91,8 @@ fn status_of(result: &Result<ureq::Response, ureq::Error>) -> u16 {
 // ---------------------------------------------------------------------------
 // Test 1: owner_can_create_and_query_exom
 //
-// The API handlers do not yet enforce access checks via the User extractor,
-// so this test verifies the happy path works end-to-end: create exom and
-// assert a fact. The auth layer is active but the API routes accept any
-// authenticated user for now.
+// End-to-end: owner creates an exom in their namespace, asserts a fact, and
+// reads tree data for that path.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -143,15 +141,10 @@ fn owner_can_create_and_query_exom() {
 // ---------------------------------------------------------------------------
 // Test 2: non_owner_denied_without_share
 //
-// TODO: enable once api handlers enforce access checks (Task 11 Step 4).
-// Currently, the /ray-exomem/api/* handlers don't use the User extractor
-// and don't call resolve_access, so any authenticated user can query any
-// exom. This test documents the expected behavior for when enforcement is
-// wired.
+// Verifies that a non-owner cannot query another user's exom without a share.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "api handlers do not yet enforce access checks — enable after Task 11 Step 4"]
 fn non_owner_denied_without_share() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
     let alice = daemon.mock_login("alice@co.com", "Alice");
@@ -177,9 +170,8 @@ fn non_owner_denied_without_share() {
 // ---------------------------------------------------------------------------
 // Test 3: share_read_allows_query
 //
-// Tests that the /auth/shares endpoint correctly creates a share grant.
-// The actual query-level enforcement is not yet wired (see Test 2), but
-// the share creation and listing via /auth/shared-with-me IS functional.
+// Tests that the /auth/shares endpoint correctly creates a share grant and
+// that shared-with-me lists shares for the grantee.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -233,11 +225,10 @@ fn share_read_allows_query() {
 // ---------------------------------------------------------------------------
 // Test 4: share_read_denies_mutation
 //
-// TODO: enable once api handlers enforce access checks (Task 11 Step 4).
+// Read-only share must not allow assert-fact.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "api handlers do not yet enforce access checks — enable after Task 11 Step 4"]
 fn share_read_denies_mutation() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
     let alice = daemon.mock_login("alice@co.com", "Alice");
@@ -276,11 +267,10 @@ fn share_read_denies_mutation() {
 // ---------------------------------------------------------------------------
 // Test 5: share_readwrite_allows_mutation
 //
-// TODO: enable once api handlers enforce access checks (Task 11 Step 4).
+// Read-write share allows mutations (e.g. assert-fact).
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "api handlers do not yet enforce access checks — enable after Task 11 Step 4"]
 fn share_readwrite_allows_mutation() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
     let alice = daemon.mock_login("alice@co.com", "Alice");
@@ -319,13 +309,10 @@ fn share_readwrite_allows_mutation() {
 // ---------------------------------------------------------------------------
 // Test 6: system_path_always_denied
 //
-// TODO: enable once api handlers enforce access checks (Task 11 Step 4).
-// The resolve_access logic correctly denies _system/* even for admins, but
-// the api_query_post handler doesn't yet gate on the User extractor.
+// `_system/*` paths must be denied even for top-admin (handled in resolve_access).
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "api handlers do not yet enforce access checks — enable after Task 11 Step 4"]
 fn system_path_always_denied() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
     // First user = top-admin.

@@ -284,7 +284,7 @@ async fn create_share(
     user: User,
     Json(body): Json<CreateShareRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _store = require_auth_store(&state)?;
+    let store = require_auth_store(&state)?;
 
     // Validate permission.
     if body.permission != "read" && body.permission != "read-write" {
@@ -309,7 +309,22 @@ async fn create_share(
 
     let share_id = uuid::Uuid::new_v4().to_string();
 
-    // TODO: persist share grant to system exom
+    let created_at = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+
+    store.add_share_grant(crate::auth::store::ShareGrant {
+        share_id: share_id.clone(),
+        owner_email: user.email.clone(),
+        path: body.path.clone(),
+        grantee_email: body.grantee_email.clone(),
+        permission: body.permission.clone(),
+        created_at,
+    });
 
     Ok((
         axum::http::StatusCode::CREATED,
