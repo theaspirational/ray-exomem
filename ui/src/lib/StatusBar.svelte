@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { DEFAULT_EXOM, fetchExomemStatus, getExomemBaseUrl } from '$lib/exomem.svelte';
+	import { auth } from '$lib/auth.svelte';
 	import type { ExomemStatus } from '$lib/types';
 
 	let health = $state<'ok' | 'unreachable'>('unreachable');
-	let treeRoot = $state<string | null>(null);
 	let exomCount = $state<number | null>(null);
 
 	function countExomsInTree(node: unknown): number {
@@ -19,7 +19,7 @@
 	async function loadTreeCount(): Promise<number | null> {
 		try {
 			const url = `${getExomemBaseUrl()}/api/tree`;
-			const res = await fetch(url);
+			const res = await fetch(url, { credentials: 'include' });
 			if (!res.ok) return null;
 			const node: unknown = await res.json();
 			return countExomsInTree(node);
@@ -40,10 +40,8 @@
 			if (cancelled) return;
 			if (status?.ok) {
 				health = 'ok';
-				treeRoot = status.server.tree_root ?? null;
 			} else {
 				health = 'unreachable';
-				treeRoot = null;
 			}
 			const n = await loadTreeCount();
 			if (!cancelled) exomCount = n;
@@ -60,12 +58,14 @@
 	<span class={health === 'ok' ? 'text-zinc-400' : 'text-zinc-500'}>
 		{health === 'ok' ? 'daemon ok' : 'daemon unreachable'}
 	</span>
-	<span class="hidden min-w-0 truncate sm:inline" title={treeRoot ?? undefined}>
-		<span class="text-zinc-600">tree</span>
-		<span class="ml-1 font-mono text-zinc-400">{treeRoot ?? '—'}</span>
-	</span>
 	<span>
 		<span class="text-zinc-600">exoms</span>
 		<span class="ml-1 font-mono tabular-nums text-zinc-400">{exomCount ?? '—'}</span>
 	</span>
+	{#if auth.isAuthenticated}
+		<span>
+			<span class="text-zinc-600">role</span>
+			<span class="ml-1 font-mono text-zinc-400">{auth.user?.role}</span>
+		</span>
+	{/if}
 </footer>

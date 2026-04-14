@@ -588,7 +588,6 @@ async fn api_status(
         .take(24)
         .collect();
     let ontology = system_schema::build_exom_ontology(exom, brain, &es.rules);
-    let tree_root_display = server_tree_root(&state).display().to_string();
     let status = serde_json::json!({
         "ok": true,
         "exom": exom,
@@ -597,7 +596,6 @@ async fn api_status(
             "name": "ray-exomem",
             "version": crate::frontend_version(),
             "uptime_sec": uptime,
-            "tree_root": tree_root_display,
             "build": {
                 "git_sha": crate::build_git_sha(),
                 "built_unix": crate::build_unix_timestamp(),
