@@ -12,15 +12,15 @@ Replace JSONL file-based persistence with PostgreSQL via sqlx. Introduce trait-b
 | Topic | Decision |
 |---|---|
 | Library | sqlx (async, runtime-checked queries, PgPool) |
-| Schema | 11 tables: 6 auth + 5 core exom |
+| Schema | 10 tables: 5 auth + 5 core exom |
 | Storage pattern | Trait adapters with Postgres + JSONL implementations |
 | Backend selection | `--database-url` flag or `DATABASE_URL` env → Postgres; absent → JSONL fallback |
 | Sessions | Persistent in Postgres mode; DashMap-only in JSONL mode |
 | JSONL migration | Clean break — no import tool, fresh start |
 | `_system/auth` | Removed entirely — no exom directory |
 | Auth JSONL fallback | Standalone `auth.jsonl` file in data dir (not an exom) |
-| Actor model | `user_email` server-set from auth; `actor` optional from MCP/CLI clients |
-| UI cleanup | Remove ActorIdentityDialog, localStorage actor, actor prompt |
+| Actor model | `user_email` server-set from auth; `actor` optional from MCP/CLI clients. In no-auth JSONL mode, actor prompt retained for browser. |
+| UI cleanup | Remove ActorIdentityDialog + localStorage actor when auth enabled. Keep actor prompt in no-auth mode for browser provenance. |
 | Cargo feature | `postgres` feature flag, default enabled |
 
 ## Database Schema
@@ -251,10 +251,14 @@ Two implementations each:
 ### Removed
 
 - `_system/auth/` exom directory concept
-- `ActorIdentityDialog.svelte`
-- `actorPrompt.svelte`
-- localStorage `ray-exomem-actor`
+- `_system` access control special case in `access.rs`
+- ActorIdentityDialog / actorPrompt / localStorage actor **when auth is enabled** (retained for no-auth mode)
 - Actor display in TopBar (already done)
+
+### Additionally Modified
+
+- `src/system_schema.rs` — add `tx/user-email` system attribute
+- UI tx history views — show `user_email` + optional `actor`
 
 ## Runtime Behavior
 
@@ -264,9 +268,13 @@ Two implementations each:
 2. Create `PgPool` (max 10 connections)
 3. Run `sqlx::migrate!("./migrations")`
 4. Construct `PgAuthDb` + `PgExomDb`
-5. Build `AuthStore` with `PgAuthDb`, populate API key cache from DB
+5. Build `AuthStore` with `PgAuthDb`:
+   - Populate API key cache from DB (`SELECT * FROM api_keys JOIN users`)
+   - Session cache starts empty — sessions are resolved on demand (see below)
 6. Spawn session cleanup task (every 15 min)
 7. Start Axum
+
+**Session resolution (Postgres mode):** `get_user_by_session()` first checks DashMap cache. On cache miss, queries `SELECT s.*, u.* FROM sessions s JOIN users u ON s.email = u.email WHERE s.session_id = $1 AND s.expires_at > now()`. If found, populates cache and returns user. This means sessions survive restarts — first request after restart hits DB, subsequent requests hit cache.
 
 ### Startup (JSONL fallback)
 
@@ -287,15 +295,46 @@ Server:
   2. actor = request body "actor" field (optional)
   3. Build Tx { user_email, actor, action: "assert-fact", ... }
   4. Brain updates in-memory state
-  5. ExomDb.append_transaction() + ExomDb.save_facts()
+  5. ExomDb.write_mutation() — single atomic operation (see below)
   6. Rebuild splay table (unchanged)
+```
+
+**Atomic writes (Postgres mode):** `ExomDb` gains a `write_mutation()` method that wraps the transaction row + all affected table changes (facts, beliefs, observations, branches) in a single Postgres `BEGIN ... COMMIT` transaction. A crash between steps cannot leave a tx row without its matching data changes. The individual `append_transaction()` + `save_facts()` methods remain for bulk loads and JSONL fallback where atomicity across files isn't possible anyway.
+
+```rust
+#[async_trait]
+pub trait ExomDb: Send + Sync {
+    // ... existing methods ...
+
+    /// Atomically persist a mutation: transaction + affected table state.
+    /// Default implementation calls individual methods (non-atomic, for JSONL).
+    /// Postgres overrides with a single DB transaction.
+    async fn write_mutation(
+        &self,
+        exom_path: &str,
+        tx: &Tx,
+        facts: Option<&[Fact]>,
+        observations: Option<&[Observation]>,
+        beliefs: Option<&[Belief]>,
+        branches: Option<&[Branch]>,
+    ) -> Result<()>;
+}
 ```
 
 ### Actor Model
 
+**Authenticated mode (auth enabled):**
 - `user_email`: Always server-set from authenticated session/API key. Not client-editable.
-- `actor`: Optional client-provided string identifying the agent (e.g. "claude-desktop", "cursor", "my-script"). Defaults to None for browser UI.
+- `actor`: Optional client-provided string identifying the agent (e.g. "claude-desktop", "cursor", "my-script"). Browser UI sets actor to None — user_email provides provenance.
 - Transaction history shows: "alice@co.com" or "alice@co.com via claude-desktop"
+- ActorIdentityDialog and localStorage actor removed.
+
+**No-auth mode (JSONL fallback, no auth provider):**
+- `user_email`: None (no auth session).
+- `actor`: Required — set via ActorIdentityDialog (existing behavior preserved). Used for provenance, TOFU branch claims, session ownership.
+- ActorIdentityDialog, localStorage actor, and actor prompt retained.
+
+**Transition:** UI checks `auth.isAuthenticated`. If true, actor prompt never shown and actor field is not sent from browser. If false, actor prompt works as today.
 
 ## AppState
 
@@ -318,12 +357,26 @@ pub struct AppState {
 - CI builds with feature enabled; no running Postgres needed (runtime-checked queries, not compile-time macros)
 - Tests: integration tests that need Postgres use `#[cfg(feature = "postgres")]` gate + test database
 
-## Hidden _system from Tree
+## Scope Boundaries
+
+Things this spec **does not change:**
+
+- **`exom.json` metadata** — remains on-disk, per-exom. Source of truth for exom kind (bare/project/session), current branch, session metadata, format version. Not modeled in Postgres. The filesystem tree structure and `exom.json` files continue to define what exoms exist and their type.
+- **Splay tables / rayforce2 FFI** — unchanged. Splay tables are rebuilt from Postgres (or JSONL) rows on startup, used as query cache.
+- **Symbol table (`sym`)** — unchanged. Shared binary file, managed by rayforce2.
+- **Tree walk / filesystem structure** — exom directories still exist on disk for splay tables and `exom.json`. Postgres stores the data that was in JSONL sidecars; directory structure remains.
+
+**Additional files requiring updates:**
+
+- `src/system_schema.rs` — tx views currently only expose `tx/actor`. Must add `tx/user-email` attribute and update ontology generation to reflect the new two-field provenance model.
+- UI tx history/provenance views — must display `user_email` + optional `actor` instead of bare `actor` string.
+
+## Removal of _system
 
 - `_system` directory no longer created by auth bootstrap
 - Auth JSONL fallback uses standalone `<data-dir>/auth.jsonl`
-- Remove `_system` path checks from `access.rs`
-- If `_system` exists on disk from previous installs, `walk_root()` skips entries starting with `_`
+- Remove `_system` path checks from `access.rs` (no special-case access control)
+- If `_system` exists on disk from previous installs, `walk_root()` skips the exact `_system` entry only (not other underscore-prefixed paths like `_foo`)
 
 ## Session Cleanup
 
