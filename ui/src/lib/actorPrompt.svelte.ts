@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import { auth } from '$lib/auth.svelte';
 
 /** True when the user has set a non-empty `ray-exomem-actor` in localStorage. */
 export function isActorIdentityConfigured(): boolean {
@@ -17,6 +18,11 @@ class ActorPromptState {
 	 * If the dialog is cancelled, pending callbacks are dropped.
 	 */
 	run(fn: () => void | Promise<void>): void {
+		if (auth.isAuthenticated) {
+			// Authenticated mode: no actor prompt needed, user_email is server-set
+			void Promise.resolve(fn());
+			return;
+		}
 		if (isActorIdentityConfigured()) {
 			void Promise.resolve(fn());
 			return;

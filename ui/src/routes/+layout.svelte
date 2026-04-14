@@ -102,7 +102,9 @@
 		</div>
 		<StatusBar />
 		<CommandPalette bind:open={commandPaletteState.open} />
-		<ActorIdentityDialog />
+		{#if !auth.isAuthenticated}
+			<ActorIdentityDialog />
+		{/if}
 		<Toaster richColors position="bottom-right" />
 	</div>
 {/if}
