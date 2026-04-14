@@ -38,35 +38,46 @@
 			infoError = true;
 		} finally {
 			infoLoaded = true;
+			// Load GSI after DOM updates with the button container
+			if (googleClientId) {
+				requestAnimationFrame(() => loadGSI());
+			}
 		}
 	}
 
-	function handleGoogleSignIn() {
-		if (!googleClientId) return;
-		loadGSI();
-	}
+	let gsiReady = $state(false);
 
 	function loadGSI() {
+		if (!googleClientId) return;
 		const existing = document.querySelector('script[src*="accounts.google.com/gsi/client"]');
 		if (existing) {
-			initializeGSI();
+			renderGSIButton();
 			return;
 		}
 		const script = document.createElement('script');
 		script.src = 'https://accounts.google.com/gsi/client';
 		script.async = true;
-		script.onload = initializeGSI;
+		script.onload = renderGSIButton;
 		document.head.appendChild(script);
 	}
 
-	function initializeGSI() {
+	function renderGSIButton() {
+		const el = document.getElementById('google-signin-btn');
+		if (!el) return;
 		// @ts-ignore -- google.accounts loaded via external script
 		google.accounts.id.initialize({
 			client_id: googleClientId,
 			callback: handleCredentialResponse
 		});
 		// @ts-ignore
-		google.accounts.id.prompt();
+		google.accounts.id.renderButton(el, {
+			theme: 'outline',
+			size: 'large',
+			width: 340,
+			shape: 'rectangular',
+			text: 'signin_with'
+		});
+		gsiReady = true;
 	}
 
 	async function handleCredentialResponse(response: { credential: string }) {
@@ -144,27 +155,17 @@
 					Authentication not configured
 				</p>
 			{:else}
-				<!-- Google Sign-In button (primary action) -->
+				<!-- Google Sign-In (rendered by GSI library) -->
 				{#if googleClientId}
-					<button
-						type="button"
-						disabled={loading}
-						onclick={handleGoogleSignIn}
-						class="flex w-full items-center justify-center gap-3 rounded-md border border-zinc-300 bg-white px-4 py-2.5 text-sm font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
-					>
-						<!-- Google "G" logo SVG -->
-						<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
-							<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-							<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-							<path fill="#34A853" d="M10.53 28.59a14.5 14.5 0 0 1 0-9.18l-7.98-6.19a24.0 24.0 0 0 0 0 21.56l7.98-6.19z"/>
-							<path fill="#FBBC05" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-						</svg>
-						{#if loading}
-							Signing in...
-						{:else}
-							Sign in with Google
-						{/if}
-					</button>
+					<div class="flex justify-center">
+						<div id="google-signin-btn"></div>
+					</div>
+					{#if !gsiReady}
+						<div class="flex items-center justify-center py-2">
+							<div class="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-300"></div>
+							<span class="ml-2 text-xs text-zinc-500">Loading Google Sign-In...</span>
+						</div>
+					{/if}
 				{/if}
 
 				<!-- Mock login for development mode -->
