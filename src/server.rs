@@ -69,6 +69,7 @@ pub struct AppState {
     pub sym_path: Option<PathBuf>,
     pub start_time: Instant,
     pub sse_tx: broadcast::Sender<String>,
+    pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
 }
 
 impl AppState {
@@ -86,6 +87,7 @@ impl AppState {
             sym_path,
             start_time: Instant::now(),
             sse_tx,
+            auth_store: None,
         }
     }
 
