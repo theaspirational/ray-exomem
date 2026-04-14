@@ -1,11 +1,16 @@
 //! AuthProvider trait and Google OIDC implementation.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use anyhow::{anyhow, Result};
 use super::AuthIdentity;
 
-#[allow(async_fn_in_trait)]
 pub trait AuthProvider: Send + Sync {
-    async fn validate_token(&self, token: &str) -> Result<AuthIdentity>;
+    fn validate_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthIdentity>> + Send + 'a>>;
     fn provider_name(&self) -> &str;
 }
 
@@ -105,29 +110,34 @@ impl GoogleAuthProvider {
 }
 
 impl AuthProvider for GoogleAuthProvider {
-    async fn validate_token(&self, token: &str) -> Result<AuthIdentity> {
-        let header = decode_header(token)?;
-        let kid = header
-            .kid
-            .ok_or_else(|| anyhow!("JWT header missing `kid`"))?;
-        let key = self.decoding_key_for_kid(&kid).await?;
+    fn validate_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthIdentity>> + Send + 'a>> {
+        Box::pin(async move {
+            let header = decode_header(token)?;
+            let kid = header
+                .kid
+                .ok_or_else(|| anyhow!("JWT header missing `kid`"))?;
+            let key = self.decoding_key_for_kid(&kid).await?;
 
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[&self.client_id]);
-        validation.set_issuer(&["https://accounts.google.com", "accounts.google.com"]);
+            let mut validation = Validation::new(Algorithm::RS256);
+            validation.set_audience(&[&self.client_id]);
+            validation.set_issuer(&["https://accounts.google.com", "accounts.google.com"]);
 
-        let token_data = decode::<GoogleClaims>(token, &key, &validation)?;
-        let claims = token_data.claims;
+            let token_data = decode::<GoogleClaims>(token, &key, &validation)?;
+            let claims = token_data.claims;
 
-        if !claims.email_verified {
-            return Err(anyhow!("Google account email not verified"));
-        }
+            if !claims.email_verified {
+                return Err(anyhow!("Google account email not verified"));
+            }
 
-        Ok(AuthIdentity {
-            email: claims.email,
-            display_name: claims.name,
-            avatar_url: claims.picture,
-            provider: "google".into(),
+            Ok(AuthIdentity {
+                email: claims.email,
+                display_name: claims.name,
+                avatar_url: claims.picture,
+                provider: "google".into(),
+            })
         })
     }
 
@@ -145,23 +155,28 @@ pub struct MockAuthProvider;
 
 #[cfg(any(test, feature = "test-auth"))]
 impl AuthProvider for MockAuthProvider {
-    async fn validate_token(&self, token: &str) -> Result<AuthIdentity> {
-        let rest = token
-            .strip_prefix("mock:")
-            .ok_or_else(|| anyhow!("MockAuthProvider: token must start with `mock:`"))?;
-        let (email, name) = rest
-            .split_once(':')
-            .ok_or_else(|| anyhow!("MockAuthProvider: expected format `mock:<email>:<name>`"))?;
+    fn validate_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<AuthIdentity>> + Send + 'a>> {
+        Box::pin(async move {
+            let rest = token
+                .strip_prefix("mock:")
+                .ok_or_else(|| anyhow!("MockAuthProvider: token must start with `mock:`"))?;
+            let (email, name) = rest
+                .split_once(':')
+                .ok_or_else(|| anyhow!("MockAuthProvider: expected format `mock:<email>:<name>`"))?;
 
-        if email.is_empty() || name.is_empty() {
-            return Err(anyhow!("MockAuthProvider: email and name must be non-empty"));
-        }
+            if email.is_empty() || name.is_empty() {
+                return Err(anyhow!("MockAuthProvider: email and name must be non-empty"));
+            }
 
-        Ok(AuthIdentity {
-            email: email.to_owned(),
-            display_name: name.to_owned(),
-            avatar_url: None,
-            provider: "mock".into(),
+            Ok(AuthIdentity {
+                email: email.to_owned(),
+                display_name: name.to_owned(),
+                avatar_url: None,
+                provider: "mock".into(),
+            })
         })
     }
 

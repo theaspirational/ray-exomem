@@ -70,6 +70,8 @@ pub struct AppState {
     pub start_time: Instant,
     pub sse_tx: broadcast::Sender<String>,
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
+    pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
+    pub bind_addr: Option<String>,
 }
 
 impl AppState {
@@ -88,6 +90,8 @@ impl AppState {
             start_time: Instant::now(),
             sse_tx,
             auth_store: None,
+            auth_provider: None,
+            bind_addr: None,
         }
     }
 
@@ -316,6 +320,9 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
     let app = Router::new()
         // Nested under /ray-exomem/api
         .nest("/ray-exomem/api", api_router())
+        // Auth routes
+        .nest("/auth", crate::auth::routes::auth_router())
+        .nest("/auth/admin", crate::auth::admin::admin_router())
         // SSE event stream
         .route("/sse", get(api_sse))
         // Compat shim: smoke test calls /api/status
