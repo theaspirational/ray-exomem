@@ -150,10 +150,8 @@ impl AuthProvider for GoogleAuthProvider {
 // Mock provider (test / test-auth only)
 // ---------------------------------------------------------------------------
 
-#[cfg(any(test, feature = "test-auth"))]
 pub struct MockAuthProvider;
 
-#[cfg(any(test, feature = "test-auth"))]
 impl AuthProvider for MockAuthProvider {
     fn validate_token<'a>(
         &'a self,

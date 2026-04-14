@@ -375,6 +375,18 @@ enum Commands {
         /// Run without persistence (in-memory only, all data lost on exit).
         #[arg(long)]
         no_persist: bool,
+
+        /// Authentication provider: "google" or "mock". Omit to disable auth.
+        #[arg(long)]
+        auth_provider: Option<String>,
+
+        /// Google OAuth2 client ID (required when --auth-provider=google).
+        #[arg(long)]
+        google_client_id: Option<String>,
+
+        /// Comma-separated list of allowed email domains. Empty = allow all.
+        #[arg(long, value_delimiter = ',')]
+        allowed_domains: Option<Vec<String>>,
     },
 
     /// Stop a running daemon.
@@ -1449,19 +1461,66 @@ fn main() {
             ui_dir: _,
             data_dir,
             no_persist,
+            auth_provider,
+            google_client_id,
+            allowed_domains,
         } => {
             let resolved_data_dir = if no_persist {
                 None
             } else {
                 Some(data_dir.unwrap_or_else(default_data_dir))
             };
-            let state = match ray_exomem::server::AppState::from_data_dir(resolved_data_dir) {
+            let mut state = match ray_exomem::server::AppState::from_data_dir(resolved_data_dir) {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!("error: {}", err);
                     std::process::exit(1);
                 }
             };
+
+            // Wire auth provider + store if --auth-provider is set.
+            if let Some(ref provider_name) = auth_provider {
+                let tree_root = state.tree_root.clone().unwrap_or_else(|| {
+                    eprintln!("error: --auth-provider requires persistent storage (a data directory)");
+                    std::process::exit(1);
+                });
+                let domains = allowed_domains.unwrap_or_default();
+                let store = match ray_exomem::auth::store::AuthStore::bootstrap(&tree_root, &domains) {
+                    Ok(s) => std::sync::Arc::new(s),
+                    Err(err) => {
+                        eprintln!("error bootstrapping auth store: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+
+                let provider: std::sync::Arc<dyn ray_exomem::auth::provider::AuthProvider> =
+                    match provider_name.as_str() {
+                        "google" => {
+                            let client_id = google_client_id.unwrap_or_else(|| {
+                                eprintln!("error: --google-client-id is required when --auth-provider=google");
+                                std::process::exit(1);
+                            });
+                            std::sync::Arc::new(
+                                ray_exomem::auth::provider::GoogleAuthProvider::new(client_id),
+                            )
+                        }
+                        "mock" => {
+                            std::sync::Arc::new(ray_exomem::auth::provider::MockAuthProvider)
+                        }
+                        other => {
+                            eprintln!("error: unknown auth provider '{}' (expected 'google' or 'mock')", other);
+                            std::process::exit(1);
+                        }
+                    };
+
+                // from_data_dir returns a fresh Arc (refcount=1), so get_mut succeeds.
+                let s = std::sync::Arc::get_mut(&mut state)
+                    .expect("state Arc refcount should be 1 at init");
+                s.auth_store = Some(store);
+                s.auth_provider = Some(provider);
+                s.bind_addr = Some(bind.to_string());
+            }
+
             eprintln!("[ray-exomem] Open http://{}:{}/ray-exomem/ in your browser", bind.ip(), bind.port());
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
@@ -3401,11 +3460,17 @@ mod tests {
                 ui_dir,
                 data_dir,
                 no_persist,
+                auth_provider,
+                google_client_id,
+                allowed_domains,
             } => {
                 assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
                 assert!(data_dir.is_none());
                 assert!(!no_persist);
+                assert!(auth_provider.is_none());
+                assert!(google_client_id.is_none());
+                assert!(allowed_domains.is_none());
             }
             _ => panic!("expected serve command"),
         }
