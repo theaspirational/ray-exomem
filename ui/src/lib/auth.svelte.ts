@@ -1,7 +1,7 @@
 import { browser } from '$app/environment';
 import { goto } from '$app/navigation';
 import { base } from '$app/paths';
-import { getExomemBaseUrl } from '$lib/exomem.svelte';
+import { getExomemBaseUrl } from '$lib/exomem-base';
 
 export interface AuthUser {
 	email: string;

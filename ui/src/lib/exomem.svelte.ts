@@ -1,6 +1,6 @@
 import { browser } from '$app/environment';
-import { env } from '$env/dynamic/public';
-
+import { auth } from '$lib/auth.svelte';
+import { getExomemBaseUrl } from '$lib/exomem-base';
 import { toCli } from '$lib/path.svelte';
 
 import type {
@@ -15,8 +15,6 @@ import type {
 	ExomEntry,
 	RuleEntry
 } from '$lib/types';
-
-const DEFAULT_BASE_URL = 'http://127.0.0.1:9780';
 
 /** Default KB name; must match server `DEFAULT_EXOM`. */
 export const DEFAULT_EXOM = 'main';
@@ -66,25 +64,7 @@ async function handle401(res: Response): Promise<void> {
 	}
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
-	const trimmed = baseUrl.trim().replace(/\/+$/, '');
-	return trimmed.endsWith('/ray-exomem') ? trimmed : `${trimmed}/ray-exomem`;
-}
-
-export function getExomemBaseUrl(): string {
-	const configured = env.PUBLIC_TEIDE_EXOMEM_BASE_URL?.trim();
-	if (configured) return normalizeBaseUrl(configured);
-
-	if (browser) {
-		const { origin, port } = window.location;
-		// In the Vite dev server, the UI runs on 5173 and the daemon still lives on 9780.
-		// When the UI is served from the daemon itself, use the current origin so LAN access
-		// keeps working on phones/tablets and other machines.
-		if (port !== '5173') return normalizeBaseUrl(origin);
-	}
-
-	return normalizeBaseUrl(DEFAULT_BASE_URL);
-}
+export { getExomemBaseUrl };
 
 function endpoint(path: string): string {
 	return `${getExomemBaseUrl()}/${path.replace(/^\/+/, '')}`;
@@ -164,14 +144,18 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json();
 }
 
-/** Matches server TOFU / `TopBar` — used for mutation `X-Actor` and assert-fact body. Empty when unset. */
+/** Explicit local override for mutation attribution used by the prompt dialog. */
 export function getRayExomemActor(): string {
 	if (!browser) return '';
 	return localStorage.getItem('ray-exomem-actor')?.trim() ?? '';
 }
 
+function getMutationActor(): string {
+	return getRayExomemActor() || auth.user?.email?.trim() || '';
+}
+
 function actorHeaders(): Record<string, string> {
-	const actor = getRayExomemActor();
+	const actor = getMutationActor();
 	if (!actor) {
 		throw new Error('Actor identity is not set. Choose an actor name in the prompt dialog.');
 	}
@@ -397,7 +381,7 @@ export function apiAssertSessionLabel(sessionPathSlash: string, label: string): 
 	return postAction('api/actions/assert-fact', {
 		exom: toCli(sessionPathSlash),
 		branch: 'main',
-		actor: getRayExomemActor(),
+		actor: getMutationActor(),
 		predicate: 'session/label',
 		value: label.trim()
 	});
@@ -467,7 +451,7 @@ export function apiSessionNew(body: {
 	actor?: string;
 	agents?: string[];
 }): Promise<{ ok: boolean; session_path: string }> {
-	const actor = body.actor ?? getRayExomemActor();
+	const actor = body.actor ?? getMutationActor();
 	if (!actor) {
 		return Promise.reject(new Error('Actor identity is not set. Choose an actor name in the prompt dialog.'));
 	}

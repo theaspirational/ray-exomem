@@ -293,6 +293,35 @@ impl AuthStore {
         UserRole::Regular
     }
 
+    /// Resolve the role a user should receive during login bootstrap.
+    ///
+    /// This must be derived from persisted auth state, not runtime caches,
+    /// so a fresh process cannot accidentally re-bootstrap a second top-admin.
+    pub async fn login_role(&self, email: &str) -> anyhow::Result<UserRole> {
+        if let Some(ref db) = self.auth_db {
+            if let Some(user) = db.get_user(email).await? {
+                return Ok(user.role);
+            }
+            return Ok(if db.list_users().await?.is_empty() {
+                UserRole::TopAdmin
+            } else {
+                UserRole::Regular
+            });
+        }
+
+        if self.top_admin.lock().unwrap().as_deref() == Some(email) {
+            return Ok(UserRole::TopAdmin);
+        }
+        if self.admins.lock().unwrap().contains(email) {
+            return Ok(UserRole::Admin);
+        }
+        Ok(if self.users.lock().unwrap().is_empty() {
+            UserRole::TopAdmin
+        } else {
+            UserRole::Regular
+        })
+    }
+
     pub async fn add_share_grant(&self, grant: ShareGrant) {
         if let Some(ref db) = self.auth_db {
             let db = db.clone();
@@ -967,6 +996,9 @@ impl AuthStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::db::{jsonl_auth::JsonlAuthDb, AuthDb, StoredUser as DbStoredUser};
 
     #[tokio::test]
     async fn check_domain_empty_allows_all() {
@@ -1176,6 +1208,46 @@ mod tests {
         assert_eq!(
             store2.allowed_domains.lock().unwrap().clone(),
             vec!["co.com".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn login_role_bootstraps_only_when_no_persisted_users_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_db = Arc::new(JsonlAuthDb::new(dir.path().join("auth.jsonl")).unwrap());
+        let store = AuthStore::with_auth_db(auth_db.clone()).await.unwrap();
+
+        assert_eq!(
+            store.login_role("alice@co.com").await.unwrap(),
+            UserRole::TopAdmin
+        );
+
+        auth_db
+            .upsert_user(&DbStoredUser {
+                email: "alice@co.com".into(),
+                display_name: "Alice".into(),
+                provider: "mock".into(),
+                role: UserRole::Regular,
+                active: true,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                last_login: None,
+            })
+            .await
+            .unwrap();
+        auth_db
+            .set_role("alice@co.com", UserRole::TopAdmin)
+            .await
+            .unwrap();
+
+        let store = AuthStore::with_auth_db(auth_db).await.unwrap();
+        assert_eq!(store.top_admin.lock().unwrap().as_deref(), None);
+        assert_eq!(
+            store.login_role("alice@co.com").await.unwrap(),
+            UserRole::TopAdmin
+        );
+        assert_eq!(
+            store.login_role("bob@co.com").await.unwrap(),
+            UserRole::Regular
         );
     }
 

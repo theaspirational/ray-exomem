@@ -183,15 +183,15 @@ async fn login(
         );
     }
 
-    // Resolve role. First user ever (empty session + api_key caches) becomes top-admin.
-    let role = if store.top_admin.lock().unwrap().is_none()
-        && store.session_cache.is_empty()
-        && store.api_key_cache.is_empty()
-    {
-        UserRole::TopAdmin
-    } else {
-        store.resolve_role(&identity.email).await
-    };
+    // Resolve role from persisted auth state so a fresh process cannot
+    // accidentally bootstrap a second top-admin.
+    let role = store.login_role(&identity.email).await.map_err(|e| {
+        ApiError::new(
+            "auth_state_unavailable",
+            format!("failed to resolve login role: {e}"),
+        )
+        .with_status(500)
+    })?;
 
     // Create session.
     let session_id = uuid::Uuid::new_v4().to_string();

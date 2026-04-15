@@ -41,6 +41,7 @@ Use `ray-exomem serve --bind 127.0.0.1:9780` for foreground debugging.
 - If `rayforce2` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
 - The Svelte 5 UI is embedded in the binary at build time.
 - `ray-exomem daemon` forks. Use `serve` if you want logs in the terminal.
+- In authenticated UI mode, mutation actor attribution should fall back to the logged-in email. Do not require a separate `ray-exomem-actor` localStorage value for basic writes.
 
 ## Current agent-facing workflow
 
