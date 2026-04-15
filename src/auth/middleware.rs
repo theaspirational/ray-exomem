@@ -29,12 +29,9 @@ impl FromRequestParts<Arc<AppState>> for User {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let auth_store = state
-            .auth_store
-            .as_ref()
-            .ok_or_else(|| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "auth not configured").into_response()
-            })?;
+        let auth_store = state.auth_store.as_ref().ok_or_else(|| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "auth not configured").into_response()
+        })?;
 
         // 1. Try Authorization: Bearer <key>
         if let Some(user) = try_bearer(parts, auth_store) {
@@ -175,7 +172,11 @@ pub fn check_csrf(parts: &Parts, expected_origin: &str) -> Result<(), Response> 
     }
 
     // Neither Origin nor Referer present.
-    Err((StatusCode::FORBIDDEN, "CSRF check failed: no origin or referer").into_response())
+    Err((
+        StatusCode::FORBIDDEN,
+        "CSRF check failed: no origin or referer",
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------

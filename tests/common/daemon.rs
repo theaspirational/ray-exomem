@@ -41,7 +41,11 @@ impl TestDaemonBuilder {
         let mut cmd = Command::new(bin);
 
         let bind_arg = format!("127.0.0.1:{port}");
-        let data_dir_arg = data_dir.path().to_str().expect("tempdir is utf-8").to_string();
+        let data_dir_arg = data_dir
+            .path()
+            .to_str()
+            .expect("tempdir is utf-8")
+            .to_string();
 
         let mut args: Vec<String> = vec![
             "serve".into(),
@@ -56,15 +60,18 @@ impl TestDaemonBuilder {
             args.push("mock".into());
         }
 
-        cmd.args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
 
         // Put child in its own process group so Drop can kill the whole group.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            unsafe { cmd.pre_exec(|| { libc::setpgid(0, 0); Ok(()) }); }
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                });
+            }
         }
         let child = cmd.spawn().expect("spawn daemon");
 
@@ -73,7 +80,10 @@ impl TestDaemonBuilder {
         let mut ready = false;
         while Instant::now() < deadline {
             if let Ok(r) = ureq::get(&format!("{base_url}/ray-exomem/api/status")).call() {
-                if r.status() == 200 { ready = true; break; }
+                if r.status() == 200 {
+                    ready = true;
+                    break;
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -146,12 +156,7 @@ impl TestDaemon {
     }
 
     /// Make an authenticated POST request using a session cookie.
-    pub fn auth_post(
-        &self,
-        path: &str,
-        session: &str,
-        body: serde_json::Value,
-    ) -> ureq::Response {
+    pub fn auth_post(&self, path: &str, session: &str, body: serde_json::Value) -> ureq::Response {
         ureq::post(&format!("{}{}", self.base_url, path))
             .set("Cookie", &format!("ray_exomem_session={session}"))
             .send_json(body)
@@ -167,9 +172,13 @@ impl Drop for TestDaemon {
         {
             let pid = self.child.id() as i32;
             // Kill process group (negative PID)
-            unsafe { libc::kill(-pid, libc::SIGKILL); }
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
             // Also direct kill in case setsid wasn't used
-            unsafe { libc::kill(pid, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
         }
         #[cfg(not(unix))]
         {

@@ -8,11 +8,7 @@ use serde_json::json;
 // ---------------------------------------------------------------------------
 
 /// Authenticated GET returning the raw Result so we can inspect non-2xx.
-fn auth_get_raw(
-    base_url: &str,
-    path: &str,
-    session: &str,
-) -> Result<ureq::Response, ureq::Error> {
+fn auth_get_raw(base_url: &str, path: &str, session: &str) -> Result<ureq::Response, ureq::Error> {
     ureq::get(&format!("{base_url}{path}"))
         .set("Cookie", &format!("ray_exomem_session={session}"))
         .call()
@@ -178,7 +174,11 @@ fn admin_can_list_users() {
     let admin_session = daemon.mock_login("admin@co.com", "Admin");
 
     let resp = auth_get_raw(&daemon.base_url, "/auth/admin/users", &admin_session);
-    assert_eq!(status_of(&resp), 200, "top-admin should access /auth/admin/users");
+    assert_eq!(
+        status_of(&resp),
+        200,
+        "top-admin should access /auth/admin/users"
+    );
 
     let body: serde_json::Value = resp.unwrap().into_json().unwrap();
     assert!(

@@ -487,7 +487,10 @@ impl AuthStore {
             "api-key-revoke" => {
                 if let Some(key_id) = entry.get("key_id").and_then(|v| v.as_str()) {
                     if let Some(removed) = self.api_keys.lock().unwrap().remove(key_id) {
-                        self.api_key_by_hash.lock().unwrap().remove(&removed.key_hash);
+                        self.api_key_by_hash
+                            .lock()
+                            .unwrap()
+                            .remove(&removed.key_hash);
                     }
                 }
             }
@@ -543,10 +546,7 @@ impl AuthStore {
             }
             "domain-revoke" => {
                 if let Some(domain) = entry.get("domain").and_then(|v| v.as_str()) {
-                    self.allowed_domains
-                        .lock()
-                        .unwrap()
-                        .retain(|d| d != domain);
+                    self.allowed_domains.lock().unwrap().retain(|d| d != domain);
                 }
             }
             "user-deactivate" => {
@@ -597,8 +597,7 @@ impl AuthStore {
                 session_id: None,
                 role,
             };
-            self.api_key_cache
-                .insert(stored_key.key_hash.clone(), user);
+            self.api_key_cache.insert(stored_key.key_hash.clone(), user);
         }
     }
 
@@ -725,7 +724,10 @@ impl AuthStore {
             let kid = key_id.to_string();
             return match async move {
                 let all = db.list_api_keys().await?;
-                let hash = all.into_iter().find(|k| k.key_id == kid).map(|k| k.key_hash);
+                let hash = all
+                    .into_iter()
+                    .find(|k| k.key_id == kid)
+                    .map(|k| k.key_hash);
                 let ok = db.revoke_api_key(&kid).await?;
                 anyhow::Ok((ok, hash))
             }
@@ -754,7 +756,10 @@ impl AuthStore {
 
         // Remove from api_keys and api_key_by_hash
         if let Some(removed) = self.api_keys.lock().unwrap().remove(key_id) {
-            self.api_key_by_hash.lock().unwrap().remove(&removed.key_hash);
+            self.api_key_by_hash
+                .lock()
+                .unwrap()
+                .remove(&removed.key_hash);
             // Also evict from runtime cache
             self.api_key_cache.remove(&removed.key_hash);
         }
@@ -1060,10 +1065,7 @@ mod tests {
             store.allowed_domains.lock().unwrap().clone(),
             vec!["co.com".to_string()]
         );
-        assert_eq!(
-            store.resolve_role("alice@co.com").await,
-            UserRole::TopAdmin
-        );
+        assert_eq!(store.resolve_role("alice@co.com").await, UserRole::TopAdmin);
         assert_eq!(store.resolve_role("bob@co.com").await, UserRole::Admin);
         assert_eq!(store.resolve_role("eve@co.com").await, UserRole::Regular);
     }
@@ -1109,7 +1111,15 @@ mod tests {
         assert!(store.api_key_by_hash.lock().unwrap().is_empty());
         assert!(store.share_grants.lock().unwrap().is_empty());
         assert!(store.allowed_domains.lock().unwrap().is_empty());
-        assert!(!store.users.lock().unwrap().get("bob@co.com").unwrap().active);
+        assert!(
+            !store
+                .users
+                .lock()
+                .unwrap()
+                .get("bob@co.com")
+                .unwrap()
+                .active
+        );
     }
 
     #[tokio::test]
@@ -1133,9 +1143,7 @@ mod tests {
         };
 
         // Use public methods to persist data.
-        store
-            .record_user("alice@co.com", "Alice", "google")
-            .await;
+        store.record_user("alice@co.com", "Alice", "google").await;
         store.set_top_admin("alice@co.com").await;
         store
             .record_api_key("k1", "h1", "alice@co.com", "my-key")

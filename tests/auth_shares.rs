@@ -20,11 +20,7 @@ fn auth_post_raw(
 }
 
 /// Authenticated GET that returns the raw Result.
-fn auth_get_raw(
-    base_url: &str,
-    path: &str,
-    session: &str,
-) -> Result<ureq::Response, ureq::Error> {
+fn auth_get_raw(base_url: &str, path: &str, session: &str) -> Result<ureq::Response, ureq::Error> {
     ureq::get(&format!("{base_url}{path}"))
         .set("Cookie", &format!("ray_exomem_session={session}"))
         .call()

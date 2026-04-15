@@ -5,9 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use crate::auth::UserRole;
-use crate::db::{
-    ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser,
-};
+use crate::db::{ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser};
 
 pub struct PgAuthDb {
     pool: PgPool,
@@ -46,9 +44,7 @@ fn user_from_users_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<StoredUser
         provider: row.get("provider"),
         role: str_to_role(&row.get::<String, _>("role")),
         active: row.get("active"),
-        created_at: row
-            .get::<DateTime<Utc>, _>("created_at")
-            .to_rfc3339(),
+        created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
         last_login: ts_opt_string(row.get::<Option<DateTime<Utc>>, _>("last_login")),
     })
 }
@@ -68,9 +64,7 @@ fn stored_api_key_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Stored
         key_hash: row.get("key_hash"),
         email: row.get("email"),
         label: row.get("label"),
-        created_at: row
-            .get::<DateTime<Utc>, _>("created_at")
-            .to_rfc3339(),
+        created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
     })
 }
 
@@ -81,9 +75,7 @@ fn share_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<ShareGrant> {
         path: row.get("path"),
         grantee_email: row.get("grantee_email"),
         permission: row.get("permission"),
-        created_at: row
-            .get::<DateTime<Utc>, _>("created_at")
-            .to_rfc3339(),
+        created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
     })
 }
 
@@ -94,9 +86,7 @@ fn api_key_with_user_from_join_row(row: &sqlx::postgres::PgRow) -> anyhow::Resul
         provider: row.get("provider"),
         role: str_to_role(&row.get::<String, _>("role")),
         active: row.get("active"),
-        created_at: row
-            .get::<DateTime<Utc>, _>("u_created_at")
-            .to_rfc3339(),
+        created_at: row.get::<DateTime<Utc>, _>("u_created_at").to_rfc3339(),
         last_login: ts_opt_string(row.get::<Option<DateTime<Utc>>, _>("last_login")),
     };
     Ok(ApiKeyWithUser {
@@ -104,9 +94,7 @@ fn api_key_with_user_from_join_row(row: &sqlx::postgres::PgRow) -> anyhow::Resul
         key_hash: row.get("key_hash"),
         email: row.get("email"),
         label: row.get("label"),
-        created_at: row
-            .get::<DateTime<Utc>, _>("created_at")
-            .to_rfc3339(),
+        created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
         user,
     })
 }
@@ -202,12 +190,11 @@ impl AuthDb for PgAuthDb {
     }
 
     async fn get_session(&self, session_id: &str) -> anyhow::Result<Option<SessionRow>> {
-        let row = sqlx::query(
-            "SELECT * FROM sessions WHERE session_id = $1 AND expires_at > now()",
-        )
-        .bind(session_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT * FROM sessions WHERE session_id = $1 AND expires_at > now()")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
         match row {
             Some(r) => Ok(Some(session_from_row(&r)?)),
             None => Ok(None),

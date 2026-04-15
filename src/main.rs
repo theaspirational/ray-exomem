@@ -286,7 +286,11 @@ struct Cli {
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// Base URL of the running daemon (default: http://127.0.0.1:9780/ray-exomem).
-    #[arg(long, global = true, default_value = "http://127.0.0.1:9780/ray-exomem")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "http://127.0.0.1:9780/ray-exomem"
+    )]
     daemon_url: String,
     #[command(subcommand)]
     command: Commands,
@@ -1093,16 +1097,7 @@ fn replace_fact_json(
         }
     }
     assert_fact_json(
-        c,
-        exom,
-        headers,
-        fact_id,
-        predicate,
-        value,
-        1.0,
-        provenance,
-        valid_from,
-        valid_to,
+        c, exom, headers, fact_id, predicate, value, 1.0, provenance, valid_from, valid_to,
     )
 }
 
@@ -1319,7 +1314,12 @@ fn render_tree(
         TreeNode::Folder { name, children, .. } => {
             if name.is_empty() {
                 for (i, c) in children.iter().enumerate() {
-                    out.push_str(&render_tree(c, "", i == children.len() - 1, include_branches));
+                    out.push_str(&render_tree(
+                        c,
+                        "",
+                        i == children.len() - 1,
+                        include_branches,
+                    ));
                 }
             } else {
                 out.push_str(&format!("{}{}{}/\n", indent, connector, name));
@@ -1490,18 +1490,17 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
             #[cfg(feature = "postgres")]
-            let postgres_pool: Option<sqlx::PgPool> =
-                if let Some(ref db_url) = database_url {
-                    match rt.block_on(ray_exomem::db::create_pool(db_url)) {
-                        Ok(pool) => Some(pool),
-                        Err(e) => {
-                            eprintln!("error: database connection failed: {}", e);
-                            std::process::exit(1);
-                        }
+            let postgres_pool: Option<sqlx::PgPool> = if let Some(ref db_url) = database_url {
+                match rt.block_on(ray_exomem::db::create_pool(db_url)) {
+                    Ok(pool) => Some(pool),
+                    Err(e) => {
+                        eprintln!("error: database connection failed: {}", e);
+                        std::process::exit(1);
                     }
-                } else {
-                    None
-                };
+                }
+            } else {
+                None
+            };
             #[cfg(not(feature = "postgres"))]
             {
                 if database_url.is_some() {
@@ -1525,57 +1524,54 @@ fn main() {
             if let Some(ref provider_name) = auth_provider {
                 let domains = allowed_domains.unwrap_or_default();
 
-                let store: std::sync::Arc<ray_exomem::auth::store::AuthStore> =
-                    if database_url.is_some() {
-                        #[cfg(feature = "postgres")]
-                        {
-                            let pool = postgres_pool
-                                .as_ref()
-                                .expect("database_url implies postgres pool")
-                                .clone();
-                            match rt.block_on(async {
-                                let auth_db: std::sync::Arc<dyn ray_exomem::db::AuthDb> =
-                                    std::sync::Arc::new(ray_exomem::db::pg_auth::PgAuthDb::new(
-                                        pool,
-                                    ));
-                                let store =
-                                    ray_exomem::auth::store::AuthStore::with_auth_db(auth_db)
-                                        .await?;
-                                for d in &domains {
-                                    store.add_domain(d).await;
-                                }
-                                anyhow::Ok(store)
-                            }) {
-                                Ok(s) => std::sync::Arc::new(s),
-                                Err(e) => {
-                                    eprintln!("error: database connection failed: {}", e);
-                                    std::process::exit(1);
-                                }
+                let store: std::sync::Arc<ray_exomem::auth::store::AuthStore> = if database_url
+                    .is_some()
+                {
+                    #[cfg(feature = "postgres")]
+                    {
+                        let pool = postgres_pool
+                            .as_ref()
+                            .expect("database_url implies postgres pool")
+                            .clone();
+                        match rt.block_on(async {
+                            let auth_db: std::sync::Arc<dyn ray_exomem::db::AuthDb> =
+                                std::sync::Arc::new(ray_exomem::db::pg_auth::PgAuthDb::new(pool));
+                            let store =
+                                ray_exomem::auth::store::AuthStore::with_auth_db(auth_db).await?;
+                            for d in &domains {
+                                store.add_domain(d).await;
                             }
-                        }
-                        #[cfg(not(feature = "postgres"))]
-                        {
-                            eprintln!("error: --database-url requires postgres feature");
-                            std::process::exit(1);
-                        }
-                    } else {
-                        let tree_root = state.tree_root.clone().unwrap_or_else(|| {
-                            eprintln!(
-                                "error: --auth-provider requires persistent storage (a data directory)"
-                            );
-                            std::process::exit(1);
-                        });
-                        match rt.block_on(ray_exomem::auth::store::AuthStore::bootstrap(
-                            &tree_root,
-                            &domains,
-                        )) {
+                            anyhow::Ok(store)
+                        }) {
                             Ok(s) => std::sync::Arc::new(s),
-                            Err(err) => {
-                                eprintln!("error bootstrapping auth store: {}", err);
+                            Err(e) => {
+                                eprintln!("error: database connection failed: {}", e);
                                 std::process::exit(1);
                             }
                         }
-                    };
+                    }
+                    #[cfg(not(feature = "postgres"))]
+                    {
+                        eprintln!("error: --database-url requires postgres feature");
+                        std::process::exit(1);
+                    }
+                } else {
+                    let tree_root = state.tree_root.clone().unwrap_or_else(|| {
+                        eprintln!(
+                            "error: --auth-provider requires persistent storage (a data directory)"
+                        );
+                        std::process::exit(1);
+                    });
+                    match rt.block_on(ray_exomem::auth::store::AuthStore::bootstrap(
+                        &tree_root, &domains,
+                    )) {
+                        Ok(s) => std::sync::Arc::new(s),
+                        Err(err) => {
+                            eprintln!("error bootstrapping auth store: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                };
 
                 let provider: std::sync::Arc<dyn ray_exomem::auth::provider::AuthProvider> =
                     match provider_name.as_str() {
@@ -1588,11 +1584,12 @@ fn main() {
                                 ray_exomem::auth::provider::GoogleAuthProvider::new(client_id),
                             )
                         }
-                        "mock" => {
-                            std::sync::Arc::new(ray_exomem::auth::provider::MockAuthProvider)
-                        }
+                        "mock" => std::sync::Arc::new(ray_exomem::auth::provider::MockAuthProvider),
                         other => {
-                            eprintln!("error: unknown auth provider '{}' (expected 'google' or 'mock')", other);
+                            eprintln!(
+                                "error: unknown auth provider '{}' (expected 'google' or 'mock')",
+                                other
+                            );
                             std::process::exit(1);
                         }
                     };
@@ -1605,7 +1602,11 @@ fn main() {
                 s.bind_addr = Some(bind.to_string());
             }
 
-            eprintln!("[ray-exomem] Open http://{}:{}/ray-exomem/ in your browser", bind.ip(), bind.port());
+            eprintln!(
+                "[ray-exomem] Open http://{}:{}/ray-exomem/ in your browser",
+                bind.ip(),
+                bind.port()
+            );
             if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
                 eprintln!("error: {}", err);
                 std::process::exit(1);
@@ -1970,16 +1971,15 @@ fn main() {
                             issues.push("status did not return ok:true".into());
                         }
                         match v["server"]["build"]["identity"].as_str() {
-                            Some(identity) if identity != local_build_identity => issues.push(
-                                format!(
+                            Some(identity) if identity != local_build_identity => {
+                                issues.push(format!(
                                     "CLI build {} does not match daemon build {}",
                                     local_build_identity, identity
-                                ),
-                            ),
+                                ))
+                            }
                             Some(_) => {}
-                            None => issues.push(
-                                "status response is missing server.build.identity".into(),
-                            ),
+                            None => issues
+                                .push("status response is missing server.build.identity".into()),
                         }
                         status_payload = Some(v);
                     } else {
@@ -2294,208 +2294,239 @@ fn main() {
             command,
             exom,
             addr,
-        } => {
-            match command {
-                BranchCommands::List { scope } => {
-                    let (compact, exom, addr) =
-                        branch_scope_values(global_json, &exom, &addr, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    match c.get(&format!("/api/branches?exom={}", exom)) {
-                        Ok(body) => print_json_or_raw(&body, compact),
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                BranchCommands::Create {
-                    branch_id,
-                    name,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr) =
-                        branch_scope_values(global_json, &exom, &addr, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    let payload = serde_json::json!({
-                        "branch_id": branch_id,
-                        "name": name.unwrap_or_else(|| branch_id.clone()),
-                    });
-                    match c.post_json_with_headers(
-                        &format!("/api/branches?exom={}", exom),
-                        &payload.to_string(),
-                        &h,
-                    ) {
-                        Ok(body) => print_json_or_raw(&body, compact),
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                BranchCommands::Switch {
-                    branch_id,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr) =
-                        branch_scope_values(global_json, &exom, &addr, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    match c.post_text_with_headers(
-                        &format!("/api/branches/{}/switch?exom={}", branch_id, exom),
-                        "",
-                        &h,
-                    ) {
-                        Ok(_) => {
-                            if compact {
-                                print_json_value(
-                                    &serde_json::json!({
-                                        "ok": true,
-                                        "command": "switch",
-                                        "exom": exom,
-                                        "branch_id": branch_id
-                                    }),
-                                    true,
-                                );
-                            } else {
-                                println!("Switched to branch '{}'", branch_id);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                BranchCommands::Diff {
-                    branch_id,
-                    base,
-                    scope,
-                } => {
-                    let (compact, exom, addr) =
-                        branch_scope_values(global_json, &exom, &addr, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    match c.get(&format!(
-                        "/api/branches/{}/diff?exom={}&base={}",
-                        branch_id, exom, base
-                    )) {
-                        Ok(body) => print_json_or_raw(&body, compact),
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                BranchCommands::Merge {
-                    source,
-                    policy,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr) =
-                        branch_scope_values(global_json, &exom, &addr, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    let payload = serde_json::json!({ "policy": policy });
-                    match c.post_json_with_headers(
-                        &format!("/api/branches/{}/merge?exom={}", source, exom),
-                        &payload.to_string(),
-                        &h,
-                    ) {
-                        Ok(body) => print_json_or_raw(&body, compact),
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                BranchCommands::Delete {
-                    branch_id,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr) =
-                        branch_scope_values(global_json, &exom, &addr, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    match c.delete_with_headers(
-                        &format!("/api/branches/{}?exom={}", branch_id, exom),
-                        &h,
-                    ) {
-                        Ok(_) => {
-                            if compact {
-                                print_json_value(
-                                    &serde_json::json!({
-                                        "ok": true,
-                                        "command": "delete",
-                                        "exom": exom,
-                                        "branch_id": branch_id
-                                    }),
-                                    true,
-                                );
-                            } else {
-                                println!("Archived branch '{}'", branch_id);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
+        } => match command {
+            BranchCommands::List { scope } => {
+                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                match c.get(&format!("/api/branches?exom={}", exom)) {
+                    Ok(body) => print_json_or_raw(&body, compact),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
                     }
                 }
             }
-        }
+            BranchCommands::Create {
+                branch_id,
+                name,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                let payload = serde_json::json!({
+                    "branch_id": branch_id,
+                    "name": name.unwrap_or_else(|| branch_id.clone()),
+                });
+                match c.post_json_with_headers(
+                    &format!("/api/branches?exom={}", exom),
+                    &payload.to_string(),
+                    &h,
+                ) {
+                    Ok(body) => print_json_or_raw(&body, compact),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            BranchCommands::Switch {
+                branch_id,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                match c.post_text_with_headers(
+                    &format!("/api/branches/{}/switch?exom={}", branch_id, exom),
+                    "",
+                    &h,
+                ) {
+                    Ok(_) => {
+                        if compact {
+                            print_json_value(
+                                &serde_json::json!({
+                                    "ok": true,
+                                    "command": "switch",
+                                    "exom": exom,
+                                    "branch_id": branch_id
+                                }),
+                                true,
+                            );
+                        } else {
+                            println!("Switched to branch '{}'", branch_id);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            BranchCommands::Diff {
+                branch_id,
+                base,
+                scope,
+            } => {
+                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                match c.get(&format!(
+                    "/api/branches/{}/diff?exom={}&base={}",
+                    branch_id, exom, base
+                )) {
+                    Ok(body) => print_json_or_raw(&body, compact),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            BranchCommands::Merge {
+                source,
+                policy,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                let payload = serde_json::json!({ "policy": policy });
+                match c.post_json_with_headers(
+                    &format!("/api/branches/{}/merge?exom={}", source, exom),
+                    &payload.to_string(),
+                    &h,
+                ) {
+                    Ok(body) => print_json_or_raw(&body, compact),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            BranchCommands::Delete {
+                branch_id,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                match c
+                    .delete_with_headers(&format!("/api/branches/{}?exom={}", branch_id, exom), &h)
+                {
+                    Ok(_) => {
+                        if compact {
+                            print_json_value(
+                                &serde_json::json!({
+                                    "ok": true,
+                                    "command": "delete",
+                                    "exom": exom,
+                                    "branch_id": branch_id
+                                }),
+                                true,
+                            );
+                        } else {
+                            println!("Archived branch '{}'", branch_id);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
         Commands::Coord {
             command,
             exom,
             addr,
             branch,
-        } => {
-            match command {
-                CoordCommands::Claim {
-                    claim_id,
-                    owner,
-                    status,
-                    expires_at,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+        } => match command {
+            CoordCommands::Claim {
+                claim_id,
+                owner,
+                status,
+                expires_at,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
+                let status_fact_id = coord_fact_id("claim", &claim_id, "status");
+                let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
+                let mut results = Vec::new();
+                match replace_fact_json(
+                    &c,
+                    &exom,
+                    &h,
+                    &owner_fact_id,
+                    ray_exomem::system_schema::attrs::coord::CLAIM_OWNER,
+                    &owner,
+                    "coord-cli",
+                    None,
+                    None,
+                ) {
+                    Ok(body) => results.push(
+                        serde_json::from_str::<serde_json::Value>(&body)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
+                    ),
+                    Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     }
-                    let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
-                    let status_fact_id = coord_fact_id("claim", &claim_id, "status");
-                    let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
-                    let mut results = Vec::new();
+                }
+                match replace_fact_json(
+                    &c,
+                    &exom,
+                    &h,
+                    &status_fact_id,
+                    ray_exomem::system_schema::attrs::coord::CLAIM_STATUS,
+                    &status,
+                    "coord-cli",
+                    None,
+                    None,
+                ) {
+                    Ok(body) => results.push(
+                        serde_json::from_str::<serde_json::Value>(&body)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
+                    ),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                if let Some(expires_at) = expires_at.as_deref() {
                     match replace_fact_json(
                         &c,
                         &exom,
                         &h,
-                        &owner_fact_id,
-                        ray_exomem::system_schema::attrs::coord::CLAIM_OWNER,
-                        &owner,
+                        &expires_fact_id,
+                        ray_exomem::system_schema::attrs::coord::CLAIM_EXPIRES_AT,
+                        expires_at,
                         "coord-cli",
                         None,
                         None,
@@ -2509,292 +2540,251 @@ fn main() {
                             std::process::exit(1);
                         }
                     }
-                    match replace_fact_json(
-                        &c,
-                        &exom,
-                        &h,
-                        &status_fact_id,
-                        ray_exomem::system_schema::attrs::coord::CLAIM_STATUS,
-                        &status,
-                        "coord-cli",
-                        None,
-                        None,
-                    ) {
+                } else {
+                    match retract_fact_id(&c, &exom, &h, &expires_fact_id) {
                         Ok(body) => results.push(
                             serde_json::from_str::<serde_json::Value>(&body)
                                 .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
                         ),
                         Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                    if let Some(expires_at) = expires_at.as_deref() {
-                        match replace_fact_json(
-                            &c,
-                            &exom,
-                            &h,
-                            &expires_fact_id,
-                            ray_exomem::system_schema::attrs::coord::CLAIM_EXPIRES_AT,
-                            expires_at,
-                            "coord-cli",
-                            None,
-                            None,
-                        ) {
-                            Ok(body) => results.push(
-                                serde_json::from_str::<serde_json::Value>(&body)
-                                    .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
-                            ),
-                            Err(e) => {
+                            let msg = e.to_string();
+                            if msg.contains("is not active")
+                                || msg.contains("HTTP 404")
+                                || msg.contains("fact not found")
+                                || msg.contains("not found")
+                            {
+                                results.push(serde_json::json!({
+                                    "ok": true,
+                                    "fact_id": expires_fact_id,
+                                    "skipped": true
+                                }));
+                            } else {
                                 eprintln!("error: {}", e);
                                 std::process::exit(1);
                             }
                         }
-                    } else {
-                        match retract_fact_id(&c, &exom, &h, &expires_fact_id) {
-                            Ok(body) => results.push(
-                                serde_json::from_str::<serde_json::Value>(&body)
-                                    .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
-                            ),
-                            Err(e) => {
-                                let msg = e.to_string();
-                                if msg.contains("is not active")
-                                    || msg.contains("HTTP 404")
-                                    || msg.contains("fact not found")
-                                    || msg.contains("not found")
-                                {
-                                    results.push(serde_json::json!({
-                                        "ok": true,
-                                        "fact_id": expires_fact_id,
-                                        "skipped": true
-                                    }));
-                                } else {
-                                    eprintln!("error: {}", e);
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
                     }
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "claim",
-                        "exom": exom,
-                        "claim_id": claim_id,
-                        "owner": owner,
-                        "status": status,
-                        "expires_at": expires_at,
-                        "writes": results
-                    });
-                    print_json_value(&out, compact);
                 }
-                CoordCommands::Release {
-                    claim_id,
-                    status,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                    let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
-                    let status_fact_id = coord_fact_id("claim", &claim_id, "status");
-                    let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
-                    let mut results = Vec::new();
-                    for retract_id in [&owner_fact_id, &expires_fact_id] {
-                        match retract_fact_id(&c, &exom, &h, retract_id) {
-                            Ok(body) => results.push(
-                                serde_json::from_str::<serde_json::Value>(&body)
-                                    .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
-                            ),
-                            Err(e) => {
-                                let msg = e.to_string();
-                                if msg.contains("is not active")
-                                    || msg.contains("HTTP 404")
-                                    || msg.contains("not found")
-                                {
-                                    results.push(serde_json::json!({
-                                        "ok": true,
-                                        "fact_id": retract_id,
-                                        "skipped": true
-                                    }));
-                                } else {
-                                    eprintln!("error: {}", e);
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                    }
-                    match replace_fact_json(
-                        &c,
-                        &exom,
-                        &h,
-                        &status_fact_id,
-                        ray_exomem::system_schema::attrs::coord::CLAIM_STATUS,
-                        &status,
-                        "coord-cli",
-                        None,
-                        None,
-                    ) {
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "claim",
+                    "exom": exom,
+                    "claim_id": claim_id,
+                    "owner": owner,
+                    "status": status,
+                    "expires_at": expires_at,
+                    "writes": results
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::Release {
+                claim_id,
+                status,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
+                let status_fact_id = coord_fact_id("claim", &claim_id, "status");
+                let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
+                let mut results = Vec::new();
+                for retract_id in [&owner_fact_id, &expires_fact_id] {
+                    match retract_fact_id(&c, &exom, &h, retract_id) {
                         Ok(body) => results.push(
                             serde_json::from_str::<serde_json::Value>(&body)
                                 .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
                         ),
                         Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "release",
-                        "exom": exom,
-                        "claim_id": claim_id,
-                        "status": status,
-                        "writes": results
-                    });
-                    print_json_value(&out, compact);
-                }
-                CoordCommands::Depend {
-                    task_id,
-                    depends_on,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                    let fact_id = format!("task/{}/depends/{}", task_id, depends_on);
-                    match replace_fact_json(
-                        &c,
-                        &exom,
-                        &h,
-                        &fact_id,
-                        ray_exomem::system_schema::attrs::coord::TASK_DEPENDS_ON,
-                        &depends_on,
-                        "coord-cli",
-                        None,
-                        None,
-                    ) {
-                        Ok(body) => {
-                            let out = serde_json::json!({
-                                "ok": true,
-                                "command": "depend",
-                                "exom": exom,
-                                "task_id": task_id,
-                                "depends_on": depends_on,
-                                "write": serde_json::from_str::<serde_json::Value>(&body)
-                                    .unwrap_or_else(|_| serde_json::json!({ "raw": body }))
-                            });
-                            print_json_value(&out, compact);
-                        }
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
+                            let msg = e.to_string();
+                            if msg.contains("is not active")
+                                || msg.contains("HTTP 404")
+                                || msg.contains("not found")
+                            {
+                                results.push(serde_json::json!({
+                                    "ok": true,
+                                    "fact_id": retract_id,
+                                    "skipped": true
+                                }));
+                            } else {
+                                eprintln!("error: {}", e);
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }
-                CoordCommands::AgentSession {
-                    agent_id,
-                    session_id,
-                    actor,
-                    session,
-                    model,
-                    scope,
-                } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some(actor.clone());
-                    let h = ctx_headers(&actor_opt, &session, &model);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                match replace_fact_json(
+                    &c,
+                    &exom,
+                    &h,
+                    &status_fact_id,
+                    ray_exomem::system_schema::attrs::coord::CLAIM_STATUS,
+                    &status,
+                    "coord-cli",
+                    None,
+                    None,
+                ) {
+                    Ok(body) => results.push(
+                        serde_json::from_str::<serde_json::Value>(&body)
+                            .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
+                    ),
+                    Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
-                    }
-                    let fact_id = coord_fact_id("agent", &agent_id, "session");
-                    match replace_fact_json(
-                        &c,
-                        &exom,
-                        &h,
-                        &fact_id,
-                        ray_exomem::system_schema::attrs::coord::AGENT_SESSION,
-                        &session_id,
-                        "coord-cli",
-                        None,
-                        None,
-                    ) {
-                        Ok(body) => {
-                            let out = serde_json::json!({
-                                "ok": true,
-                                "command": "agent-session",
-                                "exom": exom,
-                                "agent_id": agent_id,
-                                "session_id": session_id,
-                                "write": serde_json::from_str::<serde_json::Value>(&body)
-                                    .unwrap_or_else(|_| serde_json::json!({ "raw": body }))
-                            });
-                            print_json_value(&out, compact);
-                        }
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
                     }
                 }
-                CoordCommands::ListClaims {
-                    owner,
-                    status,
-                    scope,
-                } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some("cli-query".to_string());
-                    let h = ctx_headers(&actor_opt, &None, &None);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "release",
+                    "exom": exom,
+                    "claim_id": claim_id,
+                    "status": status,
+                    "writes": results
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::Depend {
+                task_id,
+                depends_on,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let fact_id = format!("task/{}/depends/{}", task_id, depends_on);
+                match replace_fact_json(
+                    &c,
+                    &exom,
+                    &h,
+                    &fact_id,
+                    ray_exomem::system_schema::attrs::coord::TASK_DEPENDS_ON,
+                    &depends_on,
+                    "coord-cli",
+                    None,
+                    None,
+                ) {
+                    Ok(body) => {
+                        let out = serde_json::json!({
+                            "ok": true,
+                            "command": "depend",
+                            "exom": exom,
+                            "task_id": task_id,
+                            "depends_on": depends_on,
+                            "write": serde_json::from_str::<serde_json::Value>(&body)
+                                .unwrap_or_else(|_| serde_json::json!({ "raw": body }))
+                        });
+                        print_json_value(&out, compact);
+                    }
+                    Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     }
-                    let owner_rows = match query_two_string_cols(
-                        &c,
-                        &exom,
-                        &h,
-                        "(query <exom> (find ?fact ?owner) (where (claim-owner-row ?fact ?owner)))",
-                    ) {
-                        Ok(rows) => rows,
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-                    let status_rows = match query_two_string_cols(
-                        &c,
-                        &exom,
-                        &h,
-                        "(query <exom> (find ?fact ?status) (where (claim-status-row ?fact ?status)))",
-                    ) {
-                        Ok(rows) => rows,
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-                    let expires_rows = match query_two_string_cols(
+                }
+            }
+            CoordCommands::AgentSession {
+                agent_id,
+                session_id,
+                actor,
+                session,
+                model,
+                scope,
+            } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some(actor.clone());
+                let h = ctx_headers(&actor_opt, &session, &model);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let fact_id = coord_fact_id("agent", &agent_id, "session");
+                match replace_fact_json(
+                    &c,
+                    &exom,
+                    &h,
+                    &fact_id,
+                    ray_exomem::system_schema::attrs::coord::AGENT_SESSION,
+                    &session_id,
+                    "coord-cli",
+                    None,
+                    None,
+                ) {
+                    Ok(body) => {
+                        let out = serde_json::json!({
+                            "ok": true,
+                            "command": "agent-session",
+                            "exom": exom,
+                            "agent_id": agent_id,
+                            "session_id": session_id,
+                            "write": serde_json::from_str::<serde_json::Value>(&body)
+                                .unwrap_or_else(|_| serde_json::json!({ "raw": body }))
+                        });
+                        print_json_value(&out, compact);
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            CoordCommands::ListClaims {
+                owner,
+                status,
+                scope,
+            } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some("cli-query".to_string());
+                let h = ctx_headers(&actor_opt, &None, &None);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let owner_rows = match query_two_string_cols(
+                    &c,
+                    &exom,
+                    &h,
+                    "(query <exom> (find ?fact ?owner) (where (claim-owner-row ?fact ?owner)))",
+                ) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let status_rows = match query_two_string_cols(
+                    &c,
+                    &exom,
+                    &h,
+                    "(query <exom> (find ?fact ?status) (where (claim-status-row ?fact ?status)))",
+                ) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let expires_rows = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
@@ -2807,125 +2797,124 @@ fn main() {
                         }
                     };
 
-                    let mut claims: HashMap<String, serde_json::Map<String, serde_json::Value>> =
-                        HashMap::new();
-                    for (fact_id, value) in owner_rows {
-                        if let Some(claim_id) = claim_id_from_field_fact_id(&fact_id, "owner") {
-                            let entry = claims.entry(claim_id.clone()).or_default();
-                            entry.insert("claim_id".into(), serde_json::json!(claim_id));
-                            entry.insert("owner".into(), serde_json::json!(value));
-                        }
+                let mut claims: HashMap<String, serde_json::Map<String, serde_json::Value>> =
+                    HashMap::new();
+                for (fact_id, value) in owner_rows {
+                    if let Some(claim_id) = claim_id_from_field_fact_id(&fact_id, "owner") {
+                        let entry = claims.entry(claim_id.clone()).or_default();
+                        entry.insert("claim_id".into(), serde_json::json!(claim_id));
+                        entry.insert("owner".into(), serde_json::json!(value));
                     }
-                    for (fact_id, value) in status_rows {
-                        if let Some(claim_id) = claim_id_from_field_fact_id(&fact_id, "status") {
-                            let entry = claims.entry(claim_id.clone()).or_default();
-                            entry.insert("claim_id".into(), serde_json::json!(claim_id));
-                            entry.insert("status".into(), serde_json::json!(value));
-                        }
+                }
+                for (fact_id, value) in status_rows {
+                    if let Some(claim_id) = claim_id_from_field_fact_id(&fact_id, "status") {
+                        let entry = claims.entry(claim_id.clone()).or_default();
+                        entry.insert("claim_id".into(), serde_json::json!(claim_id));
+                        entry.insert("status".into(), serde_json::json!(value));
                     }
-                    for (fact_id, value) in expires_rows {
-                        if let Some(claim_id) = claim_id_from_field_fact_id(&fact_id, "expires_at")
-                        {
-                            let entry = claims.entry(claim_id.clone()).or_default();
-                            entry.insert("claim_id".into(), serde_json::json!(claim_id));
-                            entry.insert("expires_at".into(), serde_json::json!(value));
-                        }
+                }
+                for (fact_id, value) in expires_rows {
+                    if let Some(claim_id) = claim_id_from_field_fact_id(&fact_id, "expires_at") {
+                        let entry = claims.entry(claim_id.clone()).or_default();
+                        entry.insert("claim_id".into(), serde_json::json!(claim_id));
+                        entry.insert("expires_at".into(), serde_json::json!(value));
                     }
+                }
 
-                    let mut rows: Vec<serde_json::Value> = claims
-                        .into_values()
-                        .map(serde_json::Value::Object)
-                        .filter(|row| {
-                            let owner_ok = owner
-                                .as_ref()
-                                .map(|want| row["owner"].as_str() == Some(want.as_str()))
-                                .unwrap_or(true);
-                            let status_ok = status
-                                .as_ref()
-                                .map(|want| row["status"].as_str() == Some(want.as_str()))
-                                .unwrap_or(true);
-                            owner_ok && status_ok
-                        })
-                        .collect();
-                    rows.sort_by(|a, b| {
-                        a["claim_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .cmp(b["claim_id"].as_str().unwrap_or(""))
-                    });
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "list-claims",
-                        "exom": exom,
-                        "count": rows.len(),
-                        "claims": rows
-                    });
-                    print_json_value(&out, compact);
+                let mut rows: Vec<serde_json::Value> = claims
+                    .into_values()
+                    .map(serde_json::Value::Object)
+                    .filter(|row| {
+                        let owner_ok = owner
+                            .as_ref()
+                            .map(|want| row["owner"].as_str() == Some(want.as_str()))
+                            .unwrap_or(true);
+                        let status_ok = status
+                            .as_ref()
+                            .map(|want| row["status"].as_str() == Some(want.as_str()))
+                            .unwrap_or(true);
+                        owner_ok && status_ok
+                    })
+                    .collect();
+                rows.sort_by(|a, b| {
+                    a["claim_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["claim_id"].as_str().unwrap_or(""))
+                });
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "list-claims",
+                    "exom": exom,
+                    "count": rows.len(),
+                    "claims": rows
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::ShowClaim { claim_id, scope } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some("cli-query".to_string());
+                let h = ctx_headers(&actor_opt, &None, &None);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
                 }
-                CoordCommands::ShowClaim { claim_id, scope } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some("cli-query".to_string());
-                    let h = ctx_headers(&actor_opt, &None, &None);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
+                let status_fact_id = coord_fact_id("claim", &claim_id, "status");
+                let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
+                let owner = match optional_fact_detail(&c, &exom, &owner_fact_id) {
+                    Ok(v) => v,
+                    Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     }
-                    let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
-                    let status_fact_id = coord_fact_id("claim", &claim_id, "status");
-                    let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
-                    let owner = match optional_fact_detail(&c, &exom, &owner_fact_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-                    let status_detail = match optional_fact_detail(&c, &exom, &status_fact_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-                    let expires = match optional_fact_detail(&c, &exom, &expires_fact_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-                    let current = serde_json::json!({
-                        "owner": current_fact_value(owner.as_ref()),
-                        "status": current_fact_value(status_detail.as_ref()),
-                        "expires_at": current_fact_value(expires.as_ref()),
-                    });
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "show-claim",
-                        "exom": exom,
-                        "claim_id": claim_id,
-                        "current": current,
-                        "facts": {
-                            "owner": owner,
-                            "status": status_detail,
-                            "expires_at": expires
-                        }
-                    });
-                    print_json_value(&out, compact);
-                }
-                CoordCommands::ListDependencies { task_id, scope } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some("cli-query".to_string());
-                    let h = ctx_headers(&actor_opt, &None, &None);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                };
+                let status_detail = match optional_fact_detail(&c, &exom, &status_fact_id) {
+                    Ok(v) => v,
+                    Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     }
-                    let mut rows: Vec<serde_json::Value> = match query_two_string_cols(
+                };
+                let expires = match optional_fact_detail(&c, &exom, &expires_fact_id) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let current = serde_json::json!({
+                    "owner": current_fact_value(owner.as_ref()),
+                    "status": current_fact_value(status_detail.as_ref()),
+                    "expires_at": current_fact_value(expires.as_ref()),
+                });
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "show-claim",
+                    "exom": exom,
+                    "claim_id": claim_id,
+                    "current": current,
+                    "facts": {
+                        "owner": owner,
+                        "status": status_detail,
+                        "expires_at": expires
+                    }
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::ListDependencies { task_id, scope } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some("cli-query".to_string());
+                let h = ctx_headers(&actor_opt, &None, &None);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let mut rows: Vec<serde_json::Value> = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
@@ -2953,32 +2942,32 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    rows.sort_by(|a, b| {
-                        a["fact_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .cmp(b["fact_id"].as_str().unwrap_or(""))
-                    });
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "list-dependencies",
-                        "exom": exom,
-                        "count": rows.len(),
-                        "dependencies": rows
-                    });
-                    print_json_value(&out, compact);
+                rows.sort_by(|a, b| {
+                    a["fact_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["fact_id"].as_str().unwrap_or(""))
+                });
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "list-dependencies",
+                    "exom": exom,
+                    "count": rows.len(),
+                    "dependencies": rows
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::ShowTask { task_id, scope } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some("cli-query".to_string());
+                let h = ctx_headers(&actor_opt, &None, &None);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
                 }
-                CoordCommands::ShowTask { task_id, scope } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some("cli-query".to_string());
-                    let h = ctx_headers(&actor_opt, &None, &None);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                    let deps = match query_two_string_cols(
+                let deps = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
@@ -2990,64 +2979,64 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    let mut current = Vec::new();
-                    let mut facts = Vec::new();
-                    for (fact_id, depends_on) in deps {
-                        if task_id_from_dependency_fact_id(&fact_id).as_deref()
-                            != Some(task_id.as_str())
-                        {
-                            continue;
-                        }
-                        current.push(serde_json::json!({
+                let mut current = Vec::new();
+                let mut facts = Vec::new();
+                for (fact_id, depends_on) in deps {
+                    if task_id_from_dependency_fact_id(&fact_id).as_deref()
+                        != Some(task_id.as_str())
+                    {
+                        continue;
+                    }
+                    current.push(serde_json::json!({
+                        "fact_id": fact_id,
+                        "depends_on": depends_on
+                    }));
+                    match optional_fact_detail(&c, &exom, &fact_id) {
+                        Ok(detail) => facts.push(serde_json::json!({
                             "fact_id": fact_id,
-                            "depends_on": depends_on
-                        }));
-                        match optional_fact_detail(&c, &exom, &fact_id) {
-                            Ok(detail) => facts.push(serde_json::json!({
-                                "fact_id": fact_id,
-                                "detail": detail
-                            })),
-                            Err(e) => {
-                                eprintln!("error: {}", e);
-                                std::process::exit(1);
-                            }
+                            "detail": detail
+                        })),
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
                         }
                     }
-                    current.sort_by(|a, b| {
-                        a["fact_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .cmp(b["fact_id"].as_str().unwrap_or(""))
-                    });
-                    facts.sort_by(|a, b| {
-                        a["fact_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .cmp(b["fact_id"].as_str().unwrap_or(""))
-                    });
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "show-task",
-                        "exom": exom,
-                        "task_id": task_id,
-                        "current": {
-                            "dependencies": current
-                        },
-                        "facts": facts
-                    });
-                    print_json_value(&out, compact);
                 }
-                CoordCommands::ListAgentSessions { agent_id, scope } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some("cli-query".to_string());
-                    let h = ctx_headers(&actor_opt, &None, &None);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                    let mut rows: Vec<serde_json::Value> = match query_two_string_cols(
+                current.sort_by(|a, b| {
+                    a["fact_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["fact_id"].as_str().unwrap_or(""))
+                });
+                facts.sort_by(|a, b| {
+                    a["fact_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["fact_id"].as_str().unwrap_or(""))
+                });
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "show-task",
+                    "exom": exom,
+                    "task_id": task_id,
+                    "current": {
+                        "dependencies": current
+                    },
+                    "facts": facts
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::ListAgentSessions { agent_id, scope } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some("cli-query".to_string());
+                let h = ctx_headers(&actor_opt, &None, &None);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+                let mut rows: Vec<serde_json::Value> = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
@@ -3075,55 +3064,54 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    rows.sort_by(|a, b| {
-                        a["fact_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .cmp(b["fact_id"].as_str().unwrap_or(""))
-                    });
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "list-agent-sessions",
-                        "exom": exom,
-                        "count": rows.len(),
-                        "agent_sessions": rows
-                    });
-                    print_json_value(&out, compact);
+                rows.sort_by(|a, b| {
+                    a["fact_id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["fact_id"].as_str().unwrap_or(""))
+                });
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "list-agent-sessions",
+                    "exom": exom,
+                    "count": rows.len(),
+                    "agent_sessions": rows
+                });
+                print_json_value(&out, compact);
+            }
+            CoordCommands::ShowAgent { agent_id, scope } => {
+                let (compact, exom, addr, branch) =
+                    coord_scope_values(global_json, &exom, &addr, &branch, &scope);
+                let c = ray_exomem::client::Client::new(Some(&addr));
+                let actor_opt = Some("cli-query".to_string());
+                let h = ctx_headers(&actor_opt, &None, &None);
+                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
                 }
-                CoordCommands::ShowAgent { agent_id, scope } => {
-                    let (compact, exom, addr, branch) =
-                        coord_scope_values(global_json, &exom, &addr, &branch, &scope);
-                    let c = ray_exomem::client::Client::new(Some(&addr));
-                    let actor_opt = Some("cli-query".to_string());
-                    let h = ctx_headers(&actor_opt, &None, &None);
-                    if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
+                let fact_id = coord_fact_id("agent", &agent_id, "session");
+                let detail = match optional_fact_detail(&c, &exom, &fact_id) {
+                    Ok(v) => v,
+                    Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     }
-                    let fact_id = coord_fact_id("agent", &agent_id, "session");
-                    let detail = match optional_fact_detail(&c, &exom, &fact_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-                    let out = serde_json::json!({
-                        "ok": true,
-                        "command": "show-agent",
-                        "exom": exom,
-                        "agent_id": agent_id,
-                        "current": {
-                            "session_id": current_fact_value(detail.as_ref())
-                        },
-                        "facts": {
-                            "session": detail
-                        }
-                    });
-                    print_json_value(&out, compact);
-                }
+                };
+                let out = serde_json::json!({
+                    "ok": true,
+                    "command": "show-agent",
+                    "exom": exom,
+                    "agent_id": agent_id,
+                    "current": {
+                        "session_id": current_fact_value(detail.as_ref())
+                    },
+                    "facts": {
+                        "session": detail
+                    }
+                });
+                print_json_value(&out, compact);
             }
-        }
+        },
         Commands::History {
             fact_id,
             exom,
@@ -3335,7 +3323,10 @@ fn main() {
                         }
                     }
                 }
-                SessionCmd::AddAgent { session_path, agent } => {
+                SessionCmd::AddAgent {
+                    session_path,
+                    agent,
+                } => {
                     // FIXME(nested-exoms-task-4.4): branch-create is a 501 stub.
                     let payload = serde_json::json!({ "exom": session_path, "branch": agent });
                     let h: Vec<(&str, &str)> = vec![];
@@ -3352,7 +3343,10 @@ fn main() {
                         }
                     }
                 }
-                SessionCmd::Join { session_path, actor } => {
+                SessionCmd::Join {
+                    session_path,
+                    actor,
+                } => {
                     // FIXME(nested-exoms-task-4.4): session-join is a 501 stub.
                     let payload =
                         serde_json::json!({ "session_path": session_path, "actor": actor });
@@ -3617,7 +3611,11 @@ mod tests {
             "--json",
         ]);
         match cli.command {
-            Commands::Branch { command, exom, addr } => match command {
+            Commands::Branch {
+                command,
+                exom,
+                addr,
+            } => match command {
                 BranchCommands::List { scope } => {
                     let (compact, exom, addr) = branch_scope_values(false, &exom, &addr, &scope);
                     assert!(compact);
@@ -3675,12 +3673,7 @@ mod tests {
 
     #[test]
     fn assert_uses_structured_endpoint_for_metadata_flags() {
-        assert!(should_use_structured_assert(
-            Some(0.7),
-            &None,
-            &None,
-            &None
-        ));
+        assert!(should_use_structured_assert(Some(0.7), &None, &None, &None));
         assert!(should_use_structured_assert(
             None,
             &Some("manual".into()),
@@ -3698,7 +3691,8 @@ mod tests {
 
     #[test]
     fn doctor_unknown_exom_detection_is_classified() {
-        let err = anyhow::anyhow!("daemon returned HTTP 500: {{\"error\":\"unknown exom 'demo'\"}}");
+        let err =
+            anyhow::anyhow!("daemon returned HTTP 500: {{\"error\":\"unknown exom 'demo'\"}}");
         assert!(is_unknown_exom_error(&err));
         let other = anyhow::anyhow!("cannot connect to daemon at 127.0.0.1:9780");
         assert!(!is_unknown_exom_error(&other));

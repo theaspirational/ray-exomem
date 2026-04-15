@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Instant,
@@ -39,7 +39,7 @@ pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9780";
 pub const DEFAULT_EXOM: &str = "main";
 
 use crate::{
-    auth::middleware::MaybeUser,
+    auth::{middleware::MaybeUser, User},
     backend::RayforceEngine,
     brain::{self, Belief, Brain, Branch, Fact, MergePolicy, Observation, Tx},
     context::{self, MutationContext},
@@ -131,12 +131,15 @@ impl AppState {
                 (Some(tree_dir), Some(sym))
             }
             None => {
-                exoms.insert(DEFAULT_EXOM.to_string(), ExomState {
-                    brain: Brain::new(),
-                    datoms: storage::build_datoms_table(&Brain::new())?,
-                    rules: Vec::new(),
-                    exom_disk: None,
-                });
+                exoms.insert(
+                    DEFAULT_EXOM.to_string(),
+                    ExomState {
+                        brain: Brain::new(),
+                        datoms: storage::build_datoms_table(&Brain::new())?,
+                        rules: Vec::new(),
+                        exom_disk: None,
+                    },
+                );
                 (None, None)
             }
         };
@@ -146,7 +149,9 @@ impl AppState {
             engine.bind_named_db(storage::sym_intern(name), &es.datoms)?;
         }
 
-        Ok(Arc::new(AppState::new(engine, exoms, tree_root, sym_path, None)))
+        Ok(Arc::new(AppState::new(
+            engine, exoms, tree_root, sym_path, None,
+        )))
     }
 
     /// Re-load exom data from ExomDb when available. Call after initial disk loading.
@@ -173,14 +178,9 @@ impl AppState {
                     let mut exoms = self.exoms.lock().unwrap();
                     exoms.insert(key.clone(), es);
                     let datoms = &exoms.get(&key).expect("just inserted").datoms;
-                    let _ = self
-                        .engine
-                        .bind_named_db(storage::sym_intern(&key), datoms);
+                    let _ = self.engine.bind_named_db(storage::sym_intern(&key), datoms);
                 }
-                Err(e) => eprintln!(
-                    "[ray-exomem] WARNING: DB reload for '{}': {}",
-                    key, e
-                ),
+                Err(e) => eprintln!("[ray-exomem] WARNING: DB reload for '{}': {}", key, e),
             }
         }
     }
@@ -197,22 +197,39 @@ fn load_tree_exoms_into(
         sym_path: &std::path::Path,
         out: &mut HashMap<String, ExomState>,
     ) {
-        let Ok(rd) = std::fs::read_dir(current) else { return; };
+        let Ok(rd) = std::fs::read_dir(current) else {
+            return;
+        };
         for entry in rd.flatten() {
-            let Ok(ft) = entry.file_type() else { continue; };
-            if !ft.is_dir() { continue; }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
             let disk = entry.path();
             let rel = disk.strip_prefix(tree_root).unwrap_or(&disk);
-            let slash_key = rel.components()
+            let slash_key = rel
+                .components()
                 .filter_map(|c| c.as_os_str().to_str())
-                .collect::<Vec<_>>().join("/");
-            if slash_key.is_empty() { continue; }
+                .collect::<Vec<_>>()
+                .join("/");
+            if slash_key.is_empty() {
+                continue;
+            }
             let meta_p = disk.join(crate::exom::META_FILENAME);
             if meta_p.exists() {
                 eprintln!("[ray-exomem] loading tree exom '{}'", slash_key);
                 match load_exom_from_tree_path_inner(&disk, sym_path, &slash_key) {
-                    Ok(es) => { out.insert(slash_key.clone(), es); }
-                    Err(e) => { eprintln!("[ray-exomem] WARNING: failed to load '{}': {}", slash_key, e); }
+                    Ok(es) => {
+                        out.insert(slash_key.clone(), es);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[ray-exomem] WARNING: failed to load '{}': {}",
+                            slash_key, e
+                        );
+                    }
                 }
                 continue;
             }
@@ -368,7 +385,10 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/facts/{id}", get(api_fact_detail))
         // Branches
         .route("/branches", get(api_list_branches).post(api_create_branch))
-        .route("/branches/{id}", get(api_branch_detail).delete(api_delete_branch_handler))
+        .route(
+            "/branches/{id}",
+            get(api_branch_detail).delete(api_delete_branch_handler),
+        )
         .route("/branches/{id}/switch", post(api_switch_branch_handler))
         .route("/branches/{id}/diff", get(api_branch_diff_handler))
         .route("/branches/{id}/merge", post(api_merge_branch_handler))
@@ -382,7 +402,10 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/retract-all", post(api_retract_all))
         .route("/actions/wipe", post(api_wipe))
         .route("/actions/factory-reset", post(api_factory_reset))
-        .route("/actions/consolidate-propose", post(api_consolidate_propose))
+        .route(
+            "/actions/consolidate-propose",
+            post(api_consolidate_propose),
+        )
         // Schema / graph / clusters / logs / provenance / relation-graph
         .route("/schema", get(api_schema))
         .route("/graph", get(api_graph))
@@ -443,7 +466,12 @@ async fn spa_fallback(uri: Uri) -> impl IntoResponse {
 
     if let Some(file) = EMBEDDED_UI.get_file(path) {
         let ct = content_type_for_ext(path);
-        return (StatusCode::OK, [(header::CONTENT_TYPE, ct)], file.contents()).into_response();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, ct)],
+            file.contents(),
+        )
+            .into_response();
     }
 
     // SPA client-side routing fallback
@@ -594,7 +622,11 @@ fn combined_rules(exom: &str, user_rules: &[ParsedRule]) -> anyhow::Result<Vec<P
     Ok(rules)
 }
 
-fn refresh_exom_binding(state: &AppState, exoms: &mut HashMap<String, ExomState>, exom_name: &str) -> anyhow::Result<()> {
+fn refresh_exom_binding(
+    state: &AppState,
+    exoms: &mut HashMap<String, ExomState>,
+    exom_name: &str,
+) -> anyhow::Result<()> {
     let es = exoms
         .get_mut(exom_name)
         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
@@ -637,7 +669,9 @@ pub fn mutate_exom<T>(
     };
     let out = result?;
     refresh_exom_binding(state, &mut exoms, exom_name)?;
-    let _ = state.sse_tx.send(format!(r#"{{"kind":"memory","exom":"{}"}}"#, exom_name));
+    let _ = state
+        .sse_tx
+        .send(format!(r#"{{"kind":"memory","exom":"{}"}}"#, exom_name));
     Ok(out)
 }
 
@@ -673,9 +707,7 @@ async fn exom_db_save_brain_snapshot(state: &AppState, exom_name: &str) {
     }
     .await
     {
-        eprintln!(
-            "[ray-exomem] warning: ExomDb snapshot failed for {path}: {e}"
-        );
+        eprintln!("[ray-exomem] warning: ExomDb snapshot failed for {path}: {e}");
     }
 }
 
@@ -761,9 +793,12 @@ async fn guard_write(
             let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
             if !level.can_write() {
                 return Some(
-                    ApiError::new("forbidden", format!("write access denied to {}", exom_slash))
-                        .with_status(403)
-                        .into_response(),
+                    ApiError::new(
+                        "forbidden",
+                        format!("write access denied to {}", exom_slash),
+                    )
+                    .with_status(403)
+                    .into_response(),
                 );
             }
         }
@@ -792,6 +827,157 @@ async fn guard_owner(
         }
     }
     None
+}
+
+fn tree_path_starts_with(path: &crate::path::TreePath, prefix: &crate::path::TreePath) -> bool {
+    path.len() >= prefix.len()
+        && path
+            .segments()
+            .iter()
+            .zip(prefix.segments().iter())
+            .all(|(a, b)| a == b)
+}
+
+fn namespace_path(namespace: &str) -> std::io::Result<crate::path::TreePath> {
+    namespace.parse().map_err(|e: crate::path::PathError| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid namespace {:?}: {}", namespace, e),
+        )
+    })
+}
+
+async fn build_tree_root_for_admin(
+    state: &AppState,
+    user: &User,
+    opts: &crate::tree::WalkOptions,
+) -> std::io::Result<crate::tree::TreeNode> {
+    let tree_root = server_tree_root(state);
+    let mut namespaces = BTreeSet::new();
+    namespaces.insert(user.namespace_root().to_string());
+    if let Some(ref auth_store) = state.auth_store {
+        for stored in auth_store.list_users().await {
+            namespaces.insert(stored.email);
+        }
+    }
+
+    let mut children = Vec::new();
+    for namespace in namespaces {
+        let root_path = namespace_path(&namespace)?;
+        children.push(crate::tree::walk_or_empty(&tree_root, &root_path, opts)?);
+    }
+
+    Ok(crate::tree::TreeNode::Folder {
+        name: String::new(),
+        path: String::new(),
+        children,
+    })
+}
+
+async fn build_tree_root_for_user(
+    state: &AppState,
+    user: &User,
+    opts: &crate::tree::WalkOptions,
+) -> std::io::Result<crate::tree::TreeNode> {
+    let tree_root = server_tree_root(state);
+    let own_root = namespace_path(user.namespace_root())?;
+    let mut children = vec![crate::tree::walk_or_empty(&tree_root, &own_root, opts)?];
+
+    if let Some(ref auth_store) = state.auth_store {
+        let mut by_owner: BTreeMap<String, Vec<crate::path::TreePath>> = BTreeMap::new();
+        for grant in auth_store.shares_for_grantee(&user.email).await {
+            let parsed: crate::path::TreePath = match grant.path.parse() {
+                Ok(path) => path,
+                Err(err) => {
+                    eprintln!(
+                        "[ray-exomem] skipping invalid share path {:?}: {}",
+                        grant.path, err
+                    );
+                    continue;
+                }
+            };
+            let Some(owner) = parsed.segments().first().cloned() else {
+                continue;
+            };
+            if owner == user.namespace_root() {
+                continue;
+            }
+            by_owner.entry(owner).or_default().push(parsed);
+        }
+
+        for (owner, shared_paths) in by_owner {
+            let owner_root = namespace_path(&owner)?;
+            children.push(crate::tree::walk_shared_projection(
+                &tree_root,
+                &owner_root,
+                &shared_paths,
+                opts,
+            )?);
+        }
+    }
+
+    Ok(crate::tree::TreeNode::Folder {
+        name: String::new(),
+        path: String::new(),
+        children,
+    })
+}
+
+async fn build_tree_path_for_user(
+    state: &AppState,
+    user: &User,
+    requested: &crate::path::TreePath,
+    opts: &crate::tree::WalkOptions,
+) -> Result<crate::tree::TreeNode, ApiError> {
+    let Some(ref auth_store) = state.auth_store else {
+        let tree_root = server_tree_root(state);
+        return crate::tree::walk(&tree_root, requested, opts)
+            .map_err(|e| ApiError::new("io", e.to_string()));
+    };
+
+    let tree_root = server_tree_root(state);
+    let requested_slash = requested.to_slash_string();
+    let direct_level =
+        crate::auth::access::resolve_access(user, &requested_slash, auth_store).await;
+    if direct_level.can_read() {
+        let walk_result = if requested.len() == 1 {
+            crate::tree::walk_or_empty(&tree_root, requested, opts)
+        } else {
+            crate::tree::walk(&tree_root, requested, opts)
+        };
+        return walk_result.map_err(|e| ApiError::new("io", e.to_string()));
+    }
+
+    let shared_paths: Vec<crate::path::TreePath> = auth_store
+        .shares_for_grantee(&user.email)
+        .await
+        .into_iter()
+        .filter_map(|grant| match grant.path.parse() {
+            Ok(path) => Some(path),
+            Err(err) => {
+                eprintln!(
+                    "[ray-exomem] skipping invalid share path {:?}: {}",
+                    grant.path, err
+                );
+                None
+            }
+        })
+        .filter(|grant_path| {
+            tree_path_starts_with(requested, grant_path)
+                || tree_path_starts_with(grant_path, requested)
+        })
+        .collect();
+
+    if shared_paths.is_empty() {
+        return Err(ApiError::new(
+            "forbidden",
+            format!("read access denied to {}", requested_slash),
+        )
+        .with_status(403));
+    }
+
+    crate::tree::walk_shared_projection(&tree_root, requested, &shared_paths, opts)
+        .map_err(|e| ApiError::new("io", e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -826,7 +1012,10 @@ async fn api_status(
     let all_rules = match combined_rules(exom, &es.rules) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
                 .into_response();
         }
     };
@@ -892,6 +1081,12 @@ async fn api_tree(
     maybe_user: MaybeUser,
     Query(q): Query<TreeQuery>,
 ) -> impl IntoResponse {
+    if state.auth_store.is_some() && maybe_user.0.is_none() {
+        return ApiError::new("unauthorized", "authentication required")
+            .with_status(401)
+            .into_response();
+    }
+
     let tree_root = server_tree_root(&state);
     let opts = crate::tree::WalkOptions {
         depth: q.depth.or(Some(usize::MAX)),
@@ -899,21 +1094,48 @@ async fn api_tree(
         include_branches: q.branches.as_deref() == Some("true"),
         include_activity: q.activity.as_deref() == Some("true"),
     };
-    let result = match q.path.as_deref().filter(|s| !s.is_empty()) {
-        None => crate::tree::walk_root(&tree_root, &opts),
-        Some(p) => match p.parse::<crate::path::TreePath>() {
-            Ok(tp) => {
-                let path_slash = tp.to_slash_string();
-                if let Some(resp) = guard_read(&state, &maybe_user, &path_slash).await {
-                    return resp;
+    let result = if let Some(ref user) = maybe_user.0 {
+        match q.path.as_deref().filter(|s| !s.is_empty()) {
+            None => {
+                if user.is_admin() {
+                    build_tree_root_for_admin(&state, user, &opts).await
+                } else {
+                    build_tree_root_for_user(&state, user, &opts).await
                 }
-                crate::tree::walk(&tree_root, &tp, &opts)
             }
-            Err(e) => {
-                let err = ApiError::new("bad_path", e.to_string());
-                return err.into_response();
-            }
-        },
+            Some(p) => match p.parse::<crate::path::TreePath>() {
+                Ok(tp) => {
+                    if user.is_admin() {
+                        let walk_result = if tp.len() == 1 {
+                            crate::tree::walk_or_empty(&tree_root, &tp, &opts)
+                        } else {
+                            crate::tree::walk(&tree_root, &tp, &opts)
+                        };
+                        walk_result
+                    } else {
+                        match build_tree_path_for_user(&state, user, &tp, &opts).await {
+                            Ok(node) => return Json(node).into_response(),
+                            Err(err) => return err.into_response(),
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err = ApiError::new("bad_path", e.to_string());
+                    return err.into_response();
+                }
+            },
+        }
+    } else {
+        match q.path.as_deref().filter(|s| !s.is_empty()) {
+            None => crate::tree::walk_root(&tree_root, &opts),
+            Some(p) => match p.parse::<crate::path::TreePath>() {
+                Ok(tp) => crate::tree::walk(&tree_root, &tp, &opts),
+                Err(e) => {
+                    let err = ApiError::new("bad_path", e.to_string());
+                    return err.into_response();
+                }
+            },
+        }
     };
     match result {
         Ok(node) => Json(node).into_response(),
@@ -925,7 +1147,10 @@ async fn api_guide() -> impl IntoResponse {
     let body = crate::agent_guide::doctrine();
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         body,
     )
 }
@@ -1031,7 +1256,14 @@ async fn api_session_new(
         body.actor.unwrap_or_default()
     };
     let tree_root = server_tree_root(&state);
-    match brain::session_new(&tree_root, &project_path, session_type, &label, &actor, &body.agents) {
+    match brain::session_new(
+        &tree_root,
+        &project_path,
+        session_type,
+        &label,
+        &actor,
+        &body.agents,
+    ) {
         Ok(session_path) => {
             emit_tree_changed(&state);
             if let Some(ref db) = state.exom_db {
@@ -1039,9 +1271,7 @@ async fn api_session_new(
                 let slash = session_path.to_slash_string();
                 let db = db.clone();
                 if let Err(e) = exom_db_sync_from_disk(&db, &slash, &disk).await {
-                    eprintln!(
-                        "[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}"
-                    );
+                    eprintln!("[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}");
                 }
             }
             Json(serde_json::json!({
@@ -1091,9 +1321,7 @@ async fn api_session_join(
                 let slash = session_path.to_slash_string();
                 let db = db.clone();
                 if let Err(e) = exom_db_sync_from_disk(&db, &slash, &disk).await {
-                    eprintln!(
-                        "[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}"
-                    );
+                    eprintln!("[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}");
                 }
             }
             Json(serde_json::json!({
@@ -1203,6 +1431,14 @@ async fn api_rename(
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
     };
+    if state.auth_store.is_some() && path.len() == 1 {
+        return ApiError::new(
+            "namespace_root_immutable",
+            "cannot rename a user namespace root",
+        )
+        .with_status(403)
+        .into_response();
+    }
     if let Some(resp) = guard_write(&state, &maybe_user, &path.to_slash_string()).await {
         return resp;
     }
@@ -1224,9 +1460,7 @@ async fn api_rename(
             if let Some(ref auth_store) = state.auth_store {
                 let old_slash = path.to_slash_string();
                 let new_slash = new_path.to_slash_string();
-                auth_store
-                    .update_share_paths(&old_slash, &new_slash)
-                    .await;
+                auth_store.update_share_paths(&old_slash, &new_slash).await;
             }
             emit_tree_changed(&state);
             Json(serde_json::json!({"ok": true, "new_path": new_path.to_slash_string()}))
@@ -1343,12 +1577,9 @@ async fn api_assert_fact(
                 )
             {
                 let tree_root = server_tree_root(&state);
-                if let Err(e) = brain::mirror_session_meta_to_disk(
-                    &tree_root,
-                    &exom_path,
-                    &predicate,
-                    &value,
-                ) {
+                if let Err(e) =
+                    brain::mirror_session_meta_to_disk(&tree_root, &exom_path, &predicate, &value)
+                {
                     eprintln!(
                         "[ray-exomem] mirror_session_meta_to_disk failed (best-effort): {}",
                         e
@@ -1498,7 +1729,9 @@ fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomState>) {
         return;
     }
     for (name, es) in exoms {
-        let _ = state.engine.bind_named_db(storage::sym_intern(name), &es.datoms);
+        let _ = state
+            .engine
+            .bind_named_db(storage::sym_intern(name), &es.datoms);
     }
 }
 
@@ -1520,9 +1753,12 @@ async fn api_query_get(
     // GET with body is non-standard; just return an error directing to POST
     let _ = params;
     let _ = state;
-    ApiError::new("use_post", "Use POST /api/query with a Rayfall query in the request body")
-        .with_status(405)
-        .into_response()
+    ApiError::new(
+        "use_post",
+        "Use POST /api/query with a Rayfall query in the request body",
+    )
+    .with_status(405)
+    .into_response()
 }
 
 async fn api_query_post(
@@ -1557,20 +1793,27 @@ async fn api_query_post(
     };
     match state.engine.eval_raw(&expanded.expanded_query) {
         Ok(raw) => {
-            let (output, decoded) = if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE {
+            let (output, decoded) = if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE
+            {
                 match storage::decode_query_table(&raw, &expanded.normalized_query) {
                     Ok(d) => (storage::format_decoded_query_table(&d), Some(d)),
                     Err(e) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": e.to_string()}))).into_response();
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e.to_string()})),
+                        )
+                            .into_response();
                     }
                 }
             } else {
                 match state.engine.format_obj(&raw) {
                     Ok(s) => (s, None),
                     Err(e) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": e.to_string()}))).into_response();
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": e.to_string()})),
+                        )
+                            .into_response();
                     }
                 }
             };
@@ -1670,8 +1913,14 @@ async fn api_eval(
             .to_string();
         MutationContext {
             actor,
-            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            session: headers
+                .get("x-session")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            model: headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
             user_email: None,
         }
     };
@@ -1705,12 +1954,8 @@ async fn api_eval_inner(
                 })
                 .collect();
             if !canonical_forms.is_empty() {
-                if let Err(e) = crate::auth::access::authorize_rayfall(
-                    user,
-                    &canonical_forms,
-                    auth_store,
-                )
-                .await
+                if let Err(e) =
+                    crate::auth::access::authorize_rayfall(user, &canonical_forms, auth_store).await
                 {
                     return ApiError::new("forbidden", e.to_string())
                         .with_status(403)
@@ -1734,12 +1979,28 @@ async fn api_eval_inner(
                     let es = exoms
                         .get_mut(&exom)
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
-                    es.brain.assert_fact(&fact_id, &pred, &value, 1.0, "rayfall-eval", None, None, &ctx)?;
+                    es.brain.assert_fact(
+                        &fact_id,
+                        &pred,
+                        &value,
+                        1.0,
+                        "rayfall-eval",
+                        None,
+                        None,
+                        &ctx,
+                    )?;
                     es.datoms = storage::build_datoms_table(&es.brain)?;
-                    state.engine.bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
+                    state
+                        .engine
+                        .bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
                     if let Some(disk) = es.exom_disk.as_ref() {
                         es.brain.save()?;
-                        let body_str: String = es.rules.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join("\n");
+                        let body_str: String = es
+                            .rules
+                            .iter()
+                            .map(|r| r.full_text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         if !body_str.is_empty() {
                             std::fs::write(disk.join("rules.ray"), format!("{}\n", body_str))?;
                         }
@@ -1767,7 +2028,9 @@ async fn api_eval_inner(
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
                     es.brain.retract_fact_exact(&fact_id, &pred, &value, &ctx)?;
                     es.datoms = storage::build_datoms_table(&es.brain)?;
-                    state.engine.bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
+                    state
+                        .engine
+                        .bind_named_db(storage::sym_intern(&exom), &es.datoms)?;
                     if let Some(_disk) = es.exom_disk.as_ref() {
                         es.brain.save()?;
                     }
@@ -1793,13 +2056,23 @@ async fn api_eval_inner(
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
                     es.rules.push(pr);
                     es.datoms = storage::build_datoms_table(&es.brain)?;
-                    state.engine.bind_named_db(storage::sym_intern(&exom_name), &es.datoms)?;
+                    state
+                        .engine
+                        .bind_named_db(storage::sym_intern(&exom_name), &es.datoms)?;
                     if let Some(disk) = es.exom_disk.as_ref() {
                         es.brain.save()?;
-                        let body_str: String = es.rules.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join("\n");
+                        let body_str: String = es
+                            .rules
+                            .iter()
+                            .map(|r| r.full_text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         std::fs::write(disk.join("rules.ray"), format!("{}\n", body_str))?;
                     }
-                    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#, exom_name, ctx.actor));
+                    let _ = state.sse_tx.send(format!(
+                        r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#,
+                        exom_name, ctx.actor
+                    ));
                     Ok(())
                 })();
                 match r {
@@ -1876,7 +2149,9 @@ async fn api_consolidate_propose(
 ) -> impl IntoResponse {
     (
         StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({"ok": false, "error": "consolidation propose API is not implemented yet"})),
+        Json(
+            serde_json::json!({"ok": false, "error": "consolidation propose API is not implemented yet"}),
+        ),
     )
 }
 
@@ -2028,14 +2303,20 @@ async fn api_fact_detail(
     let history = brain.fact_history(&id);
     match history.last() {
         Some(f) => {
-            let status = if f.revoked_by_tx.is_some() { "retracted" } else { "active" };
+            let status = if f.revoked_by_tx.is_some() {
+                "retracted"
+            } else {
+                "active"
+            };
             let touch_history: Vec<_> = brain
                 .explain(&id)
                 .iter()
-                .map(|tx| serde_json::json!({
-                    "event_id": format!("tx{}", tx.tx_id),
-                    "event_type": tx.action.to_string()
-                }))
+                .map(|tx| {
+                    serde_json::json!({
+                        "event_id": format!("tx{}", tx.tx_id),
+                        "event_type": tx.action.to_string()
+                    })
+                })
                 .collect();
             Json(serde_json::json!({
                 "fact": {
@@ -2100,13 +2381,12 @@ fn resolve_branch_key<'a>(brain: &'a Brain, key: &str) -> Option<&'a str> {
 }
 
 fn fact_json_enriched(brain: &Brain, f: &crate::brain::Fact) -> serde_json::Value {
-    let tx = brain.transactions().iter().find(|t| t.tx_id == f.created_by_tx);
+    let tx = brain
+        .transactions()
+        .iter()
+        .find(|t| t.tx_id == f.created_by_tx);
     let (actor, branch_id, tx_time) = match tx {
-        Some(t) => (
-            t.actor.as_str(),
-            t.branch_id.as_str(),
-            t.tx_time.as_str(),
-        ),
+        Some(t) => (t.actor.as_str(), t.branch_id.as_str(), t.tx_time.as_str()),
         None => ("", "", ""),
     };
     let branch_name = brain
@@ -2192,11 +2472,8 @@ async fn api_facts_list(
         let bid = match resolve_branch_key(brain, key) {
             Some(id) => id,
             None => {
-                return ApiError::new(
-                    "unknown_branch",
-                    format!("no branch matching {:?}", key),
-                )
-                .into_response();
+                return ApiError::new("unknown_branch", format!("no branch matching {:?}", key))
+                    .into_response();
             }
         };
         brain
@@ -2250,16 +2527,18 @@ async fn api_list_branches(
         .brain
         .branches()
         .iter()
-        .map(|b| serde_json::json!({
-            "branch_id": b.branch_id,
-            "name": b.name,
-            "parent_branch_id": b.parent_branch_id,
-            "created_tx_id": b.created_tx_id,
-            "archived": b.archived,
-            "is_current": b.branch_id == es.brain.current_branch_id(),
-            "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
-            "claimed_by": b.claimed_by,
-        }))
+        .map(|b| {
+            serde_json::json!({
+                "branch_id": b.branch_id,
+                "name": b.name,
+                "parent_branch_id": b.parent_branch_id,
+                "created_tx_id": b.created_tx_id,
+                "archived": b.archived,
+                "is_current": b.branch_id == es.brain.current_branch_id(),
+                "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
+                "claimed_by": b.claimed_by,
+            })
+        })
         .collect();
     Json(serde_json::json!({"branches": branches})).into_response()
 }
@@ -2294,8 +2573,14 @@ async fn api_create_branch(
             .to_string();
         MutationContext {
             actor: actor.clone(),
-            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            session: headers
+                .get("x-session")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            model: headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
             user_email: None,
         }
     };
@@ -2357,7 +2642,12 @@ async fn api_branch_detail(
         Ok(e) => e,
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
-    match es.brain.branches().iter().find(|b| b.branch_id == branch_id) {
+    match es
+        .brain
+        .branches()
+        .iter()
+        .find(|b| b.branch_id == branch_id)
+    {
         Some(b) => Json(serde_json::json!({
             "branch_id": b.branch_id,
             "name": b.name,
@@ -2398,8 +2688,14 @@ async fn api_delete_branch_handler(
     };
     let _ctx = MutationContext {
         actor: actor.clone(),
-        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        session: headers
+            .get("x-session")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        model: headers
+            .get("x-model")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
         user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
     };
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -2460,7 +2756,10 @@ async fn api_switch_branch_handler(
     .await;
     match result {
         Ok(()) => {
-            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"branch_switch","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            let _ = state.sse_tx.send(format!(
+                r#"{{"v":1,"kind":"memory","op":"branch_switch","exom":"{}","actor":"{}"}}"#,
+                exom_slash, actor
+            ));
             Json(serde_json::json!({"switched_to": branch_id})).into_response()
         }
         Err(e) => ApiError::new("error", e.to_string()).into_response(),
@@ -2502,19 +2801,40 @@ async fn api_branch_diff_handler(
     };
     let branch_facts = es.brain.facts_on_branch(&branch_id);
     let base_facts = es.brain.facts_on_branch(base);
-    let base_map: HashMap<&str, &&crate::brain::Fact> = base_facts.iter().map(|f| (f.fact_id.as_str(), f)).collect();
-    let branch_map: HashMap<&str, &&crate::brain::Fact> = branch_facts.iter().map(|f| (f.fact_id.as_str(), f)).collect();
-    let added: Vec<_> = branch_facts.iter().filter(|f| !base_map.contains_key(f.fact_id.as_str())).map(|f| fact_to_json(f)).collect();
-    let removed: Vec<_> = base_facts.iter().filter(|f| !branch_map.contains_key(f.fact_id.as_str())).map(|f| fact_to_json(f)).collect();
-    let changed: Vec<_> = branch_facts.iter().filter_map(|f| {
-        base_map.get(f.fact_id.as_str()).filter(|bf| bf.value != f.value).map(|bf| serde_json::json!({
-            "fact_id": f.fact_id,
-            "predicate": f.predicate,
-            "base_value": bf.value,
-            "branch_value": f.value,
-        }))
-    }).collect();
-    Json(serde_json::json!({"added": added, "removed": removed, "changed": changed})).into_response()
+    let base_map: HashMap<&str, &&crate::brain::Fact> =
+        base_facts.iter().map(|f| (f.fact_id.as_str(), f)).collect();
+    let branch_map: HashMap<&str, &&crate::brain::Fact> = branch_facts
+        .iter()
+        .map(|f| (f.fact_id.as_str(), f))
+        .collect();
+    let added: Vec<_> = branch_facts
+        .iter()
+        .filter(|f| !base_map.contains_key(f.fact_id.as_str()))
+        .map(|f| fact_to_json(f))
+        .collect();
+    let removed: Vec<_> = base_facts
+        .iter()
+        .filter(|f| !branch_map.contains_key(f.fact_id.as_str()))
+        .map(|f| fact_to_json(f))
+        .collect();
+    let changed: Vec<_> = branch_facts
+        .iter()
+        .filter_map(|f| {
+            base_map
+                .get(f.fact_id.as_str())
+                .filter(|bf| bf.value != f.value)
+                .map(|bf| {
+                    serde_json::json!({
+                        "fact_id": f.fact_id,
+                        "predicate": f.predicate,
+                        "base_value": bf.value,
+                        "branch_value": f.value,
+                    })
+                })
+        })
+        .collect();
+    Json(serde_json::json!({"added": added, "removed": removed, "changed": changed}))
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2551,8 +2871,14 @@ async fn api_merge_branch_handler(
             .to_string();
         MutationContext {
             actor,
-            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            session: headers
+                .get("x-session")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            model: headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
             user_email: None,
         }
     };
@@ -2645,7 +2971,9 @@ async fn api_explain(
         .into_response();
     }
     let facts = es.brain.current_facts();
-    let matching = facts.iter().find(|f| f.predicate == predicate || f.fact_id == predicate);
+    let matching = facts
+        .iter()
+        .find(|f| f.predicate == predicate || f.fact_id == predicate);
     match matching {
         Some(f) => Json(serde_json::json!({
             "predicate": f.predicate,
@@ -2668,7 +2996,9 @@ async fn api_explain(
         .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("no fact matching predicate '{}'", predicate)})),
+            Json(
+                serde_json::json!({"error": format!("no fact matching predicate '{}'", predicate)}),
+            ),
         )
             .into_response(),
     }
@@ -2720,7 +3050,10 @@ async fn api_export(
     }
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
         out,
     )
         .into_response()
@@ -2821,13 +3154,25 @@ async fn api_import_json(
 
     let payload: ImportPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(e) => return ApiError::new("invalid_payload", format!("invalid JSON import payload: {}", e)).into_response(),
+        Err(e) => {
+            return ApiError::new(
+                "invalid_payload",
+                format!("invalid JSON import payload: {}", e),
+            )
+            .into_response()
+        }
     };
 
     let _ctx = MutationContext {
         actor: actor.clone(),
-        session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-        model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        session: headers
+            .get("x-session")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        model: headers
+            .get("x-model")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
         user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
     };
 
@@ -2843,7 +3188,11 @@ async fn api_import_json(
         for line in &payload.rules {
             let line = line.trim();
             if !line.is_empty() {
-                parsed_rules.push(rules::parse_rule_line(line, MutationContext::default(), String::new())?);
+                parsed_rules.push(rules::parse_rule_line(
+                    line,
+                    MutationContext::default(),
+                    String::new(),
+                )?);
             }
         }
         ex.rules = parsed_rules;
@@ -2858,7 +3207,10 @@ async fn api_import_json(
             // Re-bind all exoms after import to ensure consistency
             let exoms = state.exoms.lock().unwrap();
             reconcile_engine(&state, &exoms);
-            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"import_json","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            let _ = state.sse_tx.send(format!(
+                r#"{{"v":1,"kind":"memory","op":"import_json","exom":"{}","actor":"{}"}}"#,
+                exom_slash, actor
+            ));
             Json(serde_json::json!({
                 "ok": true,
                 "imported": {"facts": n_facts, "transactions": n_txs}
@@ -2895,8 +3247,14 @@ async fn api_retract_all(
             .to_string();
         MutationContext {
             actor: actor.clone(),
-            session: headers.get("x-session").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
-            model: headers.get("x-model").and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+            session: headers
+                .get("x-session")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            model: headers
+                .get("x-model")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
             user_email: None,
         }
     };
@@ -2920,7 +3278,12 @@ async fn api_retract_all(
     }
 
     let result = mutate_exom_async(&state, &exom_slash, move |ex| {
-        let fact_ids: Vec<String> = ex.brain.current_facts().iter().map(|f| f.fact_id.clone()).collect();
+        let fact_ids: Vec<String> = ex
+            .brain
+            .current_facts()
+            .iter()
+            .map(|f| f.fact_id.clone())
+            .collect();
         let count = fact_ids.len();
         for id in &fact_ids {
             let _ = ex.brain.retract_fact(id, &ctx);
@@ -2932,7 +3295,10 @@ async fn api_retract_all(
 
     match result {
         Ok(count) => {
-            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"retract_all","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            let _ = state.sse_tx.send(format!(
+                r#"{{"v":1,"kind":"memory","op":"retract_all","exom":"{}","actor":"{}"}}"#,
+                exom_slash, actor
+            ));
             Json(serde_json::json!({"ok": true, "tuples_removed": count})).into_response()
         }
         Err(e) => ApiError::new("error", e.to_string()).into_response(),
@@ -2991,7 +3357,10 @@ async fn api_wipe(
 
     match result {
         Ok(()) => {
-            let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"wipe","exom":"{}","actor":"{}"}}"#, exom_slash, actor));
+            let _ = state.sse_tx.send(format!(
+                r#"{{"v":1,"kind":"memory","op":"wipe","exom":"{}","actor":"{}"}}"#,
+                exom_slash, actor
+            ));
             Json(serde_json::json!({"ok": true, "wiped": exom_slash})).into_response()
         }
         Err(e) => ApiError::new("error", e.to_string()).into_response(),
@@ -3044,7 +3413,10 @@ async fn api_factory_reset(
     exoms.insert(default_exom.to_string(), new_es);
 
     reconcile_engine(&state, &exoms);
-    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"factory_reset","exom":"*","actor":"{}"}}"#, actor));
+    let _ = state.sse_tx.send(format!(
+        r#"{{"v":1,"kind":"memory","op":"factory_reset","exom":"*","actor":"{}"}}"#,
+        actor
+    ));
     Json(serde_json::json!({
         "ok": true,
         "removed_exoms": old_names,
@@ -3124,7 +3496,9 @@ async fn api_schema(
 
     for (pred, tuples) in &fact_groups {
         if let Some(ref filter) = filter_relation {
-            if *pred != filter.as_str() { continue; }
+            if *pred != filter.as_str() {
+                continue;
+            }
         }
         let has_intervals = has_intervals_map.get(pred).copied().unwrap_or(false);
         let mut rel = serde_json::json!({
@@ -3136,18 +3510,27 @@ async fn api_schema(
             "defined_by": []
         });
         if include_samples {
-            rel["sample_tuples"] = serde_json::json!(tuples.iter().take(sample_limit).cloned().collect::<Vec<_>>());
+            rel["sample_tuples"] = serde_json::json!(tuples
+                .iter()
+                .take(sample_limit)
+                .cloned()
+                .collect::<Vec<_>>());
         }
         relations.push(rel);
     }
 
     if filter_relation.is_none() || filter_relation.as_deref() == Some("observation") {
-        let obs_tuples: Vec<Vec<serde_json::Value>> = observations.iter().map(|o| vec![
-            serde_json::Value::String(o.obs_id.clone()),
-            serde_json::Value::String(o.source_type.clone()),
-            serde_json::Value::String(o.content.clone()),
-            serde_json::json!(o.confidence),
-        ]).collect();
+        let obs_tuples: Vec<Vec<serde_json::Value>> = observations
+            .iter()
+            .map(|o| {
+                vec![
+                    serde_json::Value::String(o.obs_id.clone()),
+                    serde_json::Value::String(o.source_type.clone()),
+                    serde_json::Value::String(o.content.clone()),
+                    serde_json::json!(o.confidence),
+                ]
+            })
+            .collect();
         let mut rel = serde_json::json!({
             "name": "observation",
             "arity": 4,
@@ -3157,20 +3540,28 @@ async fn api_schema(
             "defined_by": []
         });
         if include_samples && !obs_tuples.is_empty() {
-            rel["sample_tuples"] = serde_json::json!(obs_tuples.into_iter().take(sample_limit).collect::<Vec<_>>());
+            rel["sample_tuples"] = serde_json::json!(obs_tuples
+                .into_iter()
+                .take(sample_limit)
+                .collect::<Vec<_>>());
         }
         relations.push(rel);
     }
 
     if filter_relation.is_none() || filter_relation.as_deref() == Some("belief") {
         let has_belief_intervals = beliefs.iter().any(|b| b.valid_to.is_some());
-        let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs.iter().map(|b| vec![
-            serde_json::Value::String(b.belief_id.clone()),
-            serde_json::Value::String(b.claim_text.clone()),
-            serde_json::json!(b.confidence),
-            serde_json::Value::String(b.status.to_string()),
-            serde_json::json!({"valid_from": b.valid_from, "valid_to": b.valid_to}),
-        ]).collect();
+        let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs
+            .iter()
+            .map(|b| {
+                vec![
+                    serde_json::Value::String(b.belief_id.clone()),
+                    serde_json::Value::String(b.claim_text.clone()),
+                    serde_json::json!(b.confidence),
+                    serde_json::Value::String(b.status.to_string()),
+                    serde_json::json!({"valid_from": b.valid_from, "valid_to": b.valid_to}),
+                ]
+            })
+            .collect();
         let mut rel = serde_json::json!({
             "name": "belief",
             "arity": 5,
@@ -3180,23 +3571,35 @@ async fn api_schema(
             "defined_by": ["belief-revision"]
         });
         if include_samples && !belief_tuples.is_empty() {
-            rel["sample_tuples"] = serde_json::json!(belief_tuples.into_iter().take(sample_limit).collect::<Vec<_>>());
+            rel["sample_tuples"] = serde_json::json!(belief_tuples
+                .into_iter()
+                .take(sample_limit)
+                .collect::<Vec<_>>());
         }
         relations.push(rel);
     }
 
-    let mut base_names: std::collections::HashSet<String> = fact_groups.keys().map(|s| (*s).to_string()).collect();
+    let mut base_names: std::collections::HashSet<String> =
+        fact_groups.keys().map(|s| (*s).to_string()).collect();
     base_names.insert("observation".into());
     base_names.insert("belief".into());
 
     let derived_preds = rules::derived_predicates(&all_rules);
     for (pred_name, arity) in derived_preds {
-        if base_names.contains(&pred_name) { continue; }
-        if let Some(ref filter) = filter_relation {
-            if filter != pred_name.as_str() { continue; }
+        if base_names.contains(&pred_name) {
+            continue;
         }
-        let defined_by_rules: Vec<usize> = all_rules.iter().enumerate()
-            .filter(|(_, r)| r.head_predicate == pred_name).map(|(i, _)| i).collect();
+        if let Some(ref filter) = filter_relation {
+            if filter != pred_name.as_str() {
+                continue;
+            }
+        }
+        let defined_by_rules: Vec<usize> = all_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.head_predicate == pred_name)
+            .map(|(i, _)| i)
+            .collect();
         relations.push(serde_json::json!({
             "name": pred_name, "arity": arity, "kind": "derived",
             "cardinality": serde_json::Value::Null,
@@ -3206,7 +3609,9 @@ async fn api_schema(
 
     let base_count = relations.iter().filter(|r| r["kind"] == "base").count();
     let derived_count = relations.iter().filter(|r| r["kind"] == "derived").count();
-    let largest = relations.iter().max_by_key(|r| r["cardinality"].as_u64().unwrap_or(0))
+    let largest = relations
+        .iter()
+        .max_by_key(|r| r["cardinality"].as_u64().unwrap_or(0))
         .map(|r| serde_json::json!({"name": r["name"], "cardinality": r["cardinality"]}));
 
     Json(serde_json::json!({
@@ -3307,10 +3712,15 @@ async fn api_clusters(
     for f in &facts {
         *groups.entry(&f.predicate).or_default() += 1;
     }
-    let clusters: Vec<_> = groups.iter().map(|(pred, count)| serde_json::json!({
-        "id": format!("cluster:{}", pred), "label": pred, "kind": "shared_predicate",
-        "fact_count": count, "active_count": count, "deprecated_count": 0
-    })).collect();
+    let clusters: Vec<_> = groups
+        .iter()
+        .map(|(pred, count)| {
+            serde_json::json!({
+                "id": format!("cluster:{}", pred), "label": pred, "kind": "shared_predicate",
+                "fact_count": count, "active_count": count, "deprecated_count": 0
+            })
+        })
+        .collect();
     Json(serde_json::json!({"clusters": clusters})).into_response()
 }
 
@@ -3381,10 +3791,19 @@ async fn api_logs(
         Ok(e) => e,
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
-    let events: Vec<_> = es.brain.transactions().iter().rev().take(24).map(|tx| serde_json::json!({
-        "id": format!("tx{}", tx.tx_id), "type": tx.action.to_string(),
-        "timestamp": tx.tx_time, "pattern": tx.note, "source": tx.actor
-    })).collect();
+    let events: Vec<_> = es
+        .brain
+        .transactions()
+        .iter()
+        .rev()
+        .take(24)
+        .map(|tx| {
+            serde_json::json!({
+                "id": format!("tx{}", tx.tx_id), "type": tx.action.to_string(),
+                "timestamp": tx.tx_time, "pattern": tx.note, "source": tx.actor
+            })
+        })
+        .collect();
     Json(serde_json::json!({"events": events})).into_response()
 }
 
@@ -3460,7 +3879,10 @@ async fn api_relation_graph(
     for f in &facts {
         *preds.entry(&f.predicate).or_default() += 1;
     }
-    let nodes: Vec<_> = preds.iter().map(|(pred, count)| serde_json::json!({"id": *pred, "label": *pred, "degree": count})).collect();
+    let nodes: Vec<_> = preds
+        .iter()
+        .map(|(pred, count)| serde_json::json!({"id": *pred, "label": *pred, "degree": count}))
+        .collect();
     Json(serde_json::json!({
         "nodes": nodes, "edges": [],
         "summary": {"node_count": nodes.len(), "edge_count": 0}
@@ -3479,7 +3901,11 @@ async fn api_derived_handler(
     Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
     if pred_name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing predicate"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing predicate"})),
+        )
+            .into_response();
     }
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
@@ -3501,9 +3927,19 @@ async fn api_derived_handler(
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };
-    let arity = match all_rules.iter().find(|r| r.head_predicate == pred_name).map(|r| r.head_arity) {
+    let arity = match all_rules
+        .iter()
+        .find(|r| r.head_predicate == pred_name)
+        .map(|r| r.head_arity)
+    {
         Some(a) => a,
-        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "unknown derived predicate"}))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "unknown derived predicate"})),
+            )
+                .into_response()
+        }
     };
     let find_vars: Vec<String> = (0..arity).map(|i| format!("?v{i}")).collect();
     let find_vars_str = find_vars.join(" ");
@@ -3539,7 +3975,11 @@ async fn api_belief_support_handler(
     }
     let bid = belief_id.trim().to_string();
     if bid.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing belief id"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing belief id"})),
+        )
+            .into_response();
     }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
@@ -3549,10 +3989,20 @@ async fn api_belief_support_handler(
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
     let brain = &es.brain;
-    let beliefs: Vec<_> = brain.current_beliefs().into_iter().filter(|b| b.belief_id == bid).collect();
+    let beliefs: Vec<_> = brain
+        .current_beliefs()
+        .into_iter()
+        .filter(|b| b.belief_id == bid)
+        .collect();
     let b = match beliefs.first() {
         Some(x) => *x,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("belief '{}' not found", bid)}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("belief '{}' not found", bid)})),
+            )
+                .into_response()
+        }
     };
     let mut support_facts = Vec::new();
     let mut support_obs = Vec::new();
@@ -3581,7 +4031,10 @@ async fn api_belief_support_handler(
 // ---------------------------------------------------------------------------
 
 async fn api_start_session_gone() -> impl IntoResponse {
-    ApiError::new("gone", "POST /api/actions/start-session is removed; use POST /api/actions/session-new")
-        .with_status(410)
-        .into_response()
+    ApiError::new(
+        "gone",
+        "POST /api/actions/start-session is removed; use POST /api/actions/session-new",
+    )
+    .with_status(410)
+    .into_response()
 }

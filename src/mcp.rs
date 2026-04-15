@@ -345,10 +345,9 @@ fn load_exom<'a>(
             if meta_p.exists() {
                 match crate::server::load_exom_from_tree_path(&disk, sp, exom_slash) {
                     Ok(es) => {
-                        let _ = state.engine.bind_named_db(
-                            crate::storage::sym_intern(exom_slash),
-                            &es.datoms,
-                        );
+                        let _ = state
+                            .engine
+                            .bind_named_db(crate::storage::sym_intern(exom_slash), &es.datoms);
                         exoms.insert(exom_slash.to_string(), es);
                     }
                     Err(e) => {
@@ -384,27 +383,36 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
 
     match state.engine.eval_raw(&expanded.expanded_query) {
         Ok(raw) => {
-            let output = if unsafe { crate::ffi::ray_obj_type(raw.as_ptr()) }
-                == crate::ffi::RAY_TABLE
-            {
-                match crate::storage::decode_query_table(&raw, &expanded.normalized_query) {
-                    Ok(d) => {
-                        let formatted = crate::storage::format_decoded_query_table(&d);
-                        // Return the decoded JSON if available, otherwise the formatted string.
-                        if let Some(obj) = d.as_object() {
-                            serde_json::to_string_pretty(&obj).unwrap_or(formatted)
-                        } else {
-                            formatted
+            let output =
+                if unsafe { crate::ffi::ray_obj_type(raw.as_ptr()) } == crate::ffi::RAY_TABLE {
+                    match crate::storage::decode_query_table(&raw, &expanded.normalized_query) {
+                        Ok(d) => {
+                            let formatted = crate::storage::format_decoded_query_table(&d);
+                            // Return the decoded JSON if available, otherwise the formatted string.
+                            if let Some(obj) = d.as_object() {
+                                serde_json::to_string_pretty(&obj).unwrap_or(formatted)
+                            } else {
+                                formatted
+                            }
+                        }
+                        Err(e) => {
+                            return Err(JsonRpcError {
+                                code: -32000,
+                                message: e.to_string(),
+                            })
                         }
                     }
-                    Err(e) => return Err(JsonRpcError { code: -32000, message: e.to_string() }),
-                }
-            } else {
-                match state.engine.format_obj(&raw) {
-                    Ok(s) => s,
-                    Err(e) => return Err(JsonRpcError { code: -32000, message: e.to_string() }),
-                }
-            };
+                } else {
+                    match state.engine.format_obj(&raw) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Err(JsonRpcError {
+                                code: -32000,
+                                message: e.to_string(),
+                            })
+                        }
+                    }
+                };
             let _ = exom_slash; // consumed above via expand_query
             Ok(output)
         }
@@ -415,13 +423,14 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
     }
 }
 
-async fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
+async fn tool_assert_fact(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let predicate = require_str(args, "predicate")?;
     let value = require_str(args, "value")?;
-    let fact_id = get_str(args, "fact_id")
-        .unwrap_or(predicate)
-        .to_string();
+    let fact_id = get_str(args, "fact_id").unwrap_or(predicate).to_string();
 
     let ctx = crate::context::MutationContext {
         actor: "mcp".into(),
@@ -431,16 +440,8 @@ async fn tool_assert_fact(state: &AppState, args: &serde_json::Value) -> Result<
     };
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        es.brain.assert_fact(
-            &fact_id,
-            predicate,
-            value,
-            1.0,
-            "mcp",
-            None,
-            None,
-            &ctx,
-        )
+        es.brain
+            .assert_fact(&fact_id, predicate, value, 1.0, "mcp", None, None, &ctx)
     })
     .await;
 
@@ -526,9 +527,7 @@ fn tool_explain(state: &AppState, args: &serde_json::Value) -> Result<String, Js
                 })
             })
             .collect();
-        return Ok(
-            serde_json::json!({ "predicate": predicate, "facts": facts }).to_string()
-        );
+        return Ok(serde_json::json!({ "predicate": predicate, "facts": facts }).to_string());
     }
 
     Err(JsonRpcError {
@@ -537,10 +536,7 @@ fn tool_explain(state: &AppState, args: &serde_json::Value) -> Result<String, Js
     })
 }
 
-fn tool_fact_history(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, JsonRpcError> {
+fn tool_fact_history(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let id = require_str(args, "id")?;
     let mut exoms = state.exoms.lock().unwrap();
@@ -564,10 +560,7 @@ fn tool_fact_history(
     Ok(serde_json::json!({ "id": id, "history": entries }).to_string())
 }
 
-fn tool_list_branches(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, JsonRpcError> {
+fn tool_list_branches(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let mut exoms = state.exoms.lock().unwrap();
     let es = load_exom(state, &mut exoms, &exom_slash)?;
@@ -602,8 +595,7 @@ async fn tool_create_branch(
     };
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        es.brain
-            .create_branch(branch_name, branch_name, &ctx)
+        es.brain.create_branch(branch_name, branch_name, &ctx)
     })
     .await;
 
@@ -621,10 +613,7 @@ async fn tool_create_branch(
     }
 }
 
-fn tool_start_session(
-    _state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, JsonRpcError> {
+fn tool_start_session(_state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let project_path = require_str(args, "project_path")?;
     let session_type = get_str(args, "session_type");
     let label = get_str(args, "label");
@@ -643,8 +632,7 @@ fn tool_schema(state: &AppState, args: &serde_json::Value) -> Result<String, Jso
     let exom_slash = exom_slug(args);
     let mut exoms = state.exoms.lock().unwrap();
     let es = load_exom(state, &mut exoms, &exom_slash)?;
-    let ontology =
-        crate::system_schema::build_exom_ontology(&exom_slash, &es.brain, &es.rules);
+    let ontology = crate::system_schema::build_exom_ontology(&exom_slash, &es.brain, &es.rules);
     Ok(serde_json::to_string_pretty(&ontology).unwrap_or_else(|_| "{}".into()))
 }
 
@@ -660,33 +648,39 @@ fn tool_export(state: &AppState, args: &serde_json::Value) -> Result<String, Jso
         "jsonl" => {
             let lines: Vec<String> = facts
                 .iter()
-                .map(|f| serde_json::json!({
-                    "fact_id": f.fact_id,
-                    "predicate": f.predicate,
-                    "value": f.value,
-                    "confidence": f.confidence,
-                    "valid_from": f.valid_from,
-                    "valid_to": f.valid_to,
-                }).to_string())
+                .map(|f| {
+                    serde_json::json!({
+                        "fact_id": f.fact_id,
+                        "predicate": f.predicate,
+                        "value": f.value,
+                        "confidence": f.confidence,
+                        "valid_from": f.valid_from,
+                        "valid_to": f.valid_to,
+                    })
+                    .to_string()
+                })
                 .collect();
             Ok(lines.join("\n"))
         }
         _ => {
             let json_facts: Vec<serde_json::Value> = facts
                 .iter()
-                .map(|f| serde_json::json!({
-                    "fact_id": f.fact_id,
-                    "predicate": f.predicate,
-                    "value": f.value,
-                    "confidence": f.confidence,
-                    "valid_from": f.valid_from,
-                    "valid_to": f.valid_to,
-                }))
+                .map(|f| {
+                    serde_json::json!({
+                        "fact_id": f.fact_id,
+                        "predicate": f.predicate,
+                        "value": f.value,
+                        "confidence": f.confidence,
+                        "valid_from": f.valid_from,
+                        "valid_to": f.valid_to,
+                    })
+                })
                 .collect();
             Ok(serde_json::json!({
                 "exom": exom_slash,
                 "facts": json_facts,
-            }).to_string())
+            })
+            .to_string())
         }
     }
 }

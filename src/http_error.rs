@@ -4,26 +4,56 @@ use serde::Serialize;
 pub struct ApiError {
     pub code: &'static str,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")] pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub actor: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")] pub suggestion: Option<String>,
-    #[serde(skip)] status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+    #[serde(skip)]
+    status: u16,
 }
 
 impl ApiError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), path: None, actor: None, branch: None, suggestion: None, status: 400 }
+        Self {
+            code,
+            message: message.into(),
+            path: None,
+            actor: None,
+            branch: None,
+            suggestion: None,
+            status: 400,
+        }
     }
-    pub fn with_path(mut self, p: impl Into<String>) -> Self { self.path = Some(p.into()); self }
-    pub fn with_actor(mut self, a: impl Into<String>) -> Self { self.actor = Some(a.into()); self }
-    pub fn with_branch(mut self, b: impl Into<String>) -> Self { self.branch = Some(b.into()); self }
-    pub fn with_suggestion(mut self, s: impl Into<String>) -> Self { self.suggestion = Some(s.into()); self }
-    pub fn with_status(mut self, status: u16) -> Self { self.status = status; self }
+    pub fn with_path(mut self, p: impl Into<String>) -> Self {
+        self.path = Some(p.into());
+        self
+    }
+    pub fn with_actor(mut self, a: impl Into<String>) -> Self {
+        self.actor = Some(a.into());
+        self
+    }
+    pub fn with_branch(mut self, b: impl Into<String>) -> Self {
+        self.branch = Some(b.into());
+        self
+    }
+    pub fn with_suggestion(mut self, s: impl Into<String>) -> Self {
+        self.suggestion = Some(s.into());
+        self
+    }
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
 
     /// Convert to an HTTP (status, json-body) pair for the hand-rolled server.
     pub fn into_http_pair(self) -> (u16, String) {
-        let body = serde_json::to_string(&self).unwrap_or_else(|_| r#"{"code":"serialize_error","message":"failed to serialize error"}"#.to_string());
+        let body = serde_json::to_string(&self).unwrap_or_else(|_| {
+            r#"{"code":"serialize_error","message":"failed to serialize error"}"#.to_string()
+        });
         (self.status, body)
     }
 }
@@ -54,9 +84,13 @@ impl From<crate::brain::WriteError> for ApiError {
                 .with_suggestion(format!("ray-exomem init {p}")),
             SessionClosed => ApiError::new("session_closed", "session closed")
                 .with_suggestion("retract session/closed_at to reopen"),
-            BranchMissing(b) => ApiError::new("branch_not_in_exom", format!("branch {b} not in exom"))
-                .with_branch(b.clone())
-                .with_suggestion(format!("ask orchestrator to run session add-agent --agent {b}")),
+            BranchMissing(b) => {
+                ApiError::new("branch_not_in_exom", format!("branch {b} not in exom"))
+                    .with_branch(b.clone())
+                    .with_suggestion(format!(
+                        "ask orchestrator to run session add-agent --agent {b}"
+                    ))
+            }
             BranchOwned(other) => ApiError::new("branch_owned", format!("branch owned by {other}"))
                 .with_suggestion("write to a branch you own, or ask orchestrator to allocate one"),
             ActorRequired => ApiError::new("actor_required", "actor required")

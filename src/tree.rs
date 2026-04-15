@@ -1,6 +1,7 @@
 use crate::exom::{self, ExomKind};
 use crate::path::TreePath;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +43,7 @@ pub fn check_no_exom_ancestor(tree_root: &Path, path: &TreePath) -> Result<(), S
 // Tree walker
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TreeNode {
     Folder {
@@ -71,9 +72,11 @@ pub struct WalkOptions {
     pub include_activity: bool,
 }
 
-pub fn walk(tree_root: &std::path::Path, start: &crate::path::TreePath, opts: &WalkOptions)
-    -> std::io::Result<TreeNode>
-{
+pub fn walk(
+    tree_root: &std::path::Path,
+    start: &crate::path::TreePath,
+    opts: &WalkOptions,
+) -> std::io::Result<TreeNode> {
     let start_disk = start.to_disk_path(tree_root);
     walk_inner(&start_disk, start, 0, opts)
 }
@@ -90,23 +93,43 @@ fn walk_inner(
         NodeKind::Missing => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         NodeKind::Exom => {
             let meta = exom::read_meta(disk)?;
-            let archived = meta.session.as_ref().and_then(|s| s.archived_at.as_ref()).is_some();
-            let closed = meta.session.as_ref().and_then(|s| s.closed_at.as_ref()).is_some();
+            let archived = meta
+                .session
+                .as_ref()
+                .and_then(|s| s.archived_at.as_ref())
+                .is_some();
+            let closed = meta
+                .session
+                .as_ref()
+                .and_then(|s| s.closed_at.as_ref())
+                .is_some();
             if archived && !opts.include_archived {
-                return Ok(TreeNode::Folder { name, path: slash, children: vec![] });
+                return Ok(TreeNode::Folder {
+                    name,
+                    path: slash,
+                    children: vec![],
+                });
             }
             // FIXME(nested-exoms-task-4.4): write tests/walk_stats.rs once HTTP API is path-aware
             let stats = crate::brain::read_exom_stats(disk).unwrap_or(crate::brain::ExomStats {
-                fact_count: 0, last_tx: None, branches: vec![],
+                fact_count: 0,
+                last_tx: None,
+                branches: vec![],
             });
             Ok(TreeNode::Exom {
-                name, path: slash,
+                name,
+                path: slash,
                 exom_kind: meta.kind,
                 fact_count: stats.fact_count,
                 current_branch: meta.current_branch,
                 last_tx: stats.last_tx,
-                branches: if opts.include_branches { Some(stats.branches) } else { None },
-                archived, closed,
+                branches: if opts.include_branches {
+                    Some(stats.branches)
+                } else {
+                    None
+                },
+                archived,
+                closed,
                 session: meta.session,
             })
         }
@@ -114,21 +137,24 @@ fn walk_inner(
             let stop = matches!(opts.depth, Some(max) if depth >= max);
             let mut children = vec![];
             if !stop {
-                let mut entries: Vec<_> = std::fs::read_dir(disk)?
-                    .filter_map(|e| e.ok())
-                    .collect();
+                let mut entries: Vec<_> = std::fs::read_dir(disk)?.filter_map(|e| e.ok()).collect();
                 entries.sort_by_key(|e| e.file_name());
                 for entry in entries {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let sub_path = path.join(&name).map_err(|e|
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+                    let sub_path = path.join(&name).map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                    })?;
                     let sub_disk = entry.path();
                     if sub_disk.is_dir() {
                         children.push(walk_inner(&sub_disk, &sub_path, depth + 1, opts)?);
                     }
                 }
             }
-            Ok(TreeNode::Folder { name, path: slash, children })
+            Ok(TreeNode::Folder {
+                name,
+                path: slash,
+                children,
+            })
         }
     }
 }
@@ -147,13 +173,112 @@ pub fn walk_root(tree_root: &std::path::Path, opts: &WalkOptions) -> std::io::Re
                 continue;
             }
             if entry.path().is_dir() {
-                let p: crate::path::TreePath = name.parse().map_err(|e: crate::path::PathError|
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+                let p: crate::path::TreePath =
+                    name.parse().map_err(|e: crate::path::PathError| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                    })?;
                 children.push(walk(tree_root, &p, opts)?);
             }
         }
     }
-    Ok(TreeNode::Folder { name: String::new(), path: String::new(), children })
+    Ok(TreeNode::Folder {
+        name: String::new(),
+        path: String::new(),
+        children,
+    })
+}
+
+fn tree_path_starts_with(path: &TreePath, prefix: &TreePath) -> bool {
+    path.len() >= prefix.len()
+        && path
+            .segments()
+            .iter()
+            .zip(prefix.segments().iter())
+            .all(|(a, b)| a == b)
+}
+
+fn folder_name(path: &TreePath) -> String {
+    path.last().unwrap_or("").to_string()
+}
+
+pub fn empty_folder(path: &TreePath) -> TreeNode {
+    TreeNode::Folder {
+        name: folder_name(path),
+        path: path.to_slash_string(),
+        children: vec![],
+    }
+}
+
+pub fn walk_or_empty(
+    tree_root: &std::path::Path,
+    path: &crate::path::TreePath,
+    opts: &WalkOptions,
+) -> std::io::Result<TreeNode> {
+    let disk = path.to_disk_path(tree_root);
+    if !disk.exists() {
+        return Ok(empty_folder(path));
+    }
+    walk(tree_root, path, opts)
+}
+
+/// Build a synthetic folder tree for a shared view.
+///
+/// If `requested` is inside a shared subtree, this returns the full on-disk walk for that path.
+/// If `requested` is only an ancestor of shared paths, it returns a synthetic folder that reveals
+/// just the descendants needed to reach the shared paths, without leaking sibling nodes.
+pub fn walk_shared_projection(
+    tree_root: &std::path::Path,
+    requested: &crate::path::TreePath,
+    shared_paths: &[crate::path::TreePath],
+    opts: &WalkOptions,
+) -> std::io::Result<TreeNode> {
+    if shared_paths
+        .iter()
+        .any(|grant| tree_path_starts_with(requested, grant))
+    {
+        return walk_or_empty(tree_root, requested, opts);
+    }
+
+    let descendants: Vec<_> = shared_paths
+        .iter()
+        .filter(|grant| tree_path_starts_with(grant, requested))
+        .collect();
+
+    if descendants.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("no shared paths under {}", requested.to_slash_string()),
+        ));
+    }
+
+    let mut child_segments = BTreeSet::new();
+    for grant in descendants {
+        if let Some(seg) = grant.segments().get(requested.len()) {
+            child_segments.insert(seg.clone());
+        }
+    }
+
+    let mut children = Vec::new();
+    for seg in child_segments {
+        let child_path = requested
+            .join(&seg)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let child_is_fully_shared = shared_paths
+            .iter()
+            .any(|grant| tree_path_starts_with(&child_path, grant));
+        let child = if child_is_fully_shared {
+            walk_or_empty(tree_root, &child_path, opts)?
+        } else {
+            walk_shared_projection(tree_root, &child_path, shared_paths, opts)?
+        };
+        children.push(child);
+    }
+
+    Ok(TreeNode::Folder {
+        name: folder_name(requested),
+        path: requested.to_slash_string(),
+        children,
+    })
 }
 
 /// Rename the last segment of `path` to `new_segment`. Returns the new `TreePath`.
@@ -176,13 +301,17 @@ pub fn rename_last_segment(
     // Same-name same-case rename is a no-op; allow it.
     if src == dst {
         return if parent.is_empty() {
-            new_segment.parse().map_err(|e: crate::path::PathError| e.to_string())
+            new_segment
+                .parse()
+                .map_err(|e: crate::path::PathError| e.to_string())
         } else {
             parent.join(new_segment).map_err(|e| e.to_string())
         };
     }
 
-    if dst.exists() { return Err(format!("target already exists: {}", dst.display())); }
+    if dst.exists() {
+        return Err(format!("target already exists: {}", dst.display()));
+    }
 
     // Case-insensitive collision check (necessary on macOS APFS).
     let current_last = path.last().unwrap_or("");
@@ -191,7 +320,10 @@ pub fn rename_last_segment(
             let name = entry.file_name();
             if let Some(name_str) = name.to_str() {
                 if name_str.eq_ignore_ascii_case(new_segment) && name_str != current_last {
-                    return Err(format!("target already exists (case-insensitive): {}", entry.path().display()));
+                    return Err(format!(
+                        "target already exists (case-insensitive): {}",
+                        entry.path().display()
+                    ));
                 }
             }
         }
@@ -199,7 +331,9 @@ pub fn rename_last_segment(
 
     std::fs::rename(&src, &dst).map_err(|e| e.to_string())?;
     if parent.is_empty() {
-        new_segment.parse().map_err(|e: crate::path::PathError| e.to_string())
+        new_segment
+            .parse()
+            .map_err(|e: crate::path::PathError| e.to_string())
     } else {
         parent.join(new_segment).map_err(|e| e.to_string())
     }
@@ -210,6 +344,20 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    fn collect_paths(node: &TreeNode, out: &mut Vec<String>) {
+        match node {
+            TreeNode::Folder { path, children, .. } => {
+                if !path.is_empty() {
+                    out.push(path.clone());
+                }
+                for child in children {
+                    collect_paths(child, out);
+                }
+            }
+            TreeNode::Exom { path, .. } => out.push(path.clone()),
+        }
+    }
 
     #[test]
     fn missing_is_missing() {
@@ -255,14 +403,121 @@ mod tests {
         let d = tempdir().unwrap();
         crate::scaffold::init_project(d.path(), &"work::ath::lynx::orsl".parse().unwrap()).unwrap();
         let root: crate::path::TreePath = "work".parse().unwrap();
-        let node = walk(d.path(), &root, &WalkOptions {
-            depth: Some(5),
-            include_archived: false,
-            include_branches: false,
-            include_activity: false,
-        }).unwrap();
+        let node = walk(
+            d.path(),
+            &root,
+            &WalkOptions {
+                depth: Some(5),
+                include_archived: false,
+                include_branches: false,
+                include_activity: false,
+            },
+        )
+        .unwrap();
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains("\"kind\":\"folder\""));
         assert!(json.contains("\"name\":\"main\""));
+    }
+
+    #[test]
+    fn walk_or_empty_returns_empty_folder_for_missing_namespace() {
+        let d = tempdir().unwrap();
+        let path: TreePath = "alice@co.com".parse().unwrap();
+        let node = walk_or_empty(
+            d.path(),
+            &path,
+            &WalkOptions {
+                depth: Some(5),
+                include_archived: false,
+                include_branches: false,
+                include_activity: false,
+            },
+        )
+        .unwrap();
+
+        match node {
+            TreeNode::Folder {
+                name,
+                path,
+                children,
+            } => {
+                assert_eq!(name, "alice@co.com");
+                assert_eq!(path, "alice@co.com");
+                assert!(children.is_empty());
+            }
+            other => panic!("expected folder, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shared_projection_reveals_only_the_ancestor_chain_for_deep_share() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("alice/shared/docs/topic")).unwrap();
+        fs::create_dir_all(d.path().join("alice/private/secret")).unwrap();
+
+        let requested: TreePath = "alice".parse().unwrap();
+        let shared_paths = vec!["alice/shared/docs".parse().unwrap()];
+        let node = walk_shared_projection(
+            d.path(),
+            &requested,
+            &shared_paths,
+            &WalkOptions {
+                depth: Some(8),
+                include_archived: false,
+                include_branches: false,
+                include_activity: false,
+            },
+        )
+        .unwrap();
+
+        let mut paths = Vec::new();
+        collect_paths(&node, &mut paths);
+        assert_eq!(
+            paths,
+            vec![
+                "alice".to_string(),
+                "alice/shared".to_string(),
+                "alice/shared/docs".to_string(),
+                "alice/shared/docs/topic".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_projection_shows_full_subtree_once_shared_root_is_reached() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("alice/shared/docs/topic")).unwrap();
+        fs::create_dir_all(d.path().join("alice/shared/assets/img")).unwrap();
+        fs::create_dir_all(d.path().join("alice/private/secret")).unwrap();
+
+        let requested: TreePath = "alice".parse().unwrap();
+        let shared_paths = vec!["alice/shared".parse().unwrap()];
+        let node = walk_shared_projection(
+            d.path(),
+            &requested,
+            &shared_paths,
+            &WalkOptions {
+                depth: Some(8),
+                include_archived: false,
+                include_branches: false,
+                include_activity: false,
+            },
+        )
+        .unwrap();
+
+        let mut paths = Vec::new();
+        collect_paths(&node, &mut paths);
+        assert_eq!(
+            paths,
+            vec![
+                "alice".to_string(),
+                "alice/shared".to_string(),
+                "alice/shared/assets".to_string(),
+                "alice/shared/assets/img".to_string(),
+                "alice/shared/docs".to_string(),
+                "alice/shared/docs/topic".to_string(),
+            ]
+        );
+        assert!(!paths.iter().any(|p| p.starts_with("alice/private")));
     }
 }

@@ -10,9 +10,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 
 use crate::auth::UserRole;
-use crate::db::{
-    ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser,
-};
+use crate::db::{ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser};
 
 pub struct JsonlAuthDb {
     jsonl_path: PathBuf,
@@ -154,7 +152,10 @@ impl JsonlAuthDb {
             "api-key-revoke" => {
                 if let Some(key_id) = entry.get("key_id").and_then(|v| v.as_str()) {
                     if let Some(removed) = self.api_keys.lock().unwrap().remove(key_id) {
-                        self.api_key_by_hash.lock().unwrap().remove(&removed.key_hash);
+                        self.api_key_by_hash
+                            .lock()
+                            .unwrap()
+                            .remove(&removed.key_hash);
                     }
                 }
             }
@@ -210,10 +211,7 @@ impl JsonlAuthDb {
             }
             "domain-revoke" => {
                 if let Some(domain) = entry.get("domain").and_then(|v| v.as_str()) {
-                    self.allowed_domains
-                        .lock()
-                        .unwrap()
-                        .retain(|d| d != domain);
+                    self.allowed_domains.lock().unwrap().retain(|d| d != domain);
                 }
             }
             "user-deactivate" => {

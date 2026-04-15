@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { Loader2, Search, Share2, TreePine, Waypoints } from '@lucide/svelte';
+	import { Loader2, Search, TreePine, Waypoints } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -11,13 +11,11 @@
 	import { Sheet, SheetContent, SheetHeader, SheetTitle } from '$lib/components/ui/sheet/index.js';
 	import { Tooltip, TooltipContent, TooltipTrigger } from '$lib/components/ui/tooltip/index.js';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
-	import { auth } from '$lib/auth.svelte';
 	import { commandPaletteState } from '$lib/commandPaletteState.svelte';
 	import {
 		apiInitFolder,
 		apiNewBareExom,
-		apiSessionNew,
-		getExomemBaseUrl
+		apiSessionNew
 	} from '$lib/exomem.svelte';
 	import { parent } from '$lib/path.svelte';
 	import RenameModal from '$lib/RenameModal.svelte';
@@ -26,38 +24,6 @@
 	import TreeDrawer from '$lib/TreeDrawer.svelte';
 
 	let sheetOpen = $state(false);
-
-	interface SharedExom {
-		path: string;
-		owner_email: string;
-		permission: string;
-		share_id: string;
-	}
-
-	let sharedExoms = $state<SharedExom[]>([]);
-
-	async function fetchSharedExoms() {
-		try {
-			const authBase = getExomemBaseUrl().replace('/ray-exomem', '');
-			const resp = await fetch(`${authBase}/auth/shared-with-me`, { credentials: 'include' });
-			if (resp.ok) {
-				const data = await resp.json();
-				sharedExoms = data.shared || [];
-			}
-		} catch {
-			/* silently fail — shared section simply won't appear */
-		}
-	}
-
-	$effect(() => {
-		if (sheetOpen && auth.isAuthenticated) {
-			void fetchSharedExoms();
-		}
-	});
-
-	function navigateToShared(path: string) {
-		void goto(`${base}/tree/${path.replace(/^\/+/, '')}`);
-	}
 
 	const currentTreePath = $derived.by((): string => {
 		let pathname = String(page.url.pathname);
@@ -216,28 +182,6 @@
 					refreshSignal={treeModals.refreshTree}
 					onNavigate={(path) => goto(`${base}/tree/${path.replace(/^\/+/, '')}`)}
 				/>
-
-				{#if sharedExoms.length > 0}
-					<Separator class="my-2 bg-zinc-700" />
-					<div class="shrink-0 px-1">
-						<h3 class="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-							<Share2 class="size-3" />
-							Shared with me
-						</h3>
-						<div class="flex flex-col gap-0.5">
-							{#each sharedExoms as item (item.share_id)}
-								<button
-									type="button"
-									class="flex w-full min-w-0 items-center gap-1.5 rounded-sm px-1 py-1 text-left font-mono text-[11px] text-zinc-300 hover:bg-zinc-800/80"
-									onclick={() => navigateToShared(item.path)}
-								>
-									<span class="min-w-0 flex-1 truncate">{item.path}</span>
-									<span class="shrink-0 rounded bg-zinc-800 px-1 py-0.5 text-[9px] text-zinc-500">{item.permission}</span>
-								</button>
-							{/each}
-						</div>
-					</div>
-				{/if}
 			{/if}
 		</div>
 	</SheetContent>

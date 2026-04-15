@@ -148,8 +148,11 @@ pub trait ExomDb: Send + Sync {
 
     async fn load_observations(&self, exom_path: &str) -> anyhow::Result<Vec<Observation>>;
 
-    async fn save_observations(&self, exom_path: &str, observations: &[Observation])
-        -> anyhow::Result<()>;
+    async fn save_observations(
+        &self,
+        exom_path: &str,
+        observations: &[Observation],
+    ) -> anyhow::Result<()>;
 
     async fn load_beliefs(&self, exom_path: &str) -> anyhow::Result<Vec<Belief>>;
 

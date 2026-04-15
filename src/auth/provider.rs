@@ -3,8 +3,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use anyhow::{anyhow, Result};
 use super::AuthIdentity;
+use anyhow::{anyhow, Result};
 
 pub trait AuthProvider: Send + Sync {
     fn validate_token<'a>(
@@ -12,7 +12,9 @@ pub trait AuthProvider: Send + Sync {
         token: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<AuthIdentity>> + Send + 'a>>;
     fn provider_name(&self) -> &str;
-    fn client_id(&self) -> Option<&str> { None }
+    fn client_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +105,9 @@ impl GoogleAuthProvider {
             if jwk.kid == kid {
                 let n_bytes = URL_SAFE_NO_PAD.decode(&jwk.n)?;
                 let e_bytes = URL_SAFE_NO_PAD.decode(&jwk.e)?;
-                return Ok(Some(DecodingKey::from_rsa_raw_components(&n_bytes, &e_bytes)));
+                return Ok(Some(DecodingKey::from_rsa_raw_components(
+                    &n_bytes, &e_bytes,
+                )));
             }
         }
         Ok(None)
@@ -166,12 +170,14 @@ impl AuthProvider for MockAuthProvider {
             let rest = token
                 .strip_prefix("mock:")
                 .ok_or_else(|| anyhow!("MockAuthProvider: token must start with `mock:`"))?;
-            let (email, name) = rest
-                .split_once(':')
-                .ok_or_else(|| anyhow!("MockAuthProvider: expected format `mock:<email>:<name>`"))?;
+            let (email, name) = rest.split_once(':').ok_or_else(|| {
+                anyhow!("MockAuthProvider: expected format `mock:<email>:<name>`")
+            })?;
 
             if email.is_empty() || name.is_empty() {
-                return Err(anyhow!("MockAuthProvider: email and name must be non-empty"));
+                return Err(anyhow!(
+                    "MockAuthProvider: email and name must be non-empty"
+                ));
             }
 
             Ok(AuthIdentity {

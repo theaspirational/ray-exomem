@@ -93,8 +93,7 @@ struct CreateShareResponse {
 
 fn require_auth_store(state: &AppState) -> Result<&Arc<AuthStore>, ApiError> {
     state.auth_store.as_ref().ok_or_else(|| {
-        ApiError::new("auth_not_configured", "authentication is not configured")
-            .with_status(501)
+        ApiError::new("auth_not_configured", "authentication is not configured").with_status(501)
     })
 }
 
@@ -102,8 +101,11 @@ fn require_auth_provider(
     state: &AppState,
 ) -> Result<&Arc<dyn crate::auth::provider::AuthProvider>, ApiError> {
     state.auth_provider.as_ref().ok_or_else(|| {
-        ApiError::new("auth_not_configured", "authentication provider is not configured")
-            .with_status(501)
+        ApiError::new(
+            "auth_not_configured",
+            "authentication provider is not configured",
+        )
+        .with_status(501)
     })
 }
 
@@ -123,9 +125,7 @@ fn role_label(role: &UserRole) -> &'static str {
 ///
 /// Public (no session required). Returns auth provider info so the login page
 /// knows which providers are available and can initialize GSI.
-async fn auth_info(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn auth_info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (provider, google_client_id) = match &state.auth_provider {
         Some(p) => {
             let name = p.provider_name().to_string();
@@ -153,13 +153,9 @@ async fn login(
     let provider = require_auth_provider(&state)?;
 
     // Validate the token.
-    let identity = provider
-        .validate_token(&body.id_token)
-        .await
-        .map_err(|e| {
-            ApiError::new("invalid_token", format!("token validation failed: {e}"))
-                .with_status(401)
-        })?;
+    let identity = provider.validate_token(&body.id_token).await.map_err(|e| {
+        ApiError::new("invalid_token", format!("token validation failed: {e}")).with_status(401)
+    })?;
 
     // Check domain restriction.
     if !store.check_domain(&identity.email).await {
@@ -336,9 +332,7 @@ async fn revoke_api_key(
     if !user.is_admin() {
         let keys = store.list_api_keys_for_user(&user.email).await;
         if !keys.iter().any(|k| k.key_id == key_id) {
-            return Err(
-                ApiError::new("not_found", "API key not found").with_status(404),
-            );
+            return Err(ApiError::new("not_found", "API key not found").with_status(404));
         }
     }
 
@@ -356,21 +350,21 @@ async fn create_share(
 
     // Validate permission.
     if body.permission != "read" && body.permission != "read-write" {
-        return Err(
-            ApiError::new(
-                "invalid_permission",
-                format!("permission must be 'read' or 'read-write', got '{}'", body.permission),
-            )
-            .with_status(400),
-        );
+        return Err(ApiError::new(
+            "invalid_permission",
+            format!(
+                "permission must be 'read' or 'read-write', got '{}'",
+                body.permission
+            ),
+        )
+        .with_status(400));
     }
 
     // Verify user owns the path (path must start with user's email).
     if body.path != user.email && !body.path.starts_with(&format!("{}/", user.email)) {
         if !user.is_admin() {
             return Err(
-                ApiError::new("not_owner", "you can only share paths you own")
-                    .with_status(403),
+                ApiError::new("not_owner", "you can only share paths you own").with_status(403),
             );
         }
     }
@@ -442,9 +436,7 @@ async fn revoke_share(
     if !user.is_admin() {
         let shares = store.list_shares_for_owner(&user.email).await;
         if !shares.iter().any(|s| s.share_id == share_id) {
-            return Err(
-                ApiError::new("not_found", "share not found").with_status(404),
-            );
+            return Err(ApiError::new("not_found", "share not found").with_status(404));
         }
     }
 

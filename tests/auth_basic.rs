@@ -18,7 +18,10 @@ fn login_and_me() {
     let body: serde_json::Value = resp.into_json().unwrap();
     assert_eq!(body["email"], "alice@co.com");
     assert_eq!(body["display_name"], "Alice");
-    assert!(body["provider"].is_string(), "provider field missing: {body}");
+    assert!(
+        body["provider"].is_string(),
+        "provider field missing: {body}"
+    );
     assert!(body["role"].is_string(), "role field missing: {body}");
 }
 
@@ -76,11 +79,7 @@ fn api_key_create_and_use() {
     let session = daemon.mock_login("alice@co.com", "Alice");
 
     // Create an API key.
-    let resp = daemon.auth_post(
-        "/auth/api-keys",
-        &session,
-        json!({"label": "test-key"}),
-    );
+    let resp = daemon.auth_post("/auth/api-keys", &session, json!({"label": "test-key"}));
     assert!(
         resp.status() == 200 || resp.status() == 201,
         "expected 200 or 201 for api-key creation, got {}",

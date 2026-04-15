@@ -1642,9 +1642,7 @@ pub fn data_dir() -> std::path::PathBuf {
     if let Ok(custom) = std::env::var("RAY_EXOMEM_HOME") {
         return std::path::PathBuf::from(custom);
     }
-    dirs::home_dir()
-        .expect("home dir")
-        .join(".ray-exomem")
+    dirs::home_dir().expect("home dir").join(".ray-exomem")
 }
 
 pub fn tree_root() -> std::path::PathBuf {
@@ -1663,7 +1661,10 @@ mod tests {
     #[test]
     fn tree_root_follows_env() {
         std::env::set_var("RAY_EXOMEM_HOME", "/tmp/ray-exomem-test");
-        assert_eq!(tree_root(), std::path::PathBuf::from("/tmp/ray-exomem-test/tree"));
+        assert_eq!(
+            tree_root(),
+            std::path::PathBuf::from("/tmp/ray-exomem-test/tree")
+        );
         std::env::remove_var("RAY_EXOMEM_HOME");
     }
 }

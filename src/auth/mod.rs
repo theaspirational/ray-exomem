@@ -104,11 +104,17 @@ mod tests {
         assert!(!regular.is_admin());
         assert!(!regular.is_top_admin());
 
-        let admin = User { role: UserRole::Admin, ..regular.clone() };
+        let admin = User {
+            role: UserRole::Admin,
+            ..regular.clone()
+        };
         assert!(admin.is_admin());
         assert!(!admin.is_top_admin());
 
-        let top = User { role: UserRole::TopAdmin, ..regular };
+        let top = User {
+            role: UserRole::TopAdmin,
+            ..regular
+        };
         assert!(top.is_admin());
         assert!(top.is_top_admin());
     }

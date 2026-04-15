@@ -43,10 +43,7 @@ fn require_admin(user: &User) -> Result<(), ApiError> {
     if user.is_admin() {
         Ok(())
     } else {
-        Err(
-            ApiError::new("forbidden", "admin access required")
-                .with_status(403),
-        )
+        Err(ApiError::new("forbidden", "admin access required").with_status(403))
     }
 }
 
@@ -54,17 +51,13 @@ fn require_top_admin(user: &User) -> Result<(), ApiError> {
     if user.is_top_admin() {
         Ok(())
     } else {
-        Err(
-            ApiError::new("forbidden", "top-admin access required")
-                .with_status(403),
-        )
+        Err(ApiError::new("forbidden", "top-admin access required").with_status(403))
     }
 }
 
 fn require_auth_store(state: &AppState) -> Result<&Arc<AuthStore>, ApiError> {
     state.auth_store.as_ref().ok_or_else(|| {
-        ApiError::new("auth_not_configured", "authentication is not configured")
-            .with_status(501)
+        ApiError::new("auth_not_configured", "authentication is not configured").with_status(501)
     })
 }
 

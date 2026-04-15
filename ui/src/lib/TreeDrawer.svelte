@@ -13,6 +13,7 @@
 	import { tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
+	import { auth } from '$lib/auth.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import {
@@ -49,6 +50,13 @@
 	let suppressReveal = $state(false);
 	/** Saved folder state before collapse-all, for toggle restore. */
 	let savedFolderOpen = $state<Record<string, boolean> | null>(null);
+
+	const defaultWritableBase = $derived(currentPath || auth.user?.email || '');
+
+	function suggestedNewExomPath(): string {
+		const base = defaultWritableBase.trim();
+		return base ? `${base}/notes` : 'notes';
+	}
 
 	function parentFolderPrefixes(path: string): string[] {
 		const parts = path.split('/').filter(Boolean);
@@ -184,7 +192,7 @@
 		type="button"
 		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
 		title="New exom"
-		onclick={() => treeModals.openNewExom(currentPath ? `${currentPath}/notes` : 'notes')}
+		onclick={() => treeModals.openNewExom(suggestedNewExomPath())}
 	>
 		<FilePlus class="size-3.5" />
 	</button>
@@ -192,7 +200,7 @@
 		type="button"
 		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
 		title="Init project here"
-		onclick={() => treeModals.openInit(currentPath)}
+		onclick={() => treeModals.openInit(defaultWritableBase)}
 	>
 		<FolderPlus class="size-3.5" />
 	</button>

@@ -1,12 +1,15 @@
 pub mod agent_guide;
+pub mod auth;
 pub mod backend;
 pub mod brain;
-pub mod http_error;
 pub mod client;
 pub mod context;
 pub mod datom;
+pub mod db;
 pub mod exom;
 pub mod ffi;
+pub mod http_error;
+pub mod mcp;
 pub mod path;
 pub mod rayfall_ast;
 pub mod rayfall_parser;
@@ -16,9 +19,6 @@ pub mod server;
 pub mod storage;
 pub mod system_schema;
 pub mod tree;
-pub mod auth;
-pub mod db;
-pub mod mcp;
 
 use anyhow::{Context, Result};
 use std::{fs, path::Path};

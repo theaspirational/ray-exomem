@@ -6,15 +6,18 @@ use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScaffoldError {
-    #[error("path: {0}")] Path(#[from] crate::path::PathError),
-    #[error("io: {0}")] Io(#[from] io::Error),
-    #[error("cannot nest inside exom at {0}")] NestInsideExom(String),
-    #[error("already exists as {0:?} at {1}")] AlreadyExistsDifferent(NodeKind, String),
+    #[error("path: {0}")]
+    Path(#[from] crate::path::PathError),
+    #[error("io: {0}")]
+    Io(#[from] io::Error),
+    #[error("cannot nest inside exom at {0}")]
+    NestInsideExom(String),
+    #[error("already exists as {0:?} at {1}")]
+    AlreadyExistsDifferent(NodeKind, String),
 }
 
 pub fn init_project(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldError> {
-    crate::tree::check_no_exom_ancestor(tree_root, path)
-        .map_err(ScaffoldError::NestInsideExom)?;
+    crate::tree::check_no_exom_ancestor(tree_root, path).map_err(ScaffoldError::NestInsideExom)?;
     let leaf = path.to_disk_path(tree_root);
     std::fs::create_dir_all(&leaf)?;
 
@@ -27,11 +30,17 @@ pub fn init_project(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldErr
         NodeKind::Exom => {
             let meta = exom::read_meta(&main_path)?;
             if meta.kind != ExomKind::ProjectMain {
-                return Err(ScaffoldError::AlreadyExistsDifferent(NodeKind::Exom, main_path.display().to_string()));
+                return Err(ScaffoldError::AlreadyExistsDifferent(
+                    NodeKind::Exom,
+                    main_path.display().to_string(),
+                ));
             }
         }
         NodeKind::Folder => {
-            return Err(ScaffoldError::AlreadyExistsDifferent(NodeKind::Folder, main_path.display().to_string()));
+            return Err(ScaffoldError::AlreadyExistsDifferent(
+                NodeKind::Folder,
+                main_path.display().to_string(),
+            ));
         }
     }
 
@@ -45,8 +54,7 @@ pub fn new_bare_exom(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldEr
     if let Some(last) = path.last() {
         ensure_not_reserved_as_exom(last)?;
     }
-    crate::tree::check_no_exom_ancestor(tree_root, path)
-        .map_err(ScaffoldError::NestInsideExom)?;
+    crate::tree::check_no_exom_ancestor(tree_root, path).map_err(ScaffoldError::NestInsideExom)?;
     let disk = path.to_disk_path(tree_root);
     match classify(&disk) {
         NodeKind::Missing => {
@@ -55,7 +63,10 @@ pub fn new_bare_exom(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldEr
             Ok(())
         }
         NodeKind::Exom => Ok(()), // idempotent
-        NodeKind::Folder => Err(ScaffoldError::AlreadyExistsDifferent(NodeKind::Folder, disk.display().to_string())),
+        NodeKind::Folder => Err(ScaffoldError::AlreadyExistsDifferent(
+            NodeKind::Folder,
+            disk.display().to_string(),
+        )),
     }
 }
 
@@ -64,14 +75,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn tp(s: &str) -> TreePath { s.parse().unwrap() }
+    fn tp(s: &str) -> TreePath {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn init_creates_main_and_sessions() {
         let d = tempdir().unwrap();
         init_project(d.path(), &tp("work::ath::lynx::orsl")).unwrap();
-        assert_eq!(classify(&d.path().join("work/ath/lynx/orsl/main")), NodeKind::Exom);
-        assert_eq!(classify(&d.path().join("work/ath/lynx/orsl/sessions")), NodeKind::Folder);
+        assert_eq!(
+            classify(&d.path().join("work/ath/lynx/orsl/main")),
+            NodeKind::Exom
+        );
+        assert_eq!(
+            classify(&d.path().join("work/ath/lynx/orsl/sessions")),
+            NodeKind::Folder
+        );
     }
 
     #[test]
@@ -87,7 +106,10 @@ mod tests {
         init_project(d.path(), &tp("work::ath::lynx::orsl")).unwrap();
         init_project(d.path(), &tp("work::ath")).unwrap();
         assert_eq!(classify(&d.path().join("work/ath/main")), NodeKind::Exom);
-        assert_eq!(classify(&d.path().join("work/ath/lynx/orsl/main")), NodeKind::Exom);
+        assert_eq!(
+            classify(&d.path().join("work/ath/lynx/orsl/main")),
+            NodeKind::Exom
+        );
     }
 
     #[test]
@@ -101,8 +123,10 @@ mod tests {
     #[test]
     fn new_bare_exom_rejects_reserved() {
         let d = tempdir().unwrap();
-        assert!(matches!(new_bare_exom(d.path(), &tp("work::sessions")),
-                         Err(ScaffoldError::Path(_))));
+        assert!(matches!(
+            new_bare_exom(d.path(), &tp("work::sessions")),
+            Err(ScaffoldError::Path(_))
+        ));
     }
 
     #[test]

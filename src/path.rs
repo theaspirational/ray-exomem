@@ -18,19 +18,31 @@ pub enum PathError {
 
 impl TreePath {
     /// An empty path representing the tree root itself.
-    pub fn root() -> TreePath { TreePath { segments: vec![] } }
+    pub fn root() -> TreePath {
+        TreePath { segments: vec![] }
+    }
 
-    pub fn segments(&self) -> &[String] { &self.segments }
-    pub fn is_empty(&self) -> bool { self.segments.is_empty() }
-    pub fn len(&self) -> usize { self.segments.len() }
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.segments.len()
+    }
 
     pub fn last(&self) -> Option<&str> {
         self.segments.last().map(String::as_str)
     }
 
     pub fn parent(&self) -> Option<TreePath> {
-        if self.segments.len() <= 1 { return None; }
-        Some(TreePath { segments: self.segments[..self.segments.len() - 1].to_vec() })
+        if self.segments.len() <= 1 {
+            return None;
+        }
+        Some(TreePath {
+            segments: self.segments[..self.segments.len() - 1].to_vec(),
+        })
     }
 
     pub fn join(&self, segment: &str) -> Result<TreePath, PathError> {
@@ -42,26 +54,38 @@ impl TreePath {
 
     pub fn to_disk_path(&self, tree_root: &Path) -> PathBuf {
         let mut p = tree_root.to_path_buf();
-        for seg in &self.segments { p.push(seg); }
+        for seg in &self.segments {
+            p.push(seg);
+        }
         p
     }
 
-    pub fn to_cli_string(&self) -> String { self.segments.join("::") }
-    pub fn to_slash_string(&self) -> String { self.segments.join("/") }
+    pub fn to_cli_string(&self) -> String {
+        self.segments.join("::")
+    }
+    pub fn to_slash_string(&self) -> String {
+        self.segments.join("/")
+    }
 }
 
 impl std::str::FromStr for TreePath {
     type Err = PathError;
     fn from_str(s: &str) -> Result<Self, PathError> {
-        if s.is_empty() { return Err(PathError::Empty); }
+        if s.is_empty() {
+            return Err(PathError::Empty);
+        }
         let normalized = s.replace("::", "/");
         let segments: Vec<String> = normalized
             .split('/')
             .filter(|seg| !seg.is_empty())
             .map(String::from)
             .collect();
-        if segments.is_empty() { return Err(PathError::Empty); }
-        for seg in &segments { validate_segment(seg)?; }
+        if segments.is_empty() {
+            return Err(PathError::Empty);
+        }
+        for seg in &segments {
+            validate_segment(seg)?;
+        }
         Ok(TreePath { segments })
     }
 }
@@ -80,16 +104,25 @@ pub fn validate_segment(seg: &str) -> Result<(), PathError> {
         return Err(PathError::InvalidSegment(seg.to_string(), "empty"));
     }
     if seg.len() > MAX_SEGMENT_LEN {
-        return Err(PathError::InvalidSegment(seg.to_string(), "segment exceeds 255 bytes"));
+        return Err(PathError::InvalidSegment(
+            seg.to_string(),
+            "segment exceeds 255 bytes",
+        ));
     }
     let mut chars = seg.chars();
     let first = chars.next().unwrap();
     if !(first.is_ascii_alphanumeric() || first == '_' || first == '-') {
-        return Err(PathError::InvalidSegment(seg.to_string(), "first char must be [_A-Za-z0-9-]"));
+        return Err(PathError::InvalidSegment(
+            seg.to_string(),
+            "first char must be [_A-Za-z0-9-]",
+        ));
     }
     for c in chars {
         if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '@') {
-            return Err(PathError::InvalidSegment(seg.to_string(), "chars must be [_A-Za-z0-9.@-]"));
+            return Err(PathError::InvalidSegment(
+                seg.to_string(),
+                "chars must be [_A-Za-z0-9.@-]",
+            ));
         }
     }
     Ok(())
@@ -113,7 +146,7 @@ mod tests {
     #[test]
     fn parses_double_colon() {
         let p: TreePath = "work::ath::lynx::orsl::main".parse().unwrap();
-        assert_eq!(p.segments(), &["work","ath","lynx","orsl","main"]);
+        assert_eq!(p.segments(), &["work", "ath", "lynx", "orsl", "main"]);
         assert_eq!(p.to_cli_string(), "work::ath::lynx::orsl::main");
         assert_eq!(p.to_slash_string(), "work/ath/lynx/orsl/main");
     }
@@ -121,7 +154,7 @@ mod tests {
     #[test]
     fn parses_slash() {
         let p: TreePath = "work/ath/lynx".parse().unwrap();
-        assert_eq!(p.segments(), &["work","ath","lynx"]);
+        assert_eq!(p.segments(), &["work", "ath", "lynx"]);
     }
 
     #[test]

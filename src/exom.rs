@@ -16,11 +16,15 @@ pub enum ExomKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionType { Multi, Single }
+pub enum SessionType {
+    Multi,
+    Single,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionMeta {
-    #[serde(rename = "type")] pub session_type: SessionType,
+    #[serde(rename = "type")]
+    pub session_type: SessionType,
     pub label: String,
     pub initiated_by: String,
     pub agents: Vec<String>,
@@ -70,7 +74,9 @@ impl ExomMeta {
     }
 }
 
-pub fn meta_path(exom_disk: &Path) -> PathBuf { exom_disk.join(META_FILENAME) }
+pub fn meta_path(exom_disk: &Path) -> PathBuf {
+    exom_disk.join(META_FILENAME)
+}
 
 pub fn write_meta(exom_disk: &Path, meta: &ExomMeta) -> io::Result<()> {
     let p = meta_path(exom_disk);
@@ -87,13 +93,17 @@ pub fn read_meta(exom_disk: &Path) -> io::Result<ExomMeta> {
 }
 
 pub fn session_id(ts_utc: &str, kind: SessionType, label: &str) -> String {
-    let tag = match kind { SessionType::Multi => "multi", SessionType::Single => "single" };
+    let tag = match kind {
+        SessionType::Multi => "multi",
+        SessionType::Single => "single",
+    };
     format!("{ts_utc}_{tag}_agent_{label}")
 }
 
 pub fn now_iso8601_basic() -> String {
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
     let secs = now.as_secs();
     let (y, mo, d, h, mi, s) = epoch_to_ymdhms(secs);
     format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z")
@@ -115,21 +125,40 @@ fn days_to_ymd(mut days: i64) -> (u32, u32, u32) {
     loop {
         let ly = is_leap(y);
         let dy = if ly { 366 } else { 365 };
-        if days < dy { break; }
+        if days < dy {
+            break;
+        }
         days -= dy;
         y += 1;
     }
-    let mdays = [31u32, if is_leap(y) { 29 } else { 28 }, 31,30,31,30,31,31,30,31,30,31];
+    let mdays = [
+        31u32,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 1u32;
     for &md in &mdays {
-        if days < md as i64 { break; }
+        if days < md as i64 {
+            break;
+        }
         days -= md as i64;
         mo += 1;
     }
     (y as u32, mo, days as u32 + 1)
 }
 
-fn is_leap(y: i32) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
+fn is_leap(y: i32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
 
 #[cfg(test)]
 mod tests {
@@ -160,4 +189,3 @@ mod tests {
         assert!(ts.ends_with('Z'));
     }
 }
-

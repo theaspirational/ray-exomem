@@ -26,7 +26,11 @@ fn command_output(cmd: &str, args: &[&str], dir: &PathBuf) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn build_unix_timestamp() -> String {
@@ -41,14 +45,15 @@ fn build_unix_timestamp() -> String {
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let git_sha =
-        command_output("git", &["rev-parse", "--short=12", "HEAD"], &manifest_dir).unwrap_or_else(
-            || "unknown".to_string(),
-        );
+    let git_sha = command_output("git", &["rev-parse", "--short=12", "HEAD"], &manifest_dir)
+        .unwrap_or_else(|| "unknown".to_string());
     let build_unix = build_unix_timestamp();
 
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
-    println!("cargo:rerun-if-changed={}", manifest_dir.join(".git/HEAD").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join(".git/HEAD").display()
+    );
     println!("cargo:rustc-env=RAY_EXOMEM_GIT_SHA={git_sha}");
     println!("cargo:rustc-env=RAY_EXOMEM_BUILD_UNIX={build_unix}");
 

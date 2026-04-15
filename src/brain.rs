@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::context::MutationContext;
-use crate::exom::{self, ExomMeta, SessionMeta, SessionType, session_id, now_iso8601_basic};
+use crate::exom::{self, now_iso8601_basic, session_id, ExomMeta, SessionMeta, SessionType};
 use crate::path::TreePath;
 use crate::tree::{classify, NodeKind};
 
@@ -1574,7 +1574,11 @@ pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
         branch_names.insert(0, "main".to_string());
     }
 
-    Ok(ExomStats { fact_count, last_tx, branches: branch_names })
+    Ok(ExomStats {
+        fact_count,
+        last_tx,
+        branches: branch_names,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,13 +1611,15 @@ pub fn create_branch(
     branch_name: &str,
 ) -> Result<(), crate::scaffold::ScaffoldError> {
     let disk = exom_path.to_disk_path(tree_root);
-    let mut branches = load_branches_jsonl(&disk)
-        .map_err(|e| crate::scaffold::ScaffoldError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        ))?;
+    let mut branches = load_branches_jsonl(&disk).map_err(|e| {
+        crate::scaffold::ScaffoldError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+    })?;
 
     // Idempotent: don't duplicate
-    if branches.iter().any(|b| b.name == branch_name && !b.archived) {
+    if branches
+        .iter()
+        .any(|b| b.name == branch_name && !b.archived)
+    {
         return Ok(());
     }
     // "main" is a special implicit branch; synthesise its entry to persist it
@@ -1650,9 +1656,7 @@ pub fn claim_branch(
 ) -> Result<(), WriteError> {
     let disk = exom_path.to_disk_path(tree_root);
     let mut branches = load_branches_jsonl(&disk)
-        .map_err(|e| WriteError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        ))?;
+        .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     // Synthesise implicit "main" if it's not in the file yet
     let main_implicit = branches.is_empty() || !branches.iter().any(|b| b.name == "main");
@@ -1667,7 +1671,10 @@ pub fn claim_branch(
         });
     }
 
-    let Some(b) = branches.iter_mut().find(|b| b.name == branch_name && !b.archived) else {
+    let Some(b) = branches
+        .iter_mut()
+        .find(|b| b.name == branch_name && !b.archived)
+    else {
         return Err(WriteError::BranchMissing(branch_name.to_string()));
     };
 
@@ -1685,12 +1692,18 @@ pub fn claim_branch(
 /// Rejection codes for mutation prechecks.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-    #[error("no such exom {0}")] NoSuchExom(String),
-    #[error("session closed")] SessionClosed,
-    #[error("branch {0} not in exom")] BranchMissing(String),
-    #[error("branch owned by {0}")] BranchOwned(String),
-    #[error("actor required")] ActorRequired,
-    #[error("io: {0}")] Io(#[from] std::io::Error),
+    #[error("no such exom {0}")]
+    NoSuchExom(String),
+    #[error("session closed")]
+    SessionClosed,
+    #[error("branch {0} not in exom")]
+    BranchMissing(String),
+    #[error("branch owned by {0}")]
+    BranchOwned(String),
+    #[error("actor required")]
+    ActorRequired,
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Gate every mutation path. Call this before touching any splay table.
@@ -1704,7 +1717,9 @@ pub fn precheck_write(
     branch: &str,
     actor: &str,
 ) -> Result<(), WriteError> {
-    if actor.is_empty() { return Err(WriteError::ActorRequired); }
+    if actor.is_empty() {
+        return Err(WriteError::ActorRequired);
+    }
     let disk = exom_path.to_disk_path(tree_root);
     if classify(&disk) != NodeKind::Exom {
         return Err(WriteError::NoSuchExom(exom_path.to_cli_string()));
@@ -1717,7 +1732,9 @@ pub fn precheck_write(
         Err(e) => return Err(WriteError::Io(e)),
     };
     if let Some(s) = &meta.session {
-        if s.closed_at.is_some() { return Err(WriteError::SessionClosed); }
+        if s.closed_at.is_some() {
+            return Err(WriteError::SessionClosed);
+        }
     }
 
     // Branch existence check: load branches from JSONL sidecar (no FFI).
@@ -1725,8 +1742,8 @@ pub fn precheck_write(
         .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     // "main" is always implicitly present even when branch.jsonl is absent or empty.
-    let branch_exists = branch == "main"
-        || branches.iter().any(|b| b.name == branch && !b.archived);
+    let branch_exists =
+        branch == "main" || branches.iter().any(|b| b.name == branch && !b.archived);
 
     if !branch_exists {
         return Err(WriteError::BranchMissing(branch.to_string()));
@@ -1752,8 +1769,8 @@ pub fn mirror_session_meta_to_disk(
     let mut meta = exom::read_meta(&disk)?;
     if let Some(sess) = meta.session.as_mut() {
         match predicate {
-            "session/label"       => sess.label = value.to_string(),
-            "session/closed_at"   => sess.closed_at = Some(value.to_string()),
+            "session/label" => sess.label = value.to_string(),
+            "session/closed_at" => sess.closed_at = Some(value.to_string()),
             "session/archived_at" => sess.archived_at = Some(value.to_string()),
             _ => return Ok(()),
         }
@@ -1774,19 +1791,24 @@ pub fn session_new(
 ) -> Result<TreePath, crate::scaffold::ScaffoldError> {
     if label.is_empty() || label.contains('/') || label.contains("::") || label.contains(' ') {
         return Err(crate::scaffold::ScaffoldError::Path(
-            crate::path::PathError::InvalidSegment(label.to_string(), "label must be non-empty and free of '/', '::', or whitespace")
+            crate::path::PathError::InvalidSegment(
+                label.to_string(),
+                "label must be non-empty and free of '/', '::', or whitespace",
+            ),
         ));
     }
     if actor.is_empty() {
         return Err(crate::scaffold::ScaffoldError::Path(
-            crate::path::PathError::InvalidSegment(actor.to_string(), "actor required")
+            crate::path::PathError::InvalidSegment(actor.to_string(), "actor required"),
         ));
     }
     // Project must exist and have sessions/ folder.
     let project_disk = project_path.to_disk_path(tree_root);
     if classify(&project_disk.join("main")) != NodeKind::Exom {
-        return Err(crate::scaffold::ScaffoldError::NestInsideExom(
-            format!("project not initialised at {}", project_path)));
+        return Err(crate::scaffold::ScaffoldError::NestInsideExom(format!(
+            "project not initialised at {}",
+            project_path
+        )));
     }
     let ts = now_iso8601_basic();
     let dir = session_id(&ts, session_type.clone(), label);
@@ -1800,7 +1822,9 @@ pub fn session_new(
     // Build agents list: orchestrator must always be first; dedupe.
     let mut agents_final: Vec<String> = vec![actor.to_string()];
     for a in agents {
-        if !agents_final.contains(a) { agents_final.push(a.clone()); }
+        if !agents_final.contains(a) {
+            agents_final.push(a.clone());
+        }
     }
 
     let meta = ExomMeta::new_session(SessionMeta {
@@ -1816,14 +1840,17 @@ pub fn session_new(
     // Pre-create branch records in branch.jsonl for every participant.
     // Orchestrator gets "main"; each other agent gets a branch named after themselves.
     for agent_name in &agents_final {
-        let branch_name = if agent_name == actor { "main" } else { agent_name.as_str() };
+        let branch_name = if agent_name == actor {
+            "main"
+        } else {
+            agent_name.as_str()
+        };
         create_branch(tree_root, &session_path, branch_name)?;
     }
     // TOFU-claim "main" immediately for the orchestrator.
-    claim_branch(tree_root, &session_path, "main", actor)
-        .map_err(|e| crate::scaffold::ScaffoldError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        ))?;
+    claim_branch(tree_root, &session_path, "main", actor).map_err(|e| {
+        crate::scaffold::ScaffoldError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+    })?;
 
     Ok(session_path)
 }
@@ -1859,7 +1886,9 @@ pub fn session_join(
         Err(e) => return Err(WriteError::Io(e)),
     };
     if let Some(s) = &meta.session {
-        if s.closed_at.is_some() { return Err(WriteError::SessionClosed); }
+        if s.closed_at.is_some() {
+            return Err(WriteError::SessionClosed);
+        }
     }
 
     // The branch for this actor must exist (created by session_new).
@@ -1867,7 +1896,9 @@ pub fn session_join(
         .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     let branch_name = actor;
     let exists = branch_name == "main"
-        || branches.iter().any(|b| b.name == branch_name && !b.archived);
+        || branches
+            .iter()
+            .any(|b| b.name == branch_name && !b.archived);
     if !exists {
         return Err(WriteError::BranchMissing(branch_name.to_string()));
     }
@@ -1892,26 +1923,54 @@ mod session_tests {
         crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap()).unwrap();
         let project: TreePath = "work::ath".parse().unwrap();
         let session = session_new(
-            d.path(), &project, SessionType::Multi, "landing",
-            "orchestrator", &["agent_a".into(), "agent_b".into()],
-        ).unwrap();
+            d.path(),
+            &project,
+            SessionType::Multi,
+            "landing",
+            "orchestrator",
+            &["agent_a".into(), "agent_b".into()],
+        )
+        .unwrap();
         let segs = session.segments();
         assert_eq!(segs[0], "work");
         assert_eq!(segs[1], "ath");
         assert_eq!(segs[2], "sessions");
         assert!(segs[3].ends_with("_multi_agent_landing"));
         let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
-        assert_eq!(meta.session.unwrap().agents, vec!["orchestrator", "agent_a", "agent_b"]);
+        assert_eq!(
+            meta.session.unwrap().agents,
+            vec!["orchestrator", "agent_a", "agent_b"]
+        );
     }
 
     #[test]
     fn mirroring_updates_exom_json() {
         let d = tempdir().unwrap();
         crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
-        let session = session_new(d.path(), &"work".parse().unwrap(), SessionType::Single, "old", "me", &[]).unwrap();
+        let session = session_new(
+            d.path(),
+            &"work".parse().unwrap(),
+            SessionType::Single,
+            "old",
+            "me",
+            &[],
+        )
+        .unwrap();
         mirror_session_meta_to_disk(d.path(), &session, "session/label", "new").unwrap();
-        mirror_session_meta_to_disk(d.path(), &session, "session/closed_at", "2026-04-12T00:00:00Z").unwrap();
-        mirror_session_meta_to_disk(d.path(), &session, "session/archived_at", "2026-04-12T01:00:00Z").unwrap();
+        mirror_session_meta_to_disk(
+            d.path(),
+            &session,
+            "session/closed_at",
+            "2026-04-12T00:00:00Z",
+        )
+        .unwrap();
+        mirror_session_meta_to_disk(
+            d.path(),
+            &session,
+            "session/archived_at",
+            "2026-04-12T01:00:00Z",
+        )
+        .unwrap();
         let meta = exom::read_meta(&session.to_disk_path(d.path())).unwrap();
         let s = meta.session.unwrap();
         assert_eq!(s.label, "new");
@@ -1938,7 +1997,9 @@ mod tofu_tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn tp(s: &str) -> TreePath { s.parse().unwrap() }
+    fn tp(s: &str) -> TreePath {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn rejects_unknown_exom() {
@@ -1959,7 +2020,8 @@ mod tofu_tests {
     fn rejects_closed_session() {
         let d = tempdir().unwrap();
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
-        let session = session_new(d.path(), &tp("work"), SessionType::Single, "x", "me", &[]).unwrap();
+        let session =
+            session_new(d.path(), &tp("work"), SessionType::Single, "x", "me", &[]).unwrap();
         // Mark closed by editing exom.json directly.
         let disk = session.to_disk_path(d.path());
         let mut meta = exom::read_meta(&disk).unwrap();
@@ -2005,9 +2067,14 @@ mod tofu_tests {
         let d = tempdir().unwrap();
         crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
         let session = session_new(
-            d.path(), &tp("proj"), SessionType::Multi, "collab",
-            "orch", &["agent_a".into()],
-        ).unwrap();
+            d.path(),
+            &tp("proj"),
+            SessionType::Multi,
+            "collab",
+            "orch",
+            &["agent_a".into()],
+        )
+        .unwrap();
         // agent_a joins and claims their branch.
         let branch = session_join(d.path(), &session, "agent_a").unwrap();
         assert_eq!(branch, "agent_a");
@@ -2026,9 +2093,14 @@ mod tofu_tests {
         let d = tempdir().unwrap();
         crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
         let session = session_new(
-            d.path(), &tp("proj"), SessionType::Multi, "multi",
-            "orch", &["sub_a".into(), "sub_b".into()],
-        ).unwrap();
+            d.path(),
+            &tp("proj"),
+            SessionType::Multi,
+            "multi",
+            "orch",
+            &["sub_a".into(), "sub_b".into()],
+        )
+        .unwrap();
         let disk = session.to_disk_path(d.path());
         let branches = load_branches_jsonl(&disk).unwrap();
         let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();

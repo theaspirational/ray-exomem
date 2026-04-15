@@ -72,7 +72,9 @@ fn mcp_tools_list() {
     let body = mcp_call(&daemon.base_url, &raw_key, "tools/list", json!({}));
 
     assert!(body["error"].is_null(), "unexpected error: {body}");
-    let tools = body["result"]["tools"].as_array().expect("tools should be array");
+    let tools = body["result"]["tools"]
+        .as_array()
+        .expect("tools should be array");
     assert!(
         tools.len() >= 10,
         "expected at least 10 tools, got {}",
@@ -80,10 +82,7 @@ fn mcp_tools_list() {
     );
 
     // Check that key tool names are present.
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in &[
         "query",
         "assert_fact",
@@ -126,13 +125,12 @@ fn mcp_requires_auth() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
 
     // POST /mcp without Bearer token should fail with 401.
-    let result = ureq::post(&format!("{}/mcp", daemon.base_url))
-        .send_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {}
-        }));
+    let result = ureq::post(&format!("{}/mcp", daemon.base_url)).send_json(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    }));
 
     match result {
         Err(ureq::Error::Status(401, _)) => { /* expected */ }
@@ -149,12 +147,7 @@ fn mcp_requires_auth() {
 fn mcp_unknown_method() {
     let (daemon, raw_key) = daemon_with_api_key();
 
-    let body = mcp_call(
-        &daemon.base_url,
-        &raw_key,
-        "nonexistent/method",
-        json!({}),
-    );
+    let body = mcp_call(&daemon.base_url, &raw_key, "nonexistent/method", json!({}));
 
     assert!(body["result"].is_null(), "should have no result: {body}");
     assert_eq!(body["error"]["code"], -32601);

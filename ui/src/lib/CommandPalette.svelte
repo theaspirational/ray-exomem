@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { toast } from 'svelte-sonner';
+	import { auth } from '$lib/auth.svelte';
 	import {
 		CommandDialog,
 		CommandEmpty,
@@ -29,6 +30,8 @@
 		if (!pathname.startsWith('/tree')) return '';
 		return pathname.slice('/tree'.length).replace(/^\/+/, '');
 	});
+
+	const initTargetPath = $derived(currentTreePath || auth.user?.email || '');
 
 	function fuzzyMatch(q: string, text: string): boolean {
 		const ql = q.trim().toLowerCase();
@@ -118,7 +121,7 @@
 
 	function doInit() {
 		open = false;
-		treeModals.openInit(currentTreePath);
+		treeModals.openInit(initTargetPath);
 	}
 
 	function doRename() {
@@ -199,7 +202,7 @@
 						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
 						onSelect={doInit}
 					>
-						Init here{currentTreePath ? ` (${currentTreePath})` : ''}
+						Init here{initTargetPath ? ` (${initTargetPath})` : ''}
 					</CommandItem>
 				{/if}
 				{#if showRename}

@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use crate::brain::{
-    Belief, BeliefStatus, Branch, EntityId, Fact, Observation, Tx, TxAction, TxId,
-};
+use crate::brain::{Belief, BeliefStatus, Branch, EntityId, Fact, Observation, Tx, TxAction, TxId};
 use crate::db::ExomDb;
 
 pub struct PgExomDb {
@@ -71,9 +69,7 @@ fn tx_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Tx> {
         tx_id: i64_to_txid(row.get::<i64, _>("tx_id"))?,
         tx_time: row.get::<DateTime<Utc>, _>("tx_time").to_rfc3339(),
         user_email,
-        actor: row
-            .get::<Option<String>, _>("actor")
-            .unwrap_or_default(),
+        actor: row.get::<Option<String>, _>("actor").unwrap_or_default(),
         action: action_from_str(&row.get::<String, _>("action"))?,
         refs: row.get::<Vec<String>, _>("refs"),
         note: row.get::<String, _>("note"),

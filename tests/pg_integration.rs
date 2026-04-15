@@ -9,9 +9,8 @@ use ray_exomem::db::{
 };
 
 fn test_database_url() -> String {
-    std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://localhost:5432/ray_exomem_test".to_string()
-    })
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost:5432/ray_exomem_test".to_string())
 }
 
 async fn connect_auth() -> PgAuthDb {
@@ -59,7 +58,9 @@ async fn pg_auth_user_round_trip() {
         "list_users should include new user"
     );
 
-    db.set_role(&email, UserRole::Admin).await.expect("set_role");
+    db.set_role(&email, UserRole::Admin)
+        .await
+        .expect("set_role");
 
     let admin = db
         .get_user(&email)
@@ -220,10 +221,7 @@ async fn pg_auth_share_round_trip() {
     let owner = format!("pgtest.owner.{suf}@example.com");
     let grantee = format!("pgtest.grantee.{suf}@example.com");
 
-    for (em, name) in [
-        (owner.as_str(), "Owner"),
-        (grantee.as_str(), "Grantee"),
-    ] {
+    for (em, name) in [(owner.as_str(), "Owner"), (grantee.as_str(), "Grantee")] {
         db.upsert_user(&StoredUser {
             email: em.to_string(),
             display_name: name.to_string(),
@@ -259,10 +257,7 @@ async fn pg_auth_share_round_trip() {
         "grantee should see share"
     );
 
-    let by_owner = db
-        .shares_for_owner(&owner)
-        .await
-        .expect("shares_for_owner");
+    let by_owner = db.shares_for_owner(&owner).await.expect("shares_for_owner");
     assert!(
         by_owner.iter().any(|g| g.share_id == share_id),
         "owner should see share"
