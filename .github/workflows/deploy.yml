@@ -55,36 +55,12 @@ jobs:
             target/release/$BINARY_NAME \
             ${SERVER_USER}@${SERVER_HOST}:/home/${SERVER_USER}/apps/ray-exomem/bin/${BINARY_NAME}.new
 
-          # Atomic swap + strip deprecated allowlist flag from the user service before restart.
-          ssh -i ~/.ssh/deploy_key ${SERVER_USER}@${SERVER_HOST} <<'REMOTE'
-            set -euo pipefail
-
+          # Atomic swap + restart
+          ssh -i ~/.ssh/deploy_key ${SERVER_USER}@${SERVER_HOST} '
             cd ~/apps/ray-exomem/bin
             mv ray-exomem.new ray-exomem
             chmod +x ray-exomem
-
-            UNIT_FILE="$(systemctl --user show ray-exomem.service --property=FragmentPath --value)"
-            if [ -n "$UNIT_FILE" ] && [ -f "$UNIT_FILE" ] && grep -q -- '--allowed-domains' "$UNIT_FILE"; then
-              python3 - "$UNIT_FILE" <<'PY'
-import pathlib
-import re
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-updated = re.sub(
-    r"\s--allowed-domains(?:[=\s]+(?:\"[^\"]*\"|'[^']*'|\S+))?",
-    "",
-    text,
-)
-
-if updated != text:
-    path.write_text(updated)
-PY
-            fi
-
-            systemctl --user daemon-reload
             systemctl --user restart ray-exomem.service
             sleep 2
             systemctl --user is-active ray-exomem.service
-          REMOTE
+          '
