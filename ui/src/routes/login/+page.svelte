@@ -5,6 +5,24 @@
 	import { auth } from '$lib/auth.svelte';
 	import { getExomemBaseUrl } from '$lib/exomem.svelte';
 
+	type AuthErrorResponse = {
+		code?: string;
+		message?: string;
+		suggestion?: string;
+	};
+
+	type GsiCredentialResponse = {
+		credential: string;
+	};
+
+	type GsiSharedState = {
+		scriptPromise: Promise<void> | null;
+		initializedClientId: string | null;
+		onCredential: ((response: GsiCredentialResponse) => void | Promise<void>) | null;
+	};
+
+	const DEFAULT_LOGIN_ERROR = 'Login failed';
+
 	let error = $state<string | null>(null);
 	let loading = $state(false);
 
@@ -13,13 +31,17 @@
 	let googleClientId = $state<string | null>(null);
 	let infoLoaded = $state(false);
 	let infoError = $state(false);
+	let gsiReady = $state(false);
 
 	onMount(() => {
 		if (auth.isAuthenticated) {
 			goto(`${base}/`);
 			return;
 		}
-		fetchAuthInfo();
+		void fetchAuthInfo();
+		return () => {
+			gsiSharedState().onCredential = null;
+		};
 	});
 
 	async function fetchAuthInfo() {
@@ -40,39 +62,100 @@
 			infoLoaded = true;
 			// Load GSI after DOM updates with the button container
 			if (googleClientId) {
-				requestAnimationFrame(() => loadGSI());
+				requestAnimationFrame(() => {
+					void initGSI();
+				});
 			}
 		}
 	}
 
-	let gsiReady = $state(false);
+	function gsiSharedState(): GsiSharedState {
+		const root = globalThis as typeof globalThis & { __rayExomemGsi?: GsiSharedState };
+		root.__rayExomemGsi ??= {
+			scriptPromise: null,
+			initializedClientId: null,
+			onCredential: null
+		};
+		return root.__rayExomemGsi;
+	}
 
-	function loadGSI() {
-		if (!googleClientId) return;
-		const existing = document.querySelector('script[src*="accounts.google.com/gsi/client"]');
-		if (existing) {
-			renderGSIButton();
+	function googleAccounts() {
+		const root = globalThis as typeof globalThis & {
+			google?: {
+				accounts?: {
+					id?: {
+						initialize: (config: Record<string, unknown>) => void;
+						renderButton: (element: HTMLElement, options: Record<string, unknown>) => void;
+					};
+				};
+			};
+		};
+		return root.google?.accounts?.id ?? null;
+	}
+
+	async function ensureGsiLoaded(): Promise<void> {
+		if (googleAccounts()) return;
+		const shared = gsiSharedState();
+		if (shared.scriptPromise) {
+			await shared.scriptPromise;
 			return;
 		}
-		const script = document.createElement('script');
-		script.src = 'https://accounts.google.com/gsi/client';
-		script.async = true;
-		script.onload = renderGSIButton;
-		document.head.appendChild(script);
+		shared.scriptPromise = new Promise<void>((resolve, reject) => {
+			const existing = document.querySelector<HTMLScriptElement>(
+				'script[src="https://accounts.google.com/gsi/client"]'
+			);
+			if (existing) {
+				if (googleAccounts()) {
+					resolve();
+					return;
+				}
+				existing.addEventListener('load', () => resolve(), { once: true });
+				existing.addEventListener('error', () => reject(new Error('Failed to load Google Sign-In')), {
+					once: true
+				});
+				return;
+			}
+			const script = document.createElement('script');
+			script.src = 'https://accounts.google.com/gsi/client';
+			script.async = true;
+			script.onload = () => resolve();
+			script.onerror = () => reject(new Error('Failed to load Google Sign-In'));
+			document.head.appendChild(script);
+		});
+		try {
+			await shared.scriptPromise;
+		} catch (err) {
+			shared.scriptPromise = null;
+			throw err;
+		}
+	}
+
+	function configureGSI() {
+		if (!googleClientId) return;
+		const api = googleAccounts();
+		if (!api) return;
+		const shared = gsiSharedState();
+		shared.onCredential = handleCredentialResponse;
+		if (shared.initializedClientId === googleClientId) {
+			return;
+		}
+		api.initialize({
+			client_id: googleClientId,
+			callback: (response: GsiCredentialResponse) => {
+				void shared.onCredential?.(response);
+			},
+			auto_select: false,
+			use_fedcm_for_prompt: false
+		});
+		shared.initializedClientId = googleClientId;
 	}
 
 	function renderGSIButton() {
 		const el = document.getElementById('google-signin-btn');
-		if (!el) return;
-		// @ts-ignore -- google.accounts loaded via external script
-		google.accounts.id.initialize({
-			client_id: googleClientId,
-			callback: handleCredentialResponse,
-			auto_select: false,
-			use_fedcm_for_prompt: false
-		});
-		// @ts-ignore
-		google.accounts.id.renderButton(el, {
+		const api = googleAccounts();
+		if (!el || !api) return;
+		el.replaceChildren();
+		api.renderButton(el, {
 			theme: 'outline',
 			size: 'large',
 			width: 340,
@@ -82,8 +165,25 @@
 		gsiReady = true;
 	}
 
-	async function handleCredentialResponse(response: { credential: string }) {
+	async function initGSI() {
+		if (!googleClientId) return;
+		try {
+			await ensureGsiLoaded();
+			configureGSI();
+			renderGSIButton();
+		} catch (e) {
+			infoError = true;
+			error = e instanceof Error ? e.message : 'Failed to load Google Sign-In';
+		}
+	}
+
+	async function handleCredentialResponse(response: GsiCredentialResponse) {
 		await doLogin(response.credential, 'google');
+	}
+
+	function formatLoginError(body: AuthErrorResponse, status: number): string {
+		const parts = [body.message, body.suggestion].filter(Boolean);
+		return parts.join(' ') || `${DEFAULT_LOGIN_ERROR} (${status})`;
 	}
 
 	async function doLogin(idToken: string, loginProvider: string) {
@@ -98,8 +198,8 @@
 				body: JSON.stringify({ id_token: idToken, provider: loginProvider })
 			});
 			if (!resp.ok) {
-				const body = await resp.json().catch(() => ({}));
-				error = body.message || 'Login failed';
+				const body = (await resp.json().catch(() => ({}))) as AuthErrorResponse;
+				error = formatLoginError(body, resp.status);
 				return;
 			}
 			await auth.checkSession();

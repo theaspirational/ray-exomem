@@ -7,10 +7,11 @@ use std::{
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderName, HeaderValue, StatusCode, Uri},
+    middleware,
     response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        sse::{Event, Sse},
+        IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -19,7 +20,7 @@ use futures::StreamExt;
 use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use tower_http::cors::{Any, CorsLayer};
 
 // ---------------------------------------------------------------------------
@@ -431,14 +432,20 @@ async fn api_sse(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.sse_tx.subscribe();
-    let stream = BroadcastStream::new(rx)
+    let events = BroadcastStream::new(rx)
         .filter_map(|r| async { r.ok() })
         .map(|data| Ok(Event::default().data(data)));
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    )
+    let pings = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
+        .map(|_| Ok(Event::default().event("ping").data("{}")));
+    Sse::new(futures::stream::select(events, pings))
+}
+
+async fn set_response_headers(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin-allow-popups"),
+    );
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +536,7 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
         .route("/api/status", get(api_status))
         .fallback(spa_fallback)
         .with_state(state)
+        .layer(middleware::map_response(set_response_headers))
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
