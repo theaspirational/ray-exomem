@@ -2,14 +2,14 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode, Uri},
     response::{
-        sse::{Event, Sse},
+        sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
     routing::{get, post},
@@ -434,7 +434,11 @@ async fn api_sse(
     let stream = BroadcastStream::new(rx)
         .filter_map(|r| async { r.ok() })
         .map(|data| Ok(Event::default().data(data)));
-    Sse::new(stream)
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
 
 // ---------------------------------------------------------------------------

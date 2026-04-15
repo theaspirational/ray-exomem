@@ -19,29 +19,15 @@
 	let { children }: { children: Snippet } = $props();
 
 	const isLoginRoute = $derived(page.url.pathname.startsWith(`${base}/login`));
-
-	onMount(async () => {
-		await auth.checkSession();
-
-		if (!auth.isAuthenticated && !isLoginRoute) {
-			goto(`${base}/login`);
-			return;
-		}
-
-		if (auth.isAuthenticated) {
-			startApp();
-		}
-	});
-
-	/* Re-check: if auth flips to authenticated later (e.g. after login redirect back). */
-	$effect(() => {
-		if (auth.isAuthenticated && !isLoginRoute) {
-			startApp();
-		}
-	});
-
 	let appStarted = $state(false);
+	let redirectingToLogin = $state(false);
 	let cleanups: Array<() => void> = [];
+
+	function redirectToLogin() {
+		if (redirectingToLogin || isLoginRoute) return;
+		redirectingToLogin = true;
+		void goto(`${base}/login`, { replaceState: true });
+	}
 
 	function startApp() {
 		if (appStarted) return;
@@ -65,15 +51,51 @@
 		];
 	}
 
+	function stopApp() {
+		if (!appStarted) return;
+		appStarted = false;
+		for (const fn of cleanups) fn();
+		cleanups = [];
+	}
+
+	onMount(async () => {
+		await auth.checkSession();
+
+		if (!auth.isAuthenticated && !isLoginRoute) {
+			redirectToLogin();
+			return;
+		}
+
+		if (auth.isAuthenticated && !isLoginRoute) {
+			startApp();
+		}
+	});
+
 	$effect(() => {
+		if (auth.loading) return;
+		if (auth.isAuthenticated && !isLoginRoute) {
+			redirectingToLogin = false;
+			startApp();
+			return;
+		}
+		stopApp();
+		if (isLoginRoute) {
+			redirectingToLogin = false;
+			return;
+		}
+		if (!auth.isAuthenticated) {
+			redirectToLogin();
+		}
+	});
+
+	$effect(() => {
+		if (!auth.isAuthenticated || isLoginRoute) return;
 		app.selectedExom;
 		void app.refreshServerUptime();
 	});
 
 	onMount(() => {
-		return () => {
-			for (const fn of cleanups) fn();
-		};
+		return () => stopApp();
 	});
 </script>
 
@@ -88,7 +110,7 @@
 {:else if isLoginRoute}
 	{@render children()}
 	<Toaster richColors position="bottom-right" />
-{:else}
+{:else if auth.isAuthenticated}
 	<div class="flex h-screen flex-col overflow-hidden bg-zinc-900 font-sans text-zinc-100">
 		<div class="flex min-h-0 flex-1">
 			<Drawer />
@@ -102,9 +124,11 @@
 		</div>
 		<StatusBar />
 		<CommandPalette bind:open={commandPaletteState.open} />
-		{#if !auth.isAuthenticated}
-			<ActorIdentityDialog />
-		{/if}
+		<ActorIdentityDialog />
 		<Toaster richColors position="bottom-right" />
+	</div>
+{:else}
+	<div class="flex h-screen items-center justify-center bg-zinc-900 text-zinc-500">
+		<p class="text-sm">Redirecting to sign in...</p>
 	</div>
 {/if}

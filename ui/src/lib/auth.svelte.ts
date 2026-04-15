@@ -10,6 +10,11 @@ export interface AuthUser {
 	role: string;
 }
 
+interface AuthSessionResponse {
+	authenticated: boolean;
+	user?: AuthUser;
+}
+
 function authApiBase(): string {
 	return getExomemBaseUrl().replace('/ray-exomem', '');
 }
@@ -35,9 +40,10 @@ class AuthState {
 		if (!browser) return;
 		this.loading = true;
 		try {
-			const resp = await fetch(`${authApiBase()}/auth/me`, { credentials: 'include' });
+			const resp = await fetch(`${authApiBase()}/auth/session`, { credentials: 'include' });
 			if (resp.ok) {
-				this.user = await resp.json();
+				const session = (await resp.json()) as AuthSessionResponse;
+				this.user = session.authenticated ? (session.user ?? null) : null;
 			} else {
 				this.user = null;
 			}

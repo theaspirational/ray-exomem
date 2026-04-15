@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::middleware::{clear_session_cookie, session_cookie};
+use crate::auth::middleware::{clear_session_cookie, session_cookie, MaybeUser};
 use crate::auth::store::AuthStore;
 use crate::auth::{User, UserRole};
 use crate::http_error::ApiError;
@@ -25,6 +25,7 @@ pub fn auth_router() -> Router<Arc<AppState>> {
         .route("/info", get(auth_info))
         .route("/login", post(login))
         .route("/logout", post(logout))
+        .route("/session", get(session))
         .route("/me", get(me))
         .route("/api-keys", get(list_api_keys).post(create_api_key))
         .route("/api-keys/{key_id}", delete(revoke_api_key))
@@ -52,11 +53,18 @@ struct LoginResponse {
 }
 
 #[derive(Serialize)]
-struct MeResponse {
+struct AuthUserResponse {
     email: String,
     display_name: String,
     provider: String,
     role: String,
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<AuthUserResponse>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +122,15 @@ fn role_label(role: &UserRole) -> &'static str {
         UserRole::Regular => "regular",
         UserRole::Admin => "admin",
         UserRole::TopAdmin => "top-admin",
+    }
+}
+
+fn auth_user_response(user: &User) -> AuthUserResponse {
+    AuthUserResponse {
+        email: user.email.clone(),
+        display_name: user.display_name.clone(),
+        provider: user.provider.clone(),
+        role: role_label(&user.role).to_string(),
     }
 }
 
@@ -243,14 +260,22 @@ async fn logout(
     ))
 }
 
+/// GET /auth/session
+///
+/// Public session probe for the SPA bootstrap path. Returns `authenticated: false`
+/// instead of a 401 so the app can redirect cleanly without logging expected auth
+/// misses as network errors.
+async fn session(maybe_user: MaybeUser) -> impl IntoResponse {
+    let user = maybe_user.0.as_ref().map(auth_user_response);
+    Json(SessionResponse {
+        authenticated: user.is_some(),
+        user,
+    })
+}
+
 /// GET /auth/me
 async fn me(user: User) -> impl IntoResponse {
-    Json(MeResponse {
-        email: user.email,
-        display_name: user.display_name,
-        provider: user.provider,
-        role: role_label(&user.role).to_string(),
-    })
+    Json(auth_user_response(&user))
 }
 
 /// POST /auth/api-keys
