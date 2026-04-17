@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::middleware::{clear_session_cookie, session_cookie, MaybeUser};
 use crate::auth::store::AuthStore;
 use crate::auth::{User, UserRole};
+use crate::context::MutationContext;
 use crate::http_error::ApiError;
 use crate::server::AppState;
 
@@ -134,6 +135,214 @@ fn auth_user_response(user: &User) -> AuthUserResponse {
     }
 }
 
+const BOOTSTRAP_SENTINEL_PREDICATE: &str = "onboarding/bootstrap_version";
+const BOOTSTRAP_SENTINEL_VALUE: &str = "v1";
+
+type BootstrapFactSpec = (&'static str, &'static str, &'static str);
+
+fn bootstrap_ctx(email: &str, session_id: &str) -> MutationContext {
+    MutationContext {
+        actor: email.to_string(),
+        session: Some(session_id.to_string()),
+        model: None,
+        user_email: Some(email.to_string()),
+    }
+}
+
+fn health_bootstrap_facts() -> &'static [BootstrapFactSpec] {
+    &[
+        ("health/profile/age", "profile/age", "30"),
+        ("health/profile/height_cm", "profile/height_cm", "175"),
+        ("health/profile/weight_kg", "profile/weight_kg", "75"),
+        ("health/profile/units", "profile/units", "metric"),
+        (
+            "health/onboarding/disclaimer",
+            "onboarding/disclaimer",
+            "general_wellness_example_not_medical_advice",
+        ),
+        (
+            "onboarding/bootstrap_version",
+            BOOTSTRAP_SENTINEL_PREDICATE,
+            BOOTSTRAP_SENTINEL_VALUE,
+        ),
+    ]
+}
+
+fn work_main_bootstrap_facts() -> &'static [BootstrapFactSpec] {
+    &[
+        ("workspace/purpose", "workspace/purpose", "personal work area"),
+        (
+            "workspace/next_step",
+            "workspace/next_step",
+            "create projects, facts, or sessions here",
+        ),
+        (
+            "onboarding/bootstrap_version",
+            BOOTSTRAP_SENTINEL_PREDICATE,
+            BOOTSTRAP_SENTINEL_VALUE,
+        ),
+    ]
+}
+
+fn work_example_bootstrap_facts() -> &'static [BootstrapFactSpec] {
+    &[
+        ("project/name", "project/name", "Example Project"),
+        ("project/status", "project/status", "active"),
+        (
+            "project/next_step",
+            "project/next_step",
+            "inspect facts, graph, and sessions",
+        ),
+        (
+            "onboarding/bootstrap_version",
+            BOOTSTRAP_SENTINEL_PREDICATE,
+            BOOTSTRAP_SENTINEL_VALUE,
+        ),
+    ]
+}
+
+fn health_bootstrap_rules(exom: &str) -> Vec<String> {
+    vec![
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "2000") (health/water-band "small"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "2500") (health/water-band "medium"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "3000") (health/water-band "large"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "10000") (health/step-band "high"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "9000") (health/step-band "medium"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "7500") (health/step-band "gentle"))"#
+        ),
+    ]
+}
+
+fn exom_is_bootstrapped(es: &crate::server::ExomState) -> bool {
+    es.brain.current_facts().iter().any(|fact| {
+        fact.predicate == BOOTSTRAP_SENTINEL_PREDICATE && fact.value == BOOTSTRAP_SENTINEL_VALUE
+    }) || !es.brain.all_facts().is_empty()
+        || !es.rules.is_empty()
+}
+
+async fn seed_bootstrap_exom(
+    state: &AppState,
+    exom: &str,
+    facts: &[BootstrapFactSpec],
+    rules: &[String],
+    ctx: &MutationContext,
+) -> Result<(), ApiError> {
+    crate::server::mutate_exom_async(state, exom, |es| {
+        if exom_is_bootstrapped(es) {
+            return Ok(());
+        }
+
+        for (fact_id, predicate, value) in facts {
+            es.brain
+                .assert_fact(fact_id, predicate, value, 1.0, "bootstrap", None, None, ctx)?;
+        }
+
+        for rule_text in rules {
+            es.rules.push(crate::rules::parse_rule_line(
+                rule_text,
+                ctx.clone(),
+                crate::brain::now_iso(),
+            )?);
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            "bootstrap_failed",
+            format!("failed to bootstrap {exom}: {e}"),
+        )
+        .with_status(500)
+    })?;
+    Ok(())
+}
+
+async fn bootstrap_user_namespace(
+    state: &AppState,
+    email: &str,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    if state.auth_store.is_none() {
+        return Ok(());
+    }
+
+    let Some(tree_root) = state.tree_root.as_ref() else {
+        return Ok(());
+    };
+
+    let project_paths = [
+        format!("{email}/personal/health"),
+        format!("{email}/work"),
+        format!("{email}/work/example"),
+    ];
+
+    let mut changed = false;
+    for raw in project_paths {
+        let path: crate::path::TreePath = raw
+            .parse()
+            .map_err(|e: crate::path::PathError| ApiError::new("bad_path", e.to_string()))?;
+        let main_path = path
+            .join("main")
+            .map_err(|e| ApiError::new("bad_path", e.to_string()))?;
+        let main_disk = main_path.to_disk_path(tree_root);
+        if crate::tree::classify(&main_disk) == crate::tree::NodeKind::Missing {
+            changed = true;
+        }
+        crate::scaffold::init_project(tree_root, &path).map_err(ApiError::from)?;
+    }
+
+    let ctx = bootstrap_ctx(email, session_id);
+    let health_exom = format!("{email}/personal/health/main");
+    seed_bootstrap_exom(
+        state,
+        &health_exom,
+        health_bootstrap_facts(),
+        &health_bootstrap_rules(&health_exom),
+        &ctx,
+    )
+    .await?;
+
+    let work_main_exom = format!("{email}/work/main");
+    seed_bootstrap_exom(
+        state,
+        &work_main_exom,
+        work_main_bootstrap_facts(),
+        &[],
+        &ctx,
+    )
+    .await?;
+
+    let work_example_exom = format!("{email}/work/example/main");
+    seed_bootstrap_exom(
+        state,
+        &work_example_exom,
+        work_example_bootstrap_facts(),
+        &[],
+        &ctx,
+    )
+    .await?;
+
+    if changed {
+        let _ = state
+            .sse_tx
+            .send(r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string());
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -224,6 +433,7 @@ async fn login(
     store
         .record_session(&session_id, &identity.email, &expires_at)
         .await;
+    bootstrap_user_namespace(&state, &identity.email, &session_id).await?;
 
     // First user ever becomes persisted top-admin.
     if role == UserRole::TopAdmin {

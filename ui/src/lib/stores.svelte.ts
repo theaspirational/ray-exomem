@@ -11,7 +11,7 @@ import {
 } from '$lib/exomem.svelte';
 
 class AppState {
-	selectedExom = $state(DEFAULT_EXOM);
+	selectedExom = $state<string | null>(null);
 	baseUrl = $state(getExomemBaseUrl());
 	/** Server process uptime for the selected exom (seconds), from `/status`. */
 	serverUptimeSec = $state<number | null>(null);
@@ -21,11 +21,31 @@ class AppState {
 		// No-op: tree UI uses fetchTree() directly. Old /api/exoms endpoint removed.
 	}
 
-	switchExom(name: string) {
+	defaultExomForUser(email: string): string {
+		return `${email}/work/main`;
+	}
+
+	ensureAuthenticatedDefaultExom(email: string | null) {
+		if (!email) return;
+		if (this.selectedExom === null || this.selectedExom === DEFAULT_EXOM) {
+			this.selectedExom = this.defaultExomForUser(email);
+		}
+	}
+
+	switchExom(name: string | null) {
 		this.selectedExom = name;
 	}
 
+	clearSelection() {
+		this.selectedExom = null;
+		this.serverUptimeSec = null;
+	}
+
 	async refreshServerUptime() {
+		if (!this.selectedExom) {
+			this.serverUptimeSec = null;
+			return;
+		}
 		try {
 			const s = await fetchExomemStatus(this.selectedExom);
 			this.serverUptimeSec = s.server.uptime_sec;

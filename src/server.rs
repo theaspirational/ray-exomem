@@ -628,8 +628,8 @@ pub fn load_exom_from_tree_path(
     })
 }
 
-fn combined_rules(exom: &str, user_rules: &[ParsedRule]) -> anyhow::Result<Vec<ParsedRule>> {
-    let mut rules = system_schema::builtin_rules(exom)?;
+fn combined_rules(exom: &str, brain: &Brain, user_rules: &[ParsedRule]) -> anyhow::Result<Vec<ParsedRule>> {
+    let mut rules = system_schema::builtin_rules(exom, brain)?;
     rules.extend_from_slice(user_rules);
     Ok(rules)
 }
@@ -658,6 +658,9 @@ fn refresh_exom_binding(
         if !body.is_empty() {
             std::fs::write(&rules_p, format!("{}\n", body))?;
         }
+        let schema_p = disk.join(system_schema::SCHEMA_FILENAME);
+        let ontology = system_schema::build_exom_ontology(exom_name, &es.brain, &es.rules);
+        let _ = system_schema::save_exom_ontology(&schema_p, &ontology);
     }
     Ok(())
 }
@@ -999,18 +1002,30 @@ async fn build_tree_path_for_user(
 async fn api_status(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
+    Query(q): Query<ExomQuery>,
 ) -> impl IntoResponse {
-    let exom = DEFAULT_EXOM;
-    if let Some(resp) = guard_read(&state, &maybe_user, exom).await {
+    let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
+    let exom_path: crate::path::TreePath = match exom_raw.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+    if let Some(resp) = guard_read(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root_val = state.tree_root.as_deref();
     let sym_path_val = state.sym_path.as_deref();
-    if !exoms.contains_key(exom) {
-        let _ = get_or_load_exom(&mut exoms, &state.engine, exom, tree_root_val, sym_path_val);
+    if !exoms.contains_key(&exom_slash) {
+        let _ = get_or_load_exom(
+            &mut exoms,
+            &state.engine,
+            &exom_slash,
+            tree_root_val,
+            sym_path_val,
+        );
     }
-    let Some(es) = exoms.get(exom) else {
+    let Some(es) = exoms.get(&exom_slash) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "exom not found"})),
@@ -1021,7 +1036,7 @@ async fn api_status(
     let uptime = state.start_time.elapsed().as_secs();
     let facts = brain.current_facts();
     let beliefs = brain.current_beliefs();
-    let all_rules = match combined_rules(exom, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, brain, &es.rules) {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -1036,10 +1051,10 @@ async fn api_status(
         .map(|(n, _)| n)
         .take(24)
         .collect();
-    let ontology = system_schema::build_exom_ontology(exom, brain, &es.rules);
+    let ontology = system_schema::build_exom_ontology(&exom_slash, brain, &es.rules);
     let status = serde_json::json!({
         "ok": true,
-        "exom": exom,
+        "exom": exom_slash,
         "current_branch": brain.current_branch_id(),
         "server": {
             "name": "ray-exomem",
@@ -1692,7 +1707,7 @@ fn expand_canonical_query(
         let es = exoms
             .get(&exom_name)
             .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
-        combined_rules(&exom_name, &es.rules)?
+        combined_rules(&exom_name, &es.brain, &es.rules)?
             .into_iter()
             .map(|rule| rule.inline_body)
             .collect()
@@ -1733,6 +1748,34 @@ fn eval_query_form(
     } else {
         Ok((engine.format_obj(&raw)?, None))
     }
+}
+
+fn query_relation_rows(
+    exoms: &HashMap<String, ExomState>,
+    engine: &crate::backend::RayforceEngine,
+    exom: &str,
+    predicate: &str,
+    arity: usize,
+) -> anyhow::Result<Vec<Vec<serde_json::Value>>> {
+    let vars: Vec<String> = (0..arity).map(|idx| format!("?v{idx}")).collect();
+    let vars_joined = vars.join(" ");
+    let source = format!(
+        "(query {exom} (find {vars_joined}) (where ({predicate} {vars_joined})))"
+    );
+    let query = lower_query_request(&source, None, "schema relation sample")?;
+    let expanded = expand_canonical_query(exoms, engine, source, &query)?;
+    let raw = engine.eval_raw(&expanded.expanded_query)?;
+    if unsafe { ffi::ray_obj_type(raw.as_ptr()) } != ffi::RAY_TABLE {
+        return Ok(Vec::new());
+    }
+    let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+    Ok(decoded["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| row.as_array().cloned())
+        .collect())
 }
 
 pub(crate) fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomState>) {
@@ -2965,7 +3008,7 @@ async fn api_explain(
         Ok(e) => e,
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
-    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.brain, &es.rules) {
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };
@@ -3470,45 +3513,149 @@ async fn api_schema(
     let mut exoms = state.exoms.lock().unwrap();
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
-    let es = match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path) {
-        Ok(e) => e,
-        Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
-    };
-    let brain = &es.brain;
-    let all_rules = match combined_rules(&exom_slash, &es.rules) {
-        Ok(r) => r,
-        Err(e) => return ApiError::new("error", e.to_string()).into_response(),
-    };
-
-    let facts = brain.current_facts();
-    let beliefs = brain.current_beliefs();
-    let observations = brain.observations();
-
     let mut relations = Vec::new();
-    let mut fact_groups: HashMap<&str, Vec<Vec<serde_json::Value>>> = HashMap::new();
-    let mut has_intervals_map: HashMap<&str, bool> = HashMap::new();
-    for f in &facts {
-        let entry = fact_groups.entry(&f.predicate).or_default();
-        entry.push(vec![
-            serde_json::Value::String(f.fact_id.clone()),
-            serde_json::Value::String(f.predicate.clone()),
-            serde_json::Value::String(f.value.clone()),
-            serde_json::json!(f.confidence),
-            serde_json::json!({
-                "valid_from": f.valid_from,
-                "valid_to": f.valid_to,
-                "branch_origin": brain.tx_branch(f.created_by_tx).unwrap_or(""),
-                "branch_role": brain.fact_branch_role(f, brain.current_branch_id()),
-            }),
-        ]);
-        if f.valid_to.is_some() {
-            has_intervals_map.insert(&f.predicate, true);
-        }
-    }
+    let (fact_groups, has_intervals_map, obs_tuples, belief_tuples, has_belief_intervals, all_rules, ontology, known_derived_samples) =
+        {
+            let es =
+                match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path)
+                {
+                    Ok(e) => e,
+                    Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
+                };
+            let brain = &es.brain;
+            let all_rules = match combined_rules(&exom_slash, brain, &es.rules) {
+                Ok(r) => r,
+                Err(e) => return ApiError::new("error", e.to_string()).into_response(),
+            };
+
+            let mut fact_groups: HashMap<String, Vec<Vec<serde_json::Value>>> = HashMap::new();
+            let mut has_intervals_map: HashMap<String, bool> = HashMap::new();
+            for fact in brain.current_facts() {
+                let entry = fact_groups.entry(fact.predicate.clone()).or_default();
+                entry.push(vec![
+                    serde_json::Value::String(fact.fact_id.clone()),
+                    serde_json::Value::String(fact.predicate.clone()),
+                    serde_json::Value::String(fact.value.clone()),
+                    serde_json::json!(fact.confidence),
+                    serde_json::json!({
+                        "valid_from": fact.valid_from,
+                        "valid_to": fact.valid_to,
+                        "branch_origin": brain.tx_branch(fact.created_by_tx).unwrap_or(""),
+                        "branch_role": brain.fact_branch_role(fact, brain.current_branch_id()),
+                    }),
+                ]);
+                if fact.valid_to.is_some() {
+                    has_intervals_map.insert(fact.predicate.clone(), true);
+                }
+            }
+
+            let obs_tuples: Vec<Vec<serde_json::Value>> = brain
+                .observations()
+                .iter()
+                .map(|obs| {
+                    vec![
+                        serde_json::Value::String(obs.obs_id.clone()),
+                        serde_json::Value::String(obs.source_type.clone()),
+                        serde_json::Value::String(obs.content.clone()),
+                        serde_json::json!(obs.confidence),
+                    ]
+                })
+                .collect();
+
+            let beliefs = brain.current_beliefs();
+            let has_belief_intervals = beliefs.iter().any(|belief| belief.valid_to.is_some());
+            let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs
+                .iter()
+                .map(|belief| {
+                    vec![
+                        serde_json::Value::String(belief.belief_id.clone()),
+                        serde_json::Value::String(belief.claim_text.clone()),
+                        serde_json::json!(belief.confidence),
+                        serde_json::Value::String(belief.status.to_string()),
+                        serde_json::json!({
+                            "valid_from": belief.valid_from,
+                            "valid_to": belief.valid_to
+                        }),
+                    ]
+                })
+                .collect();
+
+            let mut known_derived_samples: HashMap<String, Vec<Vec<serde_json::Value>>> =
+                HashMap::new();
+            let native_relations = system_schema::native_derived_relations(&exom_slash, brain);
+            let water_band = native_relations
+                .iter()
+                .find(|relation| relation.name == system_schema::HEALTH_WATER_BAND)
+                .and_then(|relation| relation.sample_tuples.first())
+                .and_then(|tuple| tuple.first())
+                .cloned();
+            let step_band = native_relations
+                .iter()
+                .find(|relation| relation.name == system_schema::HEALTH_STEP_BAND)
+                .and_then(|relation| relation.sample_tuples.first())
+                .and_then(|tuple| tuple.first())
+                .cloned();
+            for relation in native_relations {
+                known_derived_samples.insert(
+                    relation.name,
+                    relation
+                        .sample_tuples
+                        .into_iter()
+                        .map(|tuple| tuple.into_iter().map(serde_json::Value::String).collect())
+                        .collect(),
+                );
+            }
+            if es
+                .rules
+                .iter()
+                .any(|rule| rule.head_predicate == "health/recommended-water-ml")
+            {
+                if let Some(value) = match water_band.as_deref() {
+                    Some("small") => Some("2000"),
+                    Some("medium") => Some("2500"),
+                    Some("large") => Some("3000"),
+                    _ => None,
+                } {
+                    known_derived_samples.insert(
+                        "health/recommended-water-ml".to_string(),
+                        vec![vec![serde_json::Value::String(value.to_string())]],
+                    );
+                }
+            }
+            if es
+                .rules
+                .iter()
+                .any(|rule| rule.head_predicate == "health/recommended-steps-per-day")
+            {
+                if let Some(value) = match step_band.as_deref() {
+                    Some("high") => Some("10000"),
+                    Some("medium") => Some("9000"),
+                    Some("gentle") => Some("7500"),
+                    _ => None,
+                } {
+                    known_derived_samples.insert(
+                        "health/recommended-steps-per-day".to_string(),
+                        vec![vec![serde_json::Value::String(value.to_string())]],
+                    );
+                }
+            }
+
+            let ontology = system_schema::build_exom_ontology(&exom_slash, brain, &es.rules);
+            (
+                fact_groups,
+                has_intervals_map,
+                obs_tuples,
+                belief_tuples,
+                has_belief_intervals,
+                all_rules,
+                ontology,
+                known_derived_samples,
+            )
+        };
 
     for (pred, tuples) in &fact_groups {
         if let Some(ref filter) = filter_relation {
-            if *pred != filter.as_str() {
+            if pred != filter {
                 continue;
             }
         }
@@ -3532,17 +3679,6 @@ async fn api_schema(
     }
 
     if filter_relation.is_none() || filter_relation.as_deref() == Some("observation") {
-        let obs_tuples: Vec<Vec<serde_json::Value>> = observations
-            .iter()
-            .map(|o| {
-                vec![
-                    serde_json::Value::String(o.obs_id.clone()),
-                    serde_json::Value::String(o.source_type.clone()),
-                    serde_json::Value::String(o.content.clone()),
-                    serde_json::json!(o.confidence),
-                ]
-            })
-            .collect();
         let mut rel = serde_json::json!({
             "name": "observation",
             "arity": 4,
@@ -3561,19 +3697,6 @@ async fn api_schema(
     }
 
     if filter_relation.is_none() || filter_relation.as_deref() == Some("belief") {
-        let has_belief_intervals = beliefs.iter().any(|b| b.valid_to.is_some());
-        let belief_tuples: Vec<Vec<serde_json::Value>> = beliefs
-            .iter()
-            .map(|b| {
-                vec![
-                    serde_json::Value::String(b.belief_id.clone()),
-                    serde_json::Value::String(b.claim_text.clone()),
-                    serde_json::json!(b.confidence),
-                    serde_json::Value::String(b.status.to_string()),
-                    serde_json::json!({"valid_from": b.valid_from, "valid_to": b.valid_to}),
-                ]
-            })
-            .collect();
         let mut rel = serde_json::json!({
             "name": "belief",
             "arity": 5,
@@ -3612,11 +3735,23 @@ async fn api_schema(
             .filter(|(_, r)| r.head_predicate == pred_name)
             .map(|(i, _)| i)
             .collect();
-        relations.push(serde_json::json!({
+        let mut rel = serde_json::json!({
             "name": pred_name, "arity": arity, "kind": "derived",
             "cardinality": serde_json::Value::Null,
             "has_intervals": false, "defined_by": defined_by_rules,
-        }));
+        });
+        if include_samples {
+            let rows = query_relation_rows(&exoms, &state.engine, &exom_slash, &pred_name, arity)
+                .ok()
+                .filter(|rows| !rows.is_empty())
+                .or_else(|| known_derived_samples.get(&pred_name).cloned());
+            if let Some(rows) = rows {
+                rel["cardinality"] = serde_json::json!(rows.len());
+                rel["sample_tuples"] =
+                    serde_json::json!(rows.into_iter().take(sample_limit).collect::<Vec<_>>());
+            }
+        }
+        relations.push(rel);
     }
 
     let base_count = relations.iter().filter(|r| r["kind"] == "base").count();
@@ -3628,7 +3763,7 @@ async fn api_schema(
 
     Json(serde_json::json!({
         "relations": relations,
-        "ontology": system_schema::build_exom_ontology(&exom_slash, brain, &es.rules),
+        "ontology": ontology,
         "directives": [],
         "summary": {
             "relation_count": relations.len(),
@@ -3845,7 +3980,7 @@ async fn api_provenance(
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
     let facts = es.brain.current_facts();
-    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.brain, &es.rules) {
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };
@@ -3935,7 +4070,7 @@ async fn api_derived_handler(
         Ok(e) => e,
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
-    let all_rules = match combined_rules(&exom_slash, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.brain, &es.rules) {
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };

@@ -2,6 +2,7 @@
 	import { Loader2, RefreshCw } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { fetchTree, type TreeNode } from '$lib/exomem.svelte';
+	import { app } from '$lib/stores.svelte';
 	import ArchivedView from './ArchivedView.svelte';
 	import ExomView from './ExomView.svelte';
 	import FolderView from './FolderView.svelte';
@@ -18,7 +19,11 @@
 		error = null;
 		try {
 			const p = data.path?.trim() || undefined;
-			node = await fetchTree(p, { depth: 1, branches: true, archived: true });
+			const loaded = await fetchTree(p, { depth: 1, branches: true, archived: true });
+			node = loaded;
+			if (loaded.kind === 'exom') {
+				app.switchExom(loaded.path);
+			}
 		} catch (e) {
 			node = null;
 			error = e instanceof Error ? e.message : 'Failed to load node';

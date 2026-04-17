@@ -66,6 +66,7 @@
 		}
 
 		if (auth.isAuthenticated && !isLoginRoute) {
+			app.ensureAuthenticatedDefaultExom(auth.user?.email ?? null);
 			startApp();
 		}
 	});
@@ -74,10 +75,12 @@
 		if (auth.loading) return;
 		if (auth.isAuthenticated && !isLoginRoute) {
 			redirectingToLogin = false;
+			app.ensureAuthenticatedDefaultExom(auth.user?.email ?? null);
 			startApp();
 			return;
 		}
 		stopApp();
+		app.clearSelection();
 		if (isLoginRoute) {
 			redirectingToLogin = false;
 			return;

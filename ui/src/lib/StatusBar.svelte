@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { DEFAULT_EXOM, fetchExomemStatus, getExomemBaseUrl } from '$lib/exomem.svelte';
+	import { fetchExomemStatus, getExomemBaseUrl } from '$lib/exomem.svelte';
 	import { auth } from '$lib/auth.svelte';
+	import { app } from '$lib/stores.svelte';
 	import type { ExomemStatus } from '$lib/types';
 
 	let health = $state<'ok' | 'unreachable'>('unreachable');
@@ -29,22 +30,26 @@
 	}
 
 	$effect(() => {
+		app.selectedExom;
 		let cancelled = false;
 		(async () => {
 			let status: ExomemStatus | null = null;
-			try {
-				status = await fetchExomemStatus(DEFAULT_EXOM);
-			} catch {
-				status = null;
+			if (app.selectedExom) {
+				try {
+					status = await fetchExomemStatus(app.selectedExom);
+				} catch {
+					status = null;
+				}
 			}
 			if (cancelled) return;
-			if (status?.ok) {
+			const n = await loadTreeCount();
+			if (cancelled) return;
+			if (status?.ok || n !== null) {
 				health = 'ok';
 			} else {
 				health = 'unreachable';
 			}
-			const n = await loadTreeCount();
-			if (!cancelled) exomCount = n;
+			exomCount = n;
 		})();
 		return () => {
 			cancelled = true;

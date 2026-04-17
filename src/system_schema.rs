@@ -77,6 +77,15 @@ pub mod attrs {
 }
 
 pub const SCHEMA_FILENAME: &str = "exom_schema.json";
+pub const HEALTH_WATER_BAND: &str = "health/water-band";
+pub const HEALTH_STEP_BAND: &str = "health/step-band";
+
+const HEALTH_PROFILE_AGE_FACT_ID: &str = "health/profile/age";
+const HEALTH_PROFILE_HEIGHT_CM_FACT_ID: &str = "health/profile/height_cm";
+const HEALTH_PROFILE_WEIGHT_KG_FACT_ID: &str = "health/profile/weight_kg";
+const PROFILE_AGE: &str = "profile/age";
+const PROFILE_HEIGHT_CM: &str = "profile/height_cm";
+const PROFILE_WEIGHT_KG: &str = "profile/weight_kg";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OntologyAttribute {
@@ -103,6 +112,15 @@ pub struct ExomOntology {
     pub coordination_attributes: Vec<OntologyAttribute>,
     pub builtin_views: Vec<BuiltinView>,
     pub user_predicates: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDerivedRelation {
+    pub name: String,
+    pub arity: usize,
+    pub description: String,
+    pub rule: String,
+    pub sample_tuples: Vec<Vec<String>>,
 }
 
 pub fn system_attributes() -> Vec<OntologyAttribute> {
@@ -473,11 +491,11 @@ pub fn coordination_attributes() -> Vec<OntologyAttribute> {
     ]
 }
 
-fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
+fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
     vec![
         (
-            "fact-row",
-            "Logical fact rows stripped of system metadata joins.",
+            "fact-row".to_string(),
+            "Logical fact rows stripped of system metadata joins.".to_string(),
             format!(
                 "(rule {exom} (fact-row ?fact ?pred ?value) (?fact '{pred} ?pred) (?fact '{value} ?value))",
                 pred = attrs::fact::PREDICATE,
@@ -485,8 +503,9 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "fact-meta",
-            "Fact metadata view with confidence, provenance, valid start, and tx entity.",
+            "fact-meta".to_string(),
+            "Fact metadata view with confidence, provenance, valid start, and tx entity."
+                .to_string(),
             format!(
                 "(rule {exom} (fact-meta ?fact ?confidence ?prov ?vf ?tx) (?fact '{confidence} ?confidence) (?fact '{prov} ?prov) (?fact '{vf} ?vf) (?fact '{tx} ?tx))",
                 confidence = attrs::fact::CONFIDENCE,
@@ -496,8 +515,8 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "fact-with-tx",
-            "Joined fact row with provenance and transaction actor/time.",
+            "fact-with-tx".to_string(),
+            "Joined fact row with provenance and transaction actor/time.".to_string(),
             format!(
                 "(rule {exom} (fact-with-tx ?fact ?pred ?value ?confidence ?prov ?vf ?tx ?actor ?when) (?fact '{fp} ?pred) (?fact '{fv} ?value) (?fact '{fc} ?confidence) (?fact '{fprov} ?prov) (?fact '{fvt} ?vf) (?fact '{fcb} ?tx) (?tx '{ta} ?actor) (?tx '{tt} ?when))",
                 fp = attrs::fact::PREDICATE,
@@ -511,8 +530,8 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "tx-row",
-            "Transaction row with actor, action, time, and branch.",
+            "tx-row".to_string(),
+            "Transaction row with actor, action, time, and branch.".to_string(),
             format!(
                 "(rule {exom} (tx-row ?tx ?id ?actor ?action ?when ?branch) (?tx '{id_attr} ?id) (?tx '{actor_attr} ?actor) (?tx '{action_attr} ?action) (?tx '{time_attr} ?when) (?tx '{branch_attr} ?branch))",
                 id_attr = attrs::tx::ID,
@@ -523,8 +542,8 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "observation-row",
-            "Observation row with source type, content, and tx entity.",
+            "observation-row".to_string(),
+            "Observation row with source type, content, and tx entity.".to_string(),
             format!(
                 "(rule {exom} (observation-row ?obs ?source_type ?content ?tx) (?obs '{st} ?source_type) (?obs '{content} ?content) (?obs '{tx} ?tx))",
                 st = attrs::observation::SOURCE_TYPE,
@@ -533,8 +552,8 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "belief-row",
-            "Belief row with claim text, status, and creating transaction.",
+            "belief-row".to_string(),
+            "Belief row with claim text, status, and creating transaction.".to_string(),
             format!(
                 "(rule {exom} (belief-row ?belief ?claim ?status ?tx) (?belief '{claim_attr} ?claim) (?belief '{status_attr} ?status) (?belief '{tx_attr} ?tx))",
                 claim_attr = attrs::belief::CLAIM_TEXT,
@@ -543,8 +562,8 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "branch-row",
-            "Branch row with id, name, archive state, and creating transaction.",
+            "branch-row".to_string(),
+            "Branch row with id, name, archive state, and creating transaction.".to_string(),
             format!(
                 "(rule {exom} (branch-row ?branch ?id ?name ?archived ?created_tx) (?branch '{id_attr} ?id) (?branch '{name_attr} ?name) (?branch '{archived_attr} ?archived) (?branch '{created_attr} ?created_tx))",
                 id_attr = attrs::branch::ID,
@@ -554,8 +573,8 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "merge-row",
-            "Merge transaction row with source and target branches.",
+            "merge-row".to_string(),
+            "Merge transaction row with source and target branches.".to_string(),
             format!(
                 "(rule {exom} (merge-row ?tx ?source ?target ?actor ?when) (?tx '{source_attr} ?source) (?tx '{target_attr} ?target) (?tx '{actor_attr} ?actor) (?tx '{time_attr} ?when))",
                 source_attr = attrs::tx::MERGE_SOURCE,
@@ -565,32 +584,32 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
             ),
         ),
         (
-            "claim-owner-row",
-            "Claim ownership facts using the coordination namespace.",
+            "claim-owner-row".to_string(),
+            "Claim ownership facts using the coordination namespace.".to_string(),
             format!(
                 "(rule {exom} (claim-owner-row ?fact ?owner) (?fact '{claim_owner} ?owner))",
                 claim_owner = attrs::coord::CLAIM_OWNER,
             ),
         ),
         (
-            "claim-status-row",
-            "Claim status facts using the coordination namespace.",
+            "claim-status-row".to_string(),
+            "Claim status facts using the coordination namespace.".to_string(),
             format!(
                 "(rule {exom} (claim-status-row ?fact ?status) (?fact '{claim_status} ?status))",
                 claim_status = attrs::coord::CLAIM_STATUS,
             ),
         ),
         (
-            "task-dependency-row",
-            "Task dependency facts using the coordination namespace.",
+            "task-dependency-row".to_string(),
+            "Task dependency facts using the coordination namespace.".to_string(),
             format!(
                 "(rule {exom} (task-dependency-row ?fact ?depends_on) (?fact '{task_dep} ?depends_on))",
                 task_dep = attrs::coord::TASK_DEPENDS_ON,
             ),
         ),
         (
-            "agent-session-row",
-            "Agent session facts using the coordination namespace.",
+            "agent-session-row".to_string(),
+            "Agent session facts using the coordination namespace.".to_string(),
             format!(
                 "(rule {exom} (agent-session-row ?fact ?session) (?fact '{agent_session} ?session))",
                 agent_session = attrs::coord::AGENT_SESSION,
@@ -599,8 +618,97 @@ fn builtin_rule_specs(exom: &str) -> Vec<(&'static str, &'static str, String)> {
     ]
 }
 
-pub fn builtin_rules(exom: &str) -> Result<Vec<ParsedRule>> {
-    builtin_rule_specs(exom)
+fn latest_active_fact<'a>(
+    brain: &'a Brain,
+    preferred_fact_id: &str,
+    predicate: &str,
+) -> Option<&'a crate::brain::Fact> {
+    brain
+        .current_facts()
+        .into_iter()
+        .filter(|fact| fact.fact_id == preferred_fact_id && fact.predicate == predicate)
+        .max_by_key(|fact| fact.created_by_tx)
+        .or_else(|| {
+            brain
+                .current_facts()
+                .into_iter()
+                .filter(|fact| fact.predicate == predicate)
+                .max_by_key(|fact| fact.created_by_tx)
+        })
+}
+
+pub fn native_derived_relations(exom: &str, brain: &Brain) -> Vec<NativeDerivedRelation> {
+    let mut relations = Vec::new();
+
+    let weight_fact = latest_active_fact(brain, HEALTH_PROFILE_WEIGHT_KG_FACT_ID, PROFILE_WEIGHT_KG);
+    let height_fact = latest_active_fact(brain, HEALTH_PROFILE_HEIGHT_CM_FACT_ID, PROFILE_HEIGHT_CM);
+    if let (Some(weight_fact), Some(height_fact)) = (weight_fact, height_fact) {
+        if let (Ok(weight_kg), Ok(height_cm)) = (
+            weight_fact.value.parse::<i64>(),
+            height_fact.value.parse::<i64>(),
+        ) {
+            let band = if weight_kg < 60 && height_cm < 170 {
+                "small"
+            } else if weight_kg >= 85 || height_cm >= 185 {
+                "large"
+            } else {
+                "medium"
+            };
+            relations.push(NativeDerivedRelation {
+                name: HEALTH_WATER_BAND.to_string(),
+                arity: 1,
+                description: "Native helper relation derived from profile height and weight."
+                    .to_string(),
+                rule: format!(
+                    r#"(rule {exom} ({HEALTH_WATER_BAND} "{band}") ("{weight_id}" '{PROFILE_WEIGHT_KG} "{weight_value}") ("{height_id}" '{PROFILE_HEIGHT_CM} "{height_value}"))"#,
+                    weight_id = weight_fact.fact_id,
+                    weight_value = weight_fact.value,
+                    height_id = height_fact.fact_id,
+                    height_value = height_fact.value,
+                ),
+                sample_tuples: vec![vec![band.to_string()]],
+            });
+        }
+    }
+
+    if let Some(age_fact) = latest_active_fact(brain, HEALTH_PROFILE_AGE_FACT_ID, PROFILE_AGE) {
+        if let Ok(age) = age_fact.value.parse::<i64>() {
+            let band = if age < 30 {
+                "high"
+            } else if age < 50 {
+                "medium"
+            } else {
+                "gentle"
+            };
+            relations.push(NativeDerivedRelation {
+                name: HEALTH_STEP_BAND.to_string(),
+                arity: 1,
+                description: "Native helper relation derived from profile age.".to_string(),
+                rule: format!(
+                    r#"(rule {exom} ({HEALTH_STEP_BAND} "{band}") ("{age_id}" '{PROFILE_AGE} "{age_value}"))"#,
+                    age_id = age_fact.fact_id,
+                    age_value = age_fact.value,
+                ),
+                sample_tuples: vec![vec![band.to_string()]],
+            });
+        }
+    }
+
+    relations
+}
+
+fn builtin_rule_specs(exom: &str, brain: &Brain) -> Vec<(String, String, String)> {
+    let mut specs = static_builtin_rule_specs(exom);
+    specs.extend(
+        native_derived_relations(exom, brain)
+            .into_iter()
+            .map(|relation| (relation.name, relation.description, relation.rule)),
+    );
+    specs
+}
+
+pub fn builtin_rules(exom: &str, brain: &Brain) -> Result<Vec<ParsedRule>> {
+    builtin_rule_specs(exom, brain)
         .into_iter()
         .map(|(_, _, rule)| {
             rules::parse_rule_line(&rule, MutationContext::default(), "builtin".to_string())
@@ -608,8 +716,8 @@ pub fn builtin_rules(exom: &str) -> Result<Vec<ParsedRule>> {
         .collect()
 }
 
-pub fn builtin_views(exom: &str) -> Vec<BuiltinView> {
-    builtin_rule_specs(exom)
+pub fn builtin_views(exom: &str, brain: &Brain) -> Vec<BuiltinView> {
+    builtin_rule_specs(exom, brain)
         .into_iter()
         .map(|(name, description, rule)| {
             let parsed =
@@ -630,6 +738,9 @@ pub fn build_exom_ontology(exom: &str, brain: &Brain, user_rules: &[ParsedRule])
     for fact in brain.current_facts() {
         user_preds.insert(fact.predicate.clone());
     }
+    for relation in native_derived_relations(exom, brain) {
+        user_preds.insert(relation.name);
+    }
     for rule in user_rules {
         user_preds.insert(rule.head_predicate.clone());
     }
@@ -638,7 +749,7 @@ pub fn build_exom_ontology(exom: &str, brain: &Brain, user_rules: &[ParsedRule])
         exom: exom.to_string(),
         system_attributes: system_attributes(),
         coordination_attributes: coordination_attributes(),
-        builtin_views: builtin_views(exom),
+        builtin_views: builtin_views(exom, brain),
         user_predicates: user_preds.into_iter().collect(),
     }
 }
@@ -654,4 +765,62 @@ pub fn save_exom_ontology(path: &Path, ontology: &ExomOntology) -> Result<()> {
 pub fn load_exom_ontology(path: &Path) -> Result<ExomOntology> {
     let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_slice(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::MutationContext;
+
+    #[test]
+    fn native_health_relations_follow_bootstrap_profile_thresholds() {
+        let mut brain = Brain::new();
+        let ctx = MutationContext::default();
+        brain
+            .assert_fact(
+                HEALTH_PROFILE_AGE_FACT_ID,
+                PROFILE_AGE,
+                "30",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+        brain
+            .assert_fact(
+                HEALTH_PROFILE_HEIGHT_CM_FACT_ID,
+                PROFILE_HEIGHT_CM,
+                "175",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+        brain
+            .assert_fact(
+                HEALTH_PROFILE_WEIGHT_KG_FACT_ID,
+                PROFILE_WEIGHT_KG,
+                "75",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+
+        let relations = native_derived_relations("alice/personal/health/main", &brain);
+        assert!(relations.iter().any(|relation| {
+            relation.name == HEALTH_WATER_BAND
+                && relation.sample_tuples == vec![vec!["medium".to_string()]]
+        }));
+        assert!(relations.iter().any(|relation| {
+            relation.name == HEALTH_STEP_BAND
+                && relation.sample_tuples == vec![vec!["medium".to_string()]]
+        }));
+    }
 }

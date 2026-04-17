@@ -33,8 +33,10 @@
 	let showPreview = $state(false);
 	let loadingPreview = $state(false);
 	let appliedDraft = $state<string | null>(null);
+	const activeExom = $derived(app.selectedExom ?? '');
 
 	const hasQuery = $derived(queryText.trim().length > 0);
+	const canExecute = $derived(hasQuery && activeExom.length > 0);
 	const historyCount = $derived(history.length);
 
 	// ---------------------------------------------------------------------------
@@ -44,15 +46,15 @@
 	const examples = $derived([
 		{
 			label: 'Logical facts',
-			text: `(query ${app.selectedExom} (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))`
+			text: `(query ${activeExom} (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))`
 		},
 		{
 			label: 'Fact with tx',
-			text: `(query ${app.selectedExom} (find ?fact ?pred ?value ?prov ?tx ?actor ?when) (where (fact-row ?fact ?pred ?value) (?fact 'fact/provenance ?prov) (?fact 'fact/created_by ?tx) (?tx 'tx/actor ?actor) (?tx 'tx/time ?when)))`
+			text: `(query ${activeExom} (find ?fact ?pred ?value ?prov ?tx ?actor ?when) (where (fact-row ?fact ?pred ?value) (?fact 'fact/provenance ?prov) (?fact 'fact/created_by ?tx) (?tx 'tx/actor ?actor) (?tx 'tx/time ?when)))`
 		},
 		{
 			label: 'Built-in views',
-			text: `(query ${app.selectedExom} (find ?tx ?id ?actor ?action ?when ?branch) (where (tx-row ?tx ?id ?actor ?action ?when ?branch)))`
+			text: `(query ${activeExom} (find ?tx ?id ?actor ?action ?when ?branch) (where (tx-row ?tx ?id ?actor ?action ?when ?branch)))`
 		}
 	]);
 
@@ -73,14 +75,14 @@
 
 	async function execute() {
 		const text = queryText.trim();
-		if (!text || executing) return;
+		if (!text || executing || !activeExom) return;
 
 		executing = true;
 		error = null;
 		result = null;
 
 		try {
-			const res = await runRayfall(text, app.selectedExom);
+			const res = await runRayfall(text, activeExom);
 			result = res;
 			history = [
 				{ text, timestamp: new Date().toLocaleTimeString(), success: true },
@@ -102,9 +104,13 @@
 	}
 
 	async function refreshPreview() {
+		if (!activeExom) {
+			exomPreview = '% No exom selected';
+			return;
+		}
 		loadingPreview = true;
 		try {
-			exomPreview = await exportBackupText(app.selectedExom);
+			exomPreview = await exportBackupText(activeExom);
 		} catch (e) {
 			exomPreview = `% Error loading preview: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
@@ -163,7 +169,7 @@
 				<div>
 					<h1 class="text-2xl font-semibold tracking-tight">Query Console</h1>
 					<p class="text-sm text-muted-foreground">
-						Execute Rayfall against <span class="font-medium text-foreground">{app.selectedExom}</span>
+						Execute Rayfall against <span class="font-medium text-foreground">{activeExom || 'No exom selected'}</span>
 					</p>
 				</div>
 			</div>
@@ -184,7 +190,7 @@
 				<textarea
 					class="w-full resize-none rounded-lg border border-border/60 bg-muted/30 px-4 py-3.5 font-mono text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/30"
 					rows="10"
-					placeholder=";; Datalog-native Rayfall&#10;(query main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))&#10;&#10;;; Assert a durable fact&#10;(assert-fact main &quot;user/editor&quot; 'preference &quot;vim&quot;)"
+					placeholder=";; Datalog-native Rayfall&#10;(query your/exom/path (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))&#10;&#10;;; Assert a durable fact&#10;(assert-fact your/exom/path &quot;user/editor&quot; 'preference &quot;vim&quot;)"
 					bind:value={queryText}
 					onkeydown={handleKeydown}
 					disabled={executing}
@@ -199,7 +205,7 @@
 
 			<!-- Action buttons -->
 			<div class="flex flex-wrap items-center gap-2">
-				<Button size="sm" onclick={execute} disabled={!hasQuery || executing}>
+				<Button size="sm" onclick={execute} disabled={!canExecute || executing}>
 					<Play data-icon="inline-start" class="size-3.5" />
 					Execute
 				</Button>

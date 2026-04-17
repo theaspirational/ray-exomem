@@ -1295,6 +1295,7 @@ mod tests {
     #[tokio::test]
     async fn session_cache_round_trip() {
         let store = make_test_store(&[]);
+        store.record_user("alice@co.com", "Alice", "mock").await;
         let user = User {
             email: "alice@co.com".into(),
             display_name: "Alice".into(),
