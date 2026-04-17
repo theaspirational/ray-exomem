@@ -22,7 +22,8 @@ use crate::server::AppState;
 pub fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/users", get(list_users))
-        .route("/users/{email}", delete(deactivate_user))
+        .route("/users/{email}", delete(delete_user_account))
+        .route("/users/{email}/deactivate", post(deactivate_user))
         .route("/users/{email}/activate", post(activate_user))
         .route("/admins", post(grant_admin))
         .route("/admins/{email}", delete(revoke_admin))
@@ -61,6 +62,42 @@ fn require_auth_store(state: &AppState) -> Result<&Arc<AuthStore>, ApiError> {
     })
 }
 
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+async fn purge_user_namespace(state: &AppState, email: &str) -> Result<usize, ApiError> {
+    if let Some(ref exom_db) = state.exom_db {
+        exom_db.delete_exoms_with_prefix(email).await.map_err(|e| {
+            ApiError::new("namespace_delete_failed", e.to_string()).with_status(500)
+        })?;
+    }
+
+    if let Some(ref tree_root) = state.tree_root {
+        let disk = tree_root.join(email);
+        if disk.exists() {
+            std::fs::remove_dir_all(&disk).map_err(|e| {
+                ApiError::new("namespace_delete_failed", e.to_string()).with_status(500)
+            })?;
+        }
+    }
+
+    let removed = {
+        let mut exoms = state.exoms.lock().unwrap();
+        let before = exoms.len();
+        exoms.retain(|path, _| !path_matches_prefix(path, email));
+        let removed = before.saturating_sub(exoms.len());
+        crate::server::reconcile_engine(state, &exoms);
+        removed
+    };
+
+    let _ = state
+        .sse_tx
+        .send(r#"{"v":1,"kind":"tree","op":"changed"}"#.to_string());
+
+    Ok(removed)
+}
+
 // ---------------------------------------------------------------------------
 // Request types
 // ---------------------------------------------------------------------------
@@ -95,6 +132,8 @@ async fn list_users(
             "provider": u.provider,
             "created_at": u.created_at,
             "active": u.active,
+            "status": if u.active { "active" } else { "deactivated" },
+            "last_login": u.last_login,
             "role": match role {
                 UserRole::TopAdmin => "top-admin",
                 UserRole::Admin => "admin",
@@ -105,13 +144,18 @@ async fn list_users(
     Ok(Json(serde_json::json!({ "users": users })))
 }
 
-/// DELETE /auth/admin/users/:email
+/// POST /auth/admin/users/:email/deactivate
 async fn deactivate_user(
     State(state): State<Arc<AppState>>,
     user: User,
     AxumPath(email): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_admin(&user)?;
+    require_top_admin(&user)?;
+    if email == user.email {
+        return Err(
+            ApiError::new("forbidden", "top-admin cannot deactivate themselves").with_status(403),
+        );
+    }
     let store = require_auth_store(&state)?;
     store.deactivate_user(&email).await;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -123,10 +167,32 @@ async fn activate_user(
     user: User,
     AxumPath(email): AxumPath<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_admin(&user)?;
+    require_top_admin(&user)?;
     let store = require_auth_store(&state)?;
     store.activate_user(&email).await;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// DELETE /auth/admin/users/:email
+async fn delete_user_account(
+    State(state): State<Arc<AppState>>,
+    user: User,
+    AxumPath(email): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_top_admin(&user)?;
+    if email == user.email {
+        return Err(
+            ApiError::new("forbidden", "top-admin cannot delete themselves").with_status(403),
+        );
+    }
+    let store = require_auth_store(&state)?;
+    if !store.delete_user(&email).await {
+        return Err(ApiError::new("not_found", "user not found").with_status(404));
+    }
+    let removed_exoms = purge_user_namespace(&state, &email).await?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "removed_exoms": removed_exoms }),
+    ))
 }
 
 /// POST /auth/admin/admins
@@ -160,17 +226,16 @@ async fn list_sessions(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-
     let sessions: Vec<serde_json::Value> = store
-        .session_cache
-        .iter()
-        .map(|entry| {
-            let u = entry.value();
+        .list_sessions()
+        .await
+        .into_iter()
+        .map(|session| {
             serde_json::json!({
-                "session_id": entry.key(),
-                "email": u.email,
-                "display_name": u.display_name,
-                "provider": u.provider,
+                "session_id": session.session_id,
+                "email": session.email,
+                "created_at": session.created_at,
+                "expires_at": session.expires_at,
             })
         })
         .collect();
@@ -186,7 +251,7 @@ async fn kill_session(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&user)?;
     let store = require_auth_store(&state)?;
-    store.evict_session(&id);
+    store.delete_session(&id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

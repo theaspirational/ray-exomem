@@ -503,4 +503,36 @@ impl ExomDb for PgExomDb {
         db.commit().await?;
         Ok(())
     }
+
+    async fn delete_exoms_with_prefix(&self, prefix: &str) -> anyhow::Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let params = [prefix, &format!("{prefix}/%")];
+        sqlx::query("DELETE FROM branches WHERE exom_path = $1 OR exom_path LIKE $2")
+            .bind(params[0])
+            .bind(params[1])
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM beliefs WHERE exom_path = $1 OR exom_path LIKE $2")
+            .bind(params[0])
+            .bind(params[1])
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM observations WHERE exom_path = $1 OR exom_path LIKE $2")
+            .bind(params[0])
+            .bind(params[1])
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM facts WHERE exom_path = $1 OR exom_path LIKE $2")
+            .bind(params[0])
+            .bind(params[1])
+            .execute(&mut *tx)
+            .await?;
+        let res = sqlx::query("DELETE FROM transactions WHERE exom_path = $1 OR exom_path LIKE $2")
+            .bind(params[0])
+            .bind(params[1])
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected())
+    }
 }

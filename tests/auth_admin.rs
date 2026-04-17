@@ -45,6 +45,18 @@ fn status_of(result: &Result<ureq::Response, ureq::Error>) -> u16 {
     }
 }
 
+fn auth_post_json(
+    base_url: &str,
+    path: &str,
+    session: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    auth_post_raw(base_url, path, session, body)
+        .expect("authenticated post should succeed")
+        .into_json()
+        .expect("json body")
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: first_user_becomes_top_admin
 // ---------------------------------------------------------------------------
@@ -251,5 +263,104 @@ fn admin_can_manage_domains() {
     assert!(
         !domains.iter().any(|d| d.as_str() == Some("newcorp.com")),
         "domains should NOT include newcorp.com after removing it: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: top_admin_can_deactivate_user_and_revoke_live_access
+// ---------------------------------------------------------------------------
+
+#[test]
+fn top_admin_can_deactivate_user_and_revoke_live_access() {
+    let daemon = TestDaemonBuilder::new().with_auth().start();
+    let admin_session = daemon.mock_login("admin@co.com", "Admin");
+    let bob_session = daemon.mock_login("bob@co.com", "Bob");
+
+    let key_body = auth_post_json(
+        &daemon.base_url,
+        "/auth/api-keys",
+        &bob_session,
+        json!({"label": "bob-key"}),
+    );
+    let raw_key = key_body["raw_key"].as_str().expect("raw key").to_string();
+
+    let resp = auth_post_raw(
+        &daemon.base_url,
+        "/auth/admin/users/bob%40co.com/deactivate",
+        &admin_session,
+        json!({}),
+    );
+    assert_eq!(status_of(&resp), 200, "top-admin should deactivate user");
+
+    let me_url = format!("{}/auth/me", daemon.base_url);
+    match ureq::get(&me_url)
+        .set("Cookie", &format!("ray_exomem_session={bob_session}"))
+        .call()
+    {
+        Err(ureq::Error::Status(401, _)) => {}
+        other => panic!("expected bob session to be rejected after deactivation, got {other:?}"),
+    }
+
+    match ureq::get(&me_url)
+        .set("Authorization", &format!("Bearer {raw_key}"))
+        .call()
+    {
+        Err(ureq::Error::Status(401, _)) => {}
+        other => panic!("expected bob api key to be rejected after deactivation, got {other:?}"),
+    }
+
+    match ureq::post(&format!("{}/auth/login", daemon.base_url)).send_json(json!({
+        "id_token": "mock:bob@co.com:Bob",
+        "provider": "mock"
+    })) {
+        Err(ureq::Error::Status(403, _)) => {}
+        other => panic!("expected deactivated user login to be rejected, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: top_admin_can_delete_user_and_namespace
+// ---------------------------------------------------------------------------
+
+#[test]
+fn top_admin_can_delete_user_and_namespace() {
+    let daemon = TestDaemonBuilder::new().with_auth().start();
+    let admin_session = daemon.mock_login("admin@co.com", "Admin");
+    let bob_session = daemon.mock_login("bob@co.com", "Bob");
+
+    let create = ureq::post(&format!(
+        "{}/ray-exomem/api/actions/exom-new",
+        daemon.base_url
+    ))
+    .set("Cookie", &format!("ray_exomem_session={bob_session}"))
+    .send_json(json!({"path": "bob@co.com/projects/main"}))
+    .expect("user exom creation should succeed");
+    assert_eq!(create.status(), 200);
+    assert!(
+        daemon.tree_root().join("bob@co.com/projects/main").exists(),
+        "user namespace should exist before delete"
+    );
+
+    let resp = auth_delete_raw(
+        &daemon.base_url,
+        "/auth/admin/users/bob%40co.com",
+        &admin_session,
+    );
+    assert_eq!(status_of(&resp), 200, "top-admin should delete user");
+
+    assert!(
+        !daemon.tree_root().join("bob@co.com").exists(),
+        "user namespace should be removed from filesystem"
+    );
+
+    let users = auth_get_raw(&daemon.base_url, "/auth/admin/users", &admin_session)
+        .expect("users listing should succeed")
+        .into_json::<serde_json::Value>()
+        .expect("users json");
+    let rows = users["users"].as_array().expect("users array");
+    assert!(
+        rows.iter()
+            .all(|row| row["email"].as_str() != Some("bob@co.com")),
+        "deleted user should be removed from admin listing: {users}"
     );
 }

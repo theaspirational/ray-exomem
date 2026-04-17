@@ -111,4 +111,8 @@ impl ExomDb for JsonlExomDb {
         }
         Ok(())
     }
+
+    async fn delete_exoms_with_prefix(&self, _prefix: &str) -> anyhow::Result<u64> {
+        Ok(0)
+    }
 }

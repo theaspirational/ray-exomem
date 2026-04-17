@@ -34,7 +34,7 @@ impl FromRequestParts<Arc<AppState>> for User {
         })?;
 
         // 1. Try Authorization: Bearer <key>
-        if let Some(user) = try_bearer(parts, auth_store) {
+        if let Some(user) = try_bearer(parts, auth_store).await {
             return Ok(user);
         }
 
@@ -66,7 +66,7 @@ impl FromRequestParts<Arc<AppState>> for MaybeUser {
             return Ok(MaybeUser(None));
         };
 
-        if let Some(user) = try_bearer(parts, auth_store) {
+        if let Some(user) = try_bearer(parts, auth_store).await {
             return Ok(MaybeUser(Some(user)));
         }
         if let Some(user) = try_session_cookie(parts, auth_store).await {
@@ -81,14 +81,14 @@ impl FromRequestParts<Arc<AppState>> for MaybeUser {
 // Internal helpers for extraction
 // ---------------------------------------------------------------------------
 
-fn try_bearer(parts: &Parts, store: &AuthStore) -> Option<User> {
+async fn try_bearer(parts: &Parts, store: &AuthStore) -> Option<User> {
     let auth_header = parts.headers.get("authorization")?.to_str().ok()?;
     let token = auth_header.strip_prefix("Bearer ")?;
     if token.is_empty() {
         return None;
     }
     let key_hash = AuthStore::hash_api_key(token);
-    store.get_user_by_key_hash(&key_hash)
+    store.get_user_by_key_hash(&key_hash).await
 }
 
 async fn try_session_cookie(parts: &Parts, store: &AuthStore) -> Option<User> {

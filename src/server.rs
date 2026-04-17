@@ -1735,7 +1735,7 @@ fn eval_query_form(
     }
 }
 
-fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomState>) {
+pub(crate) fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomState>) {
     if let Err(e) = state.engine.reconcile_lang_env() {
         eprintln!("[ray-exomem] reconcile_lang_env failed: {}", e);
         return;

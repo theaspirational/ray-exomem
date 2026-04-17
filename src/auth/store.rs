@@ -45,6 +45,7 @@ fn stored_user_db_to_store(u: crate::db::StoredUser) -> StoredUser {
         provider: u.provider,
         created_at: u.created_at,
         active: u.active,
+        last_login: u.last_login,
     }
 }
 
@@ -66,6 +67,7 @@ pub struct StoredUser {
     pub provider: String,
     pub created_at: String,
     pub active: bool,
+    pub last_login: Option<String>,
 }
 
 /// Persistent API key record (replayed from JSONL).
@@ -184,7 +186,13 @@ impl AuthStore {
     /// Lookup user from session cache.
     pub async fn get_user_by_session(&self, session_id: &str) -> Option<User> {
         if let Some(u) = self.session_cache.get(session_id) {
-            return Some(u.clone());
+            let user = u.clone();
+            drop(u);
+            if self.user_is_active(&user.email).await {
+                return Some(user);
+            }
+            self.session_cache.remove(session_id);
+            return None;
         }
         if let Some(ref db) = self.auth_db {
             let db = db.clone();
@@ -198,6 +206,9 @@ impl AuthStore {
                     Some(u) => u,
                     None => return Ok::<_, anyhow::Error>(None),
                 };
+                if !u.active {
+                    return Ok(None);
+                }
                 Ok(Some(User {
                     email: sess.email,
                     display_name: u.display_name,
@@ -219,8 +230,84 @@ impl AuthStore {
     }
 
     /// Lookup user from API key cache.
-    pub fn get_user_by_key_hash(&self, key_hash: &str) -> Option<User> {
-        self.api_key_cache.get(key_hash).map(|r| r.clone())
+    pub async fn get_user_by_key_hash(&self, key_hash: &str) -> Option<User> {
+        if let Some(cached) = self.api_key_cache.get(key_hash) {
+            let user = cached.clone();
+            drop(cached);
+            if self.user_is_active(&user.email).await {
+                return Some(user);
+            }
+            self.api_key_cache.remove(key_hash);
+            return None;
+        }
+
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            let key_hash = key_hash.to_string();
+            return match db.get_api_key_by_hash(&key_hash).await {
+                Ok(Some(row)) if row.user.active => {
+                    let user = User {
+                        email: row.email.clone(),
+                        display_name: row.user.display_name.clone(),
+                        provider: row.user.provider.clone(),
+                        session_id: None,
+                        role: row.user.role,
+                    };
+                    self.api_key_cache.insert(key_hash, user.clone());
+                    Some(user)
+                }
+                Ok(Some(_)) => None,
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!("auth: get_user_by_key_hash: {e}");
+                    None
+                }
+            };
+        }
+
+        let key_id = self
+            .api_key_by_hash
+            .lock()
+            .unwrap()
+            .get(key_hash)
+            .cloned()?;
+        let stored = self.api_keys.lock().unwrap().get(&key_id).cloned()?;
+        let user_info = self.users.lock().unwrap().get(&stored.email).cloned()?;
+        if !user_info.active {
+            return None;
+        }
+        let role = self.resolve_role(&stored.email).await;
+        let user = User {
+            email: stored.email,
+            display_name: user_info.display_name,
+            provider: user_info.provider,
+            session_id: None,
+            role,
+        };
+        self.api_key_cache
+            .insert(key_hash.to_string(), user.clone());
+        Some(user)
+    }
+
+    pub async fn get_user_record(&self, email: &str) -> Option<StoredUser> {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            return match db.get_user(email).await {
+                Ok(user) => user.map(stored_user_db_to_store),
+                Err(e) => {
+                    eprintln!("auth: get_user_record: {e}");
+                    None
+                }
+            };
+        }
+        self.users.lock().unwrap().get(email).cloned()
+    }
+
+    pub async fn user_is_active(&self, email: &str) -> bool {
+        self.get_user_record(email)
+            .await
+            .map(|user| user.active)
+            .unwrap_or(false)
     }
 
     /// Returns `(key_id, raw_key)`. Does NOT store — caller handles caching.
@@ -248,6 +335,16 @@ impl AuthStore {
     /// Remove from session cache.
     pub fn evict_session(&self, session_id: &str) {
         self.session_cache.remove(session_id);
+    }
+
+    pub async fn delete_session(&self, session_id: &str) {
+        self.session_cache.remove(session_id);
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            if let Err(e) = db.delete_session(session_id).await {
+                eprintln!("auth: delete_session: {e}");
+            }
+        }
     }
 
     /// Remove from API key cache.
@@ -461,6 +558,28 @@ impl AuthStore {
                     entry.get("provider").and_then(|v| v.as_str()),
                     entry.get("created_at").and_then(|v| v.as_str()),
                 ) {
+                    let active = entry
+                        .get("active")
+                        .and_then(|v| v.as_bool())
+                        .or_else(|| {
+                            self.users
+                                .lock()
+                                .unwrap()
+                                .get(email)
+                                .map(|user| user.active)
+                        })
+                        .unwrap_or(true);
+                    let last_login = entry
+                        .get("last_login")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .or_else(|| {
+                            self.users
+                                .lock()
+                                .unwrap()
+                                .get(email)
+                                .and_then(|user| user.last_login.clone())
+                        });
                     self.users.lock().unwrap().insert(
                         email.to_string(),
                         StoredUser {
@@ -468,7 +587,8 @@ impl AuthStore {
                             display_name: display_name.to_string(),
                             provider: provider.to_string(),
                             created_at: created_at.to_string(),
-                            active: true,
+                            active,
+                            last_login,
                         },
                     );
                 }
@@ -592,6 +712,37 @@ impl AuthStore {
                     }
                 }
             }
+            "user-delete" => {
+                if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
+                    self.users.lock().unwrap().remove(email);
+                    self.admins.lock().unwrap().remove(email);
+                    if self.top_admin.lock().unwrap().as_deref() == Some(email) {
+                        *self.top_admin.lock().unwrap() = None;
+                    }
+                    let key_ids: Vec<String> = self
+                        .api_keys
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter(|key| key.email == email)
+                        .map(|key| key.key_id.clone())
+                        .collect();
+                    for key_id in key_ids {
+                        if let Some(removed) = self.api_keys.lock().unwrap().remove(&key_id) {
+                            self.api_key_by_hash
+                                .lock()
+                                .unwrap()
+                                .remove(&removed.key_hash);
+                        }
+                    }
+                    self.share_grants.lock().unwrap().retain(|grant| {
+                        grant.owner_email != email
+                            && grant.grantee_email != email
+                            && grant.path != email
+                            && !grant.path.starts_with(&format!("{email}/"))
+                    });
+                }
+            }
             _ => {
                 eprintln!("auth: unknown JSONL kind: {kind}");
             }
@@ -606,6 +757,13 @@ impl AuthStore {
         let admins = self.admins.lock().unwrap();
 
         for stored_key in keys.values() {
+            if !users
+                .get(&stored_key.email)
+                .map(|user| user.active)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let role = if top_admin.as_deref() == Some(&stored_key.email) {
                 UserRole::TopAdmin
             } else if admins.contains(&stored_key.email) {
@@ -632,12 +790,14 @@ impl AuthStore {
 
     /// Record a user login (persists to JSONL).
     pub async fn record_user(&self, email: &str, display_name: &str, provider: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
         if let Some(ref db) = self.auth_db {
             let db = db.clone();
             let email = email.to_string();
             let display_name = display_name.to_string();
             let provider = provider.to_string();
-            let created_at = chrono::Utc::now().to_rfc3339();
+            let created_at = now.clone();
+            let last_login = now.clone();
             if let Err(e) = async move {
                 let prev = db.get_user(&email).await?;
                 let su = crate::db::StoredUser {
@@ -650,7 +810,7 @@ impl AuthStore {
                         .unwrap_or(UserRole::Regular),
                     active: prev.as_ref().map(|u| u.active).unwrap_or(true),
                     created_at,
-                    last_login: prev.and_then(|p| p.last_login),
+                    last_login: Some(last_login),
                 };
                 db.upsert_user(&su).await
             }
@@ -660,16 +820,94 @@ impl AuthStore {
             }
             return;
         }
-        let created_at = chrono::Utc::now().to_rfc3339();
+        let existing = self.users.lock().unwrap().get(email).cloned();
         let entry = serde_json::json!({
             "kind": "user",
             "email": email,
             "display_name": display_name,
             "provider": provider,
-            "created_at": created_at,
+            "created_at": existing
+                .as_ref()
+                .map(|user| user.created_at.clone())
+                .unwrap_or_else(|| now.clone()),
+            "active": existing.as_ref().map(|user| user.active).unwrap_or(true),
+            "last_login": now,
         });
         let _ = self.append_entry(&entry);
         self.apply_entry(&entry);
+    }
+
+    pub async fn record_session(&self, session_id: &str, email: &str, expires_at: &str) {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            let session = crate::db::SessionRow {
+                session_id: session_id.to_string(),
+                email: email.to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: expires_at.to_string(),
+            };
+            if let Err(e) = db.create_session(&session).await {
+                eprintln!("auth: record_session: {e}");
+            }
+        }
+    }
+
+    pub async fn list_sessions(&self) -> Vec<crate::db::SessionRow> {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            return match db.list_sessions().await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    eprintln!("auth: list_sessions: {e}");
+                    Vec::new()
+                }
+            };
+        }
+        self.session_cache
+            .iter()
+            .map(|entry| crate::db::SessionRow {
+                session_id: entry.key().clone(),
+                email: entry.value().email.clone(),
+                created_at: String::new(),
+                expires_at: String::new(),
+            })
+            .collect()
+    }
+
+    pub async fn revoke_user_access(&self, email: &str) {
+        let session_ids: Vec<String> = self
+            .session_cache
+            .iter()
+            .filter(|entry| entry.value().email == email)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for session_id in session_ids {
+            self.session_cache.remove(&session_id);
+        }
+
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            match db.list_sessions().await {
+                Ok(rows) => {
+                    for row in rows.into_iter().filter(|row| row.email == email) {
+                        if let Err(e) = db.delete_session(&row.session_id).await {
+                            eprintln!("auth: revoke_user_access delete_session: {e}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("auth: revoke_user_access list_sessions: {e}"),
+            }
+        }
+
+        let key_hashes: Vec<String> = self
+            .api_key_cache
+            .iter()
+            .filter(|entry| entry.value().email == email)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key_hash in key_hashes {
+            self.api_key_cache.remove(&key_hash);
+        }
     }
 
     /// Set the top admin (persists to JSONL). Only call once for the first user.
@@ -863,11 +1101,12 @@ impl AuthStore {
             if let Err(e) = db.deactivate_user(&email).await {
                 eprintln!("auth: deactivate_user: {e}");
             }
-            return;
+        } else {
+            let entry = serde_json::json!({ "kind": "user-deactivate", "email": email });
+            let _ = self.append_entry(&entry);
+            self.apply_entry(&entry);
         }
-        let entry = serde_json::json!({ "kind": "user-deactivate", "email": email });
-        let _ = self.append_entry(&entry);
-        self.apply_entry(&entry);
+        self.revoke_user_access(email).await;
     }
 
     /// Activate a user (persists to JSONL).
@@ -878,11 +1117,39 @@ impl AuthStore {
             if let Err(e) = db.activate_user(&email).await {
                 eprintln!("auth: activate_user: {e}");
             }
-            return;
+        } else {
+            let entry = serde_json::json!({ "kind": "user-activate", "email": email });
+            let _ = self.append_entry(&entry);
+            self.apply_entry(&entry);
         }
-        let entry = serde_json::json!({ "kind": "user-activate", "email": email });
-        let _ = self.append_entry(&entry);
-        self.apply_entry(&entry);
+        self.revoke_user_access(email).await;
+    }
+
+    pub async fn delete_user(&self, email: &str) -> bool {
+        let deleted = if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            let email = email.to_string();
+            match db.delete_user(&email).await {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    eprintln!("auth: delete_user: {e}");
+                    false
+                }
+            }
+        } else {
+            if !self.users.lock().unwrap().contains_key(email) {
+                return false;
+            }
+            let entry = serde_json::json!({ "kind": "user-delete", "email": email });
+            let _ = self.append_entry(&entry);
+            self.apply_entry(&entry);
+            true
+        };
+
+        if deleted {
+            self.revoke_user_access(email).await;
+        }
+        deleted
     }
 
     /// List all stored users.
@@ -897,7 +1164,9 @@ impl AuthStore {
                 }
             };
         }
-        self.users.lock().unwrap().values().cloned().collect()
+        let mut users: Vec<StoredUser> = self.users.lock().unwrap().values().cloned().collect();
+        users.sort_by(|a, b| a.email.cmp(&b.email));
+        users
     }
 
     /// List all stored API keys (for admin listing).

@@ -83,6 +83,8 @@ pub trait AuthDb: Send + Sync {
 
     async fn activate_user(&self, email: &str) -> anyhow::Result<()>;
 
+    async fn delete_user(&self, email: &str) -> anyhow::Result<bool>;
+
     async fn update_last_login(&self, email: &str, at: &str) -> anyhow::Result<()>;
 
     async fn create_session(&self, session: &SessionRow) -> anyhow::Result<()>;
@@ -171,4 +173,6 @@ pub trait ExomDb: Send + Sync {
         beliefs: Option<&[Belief]>,
         branches: Option<&[Branch]>,
     ) -> anyhow::Result<()>;
+
+    async fn delete_exoms_with_prefix(&self, prefix: &str) -> anyhow::Result<u64>;
 }

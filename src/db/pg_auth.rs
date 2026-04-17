@@ -165,6 +165,28 @@ impl AuthDb for PgAuthDb {
         Ok(())
     }
 
+    async fn delete_user(&self, email: &str) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM shares WHERE owner_email = $1 OR grantee_email = $1 OR path = $1 OR path LIKE $1 || '/%'")
+            .bind(email)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM api_keys WHERE email = $1")
+            .bind(email)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE email = $1")
+            .bind(email)
+            .execute(&mut *tx)
+            .await?;
+        let res = sqlx::query("DELETE FROM users WHERE email = $1")
+            .bind(email)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     async fn update_last_login(&self, email: &str, at: &str) -> anyhow::Result<()> {
         sqlx::query("UPDATE users SET last_login = $2::timestamptz WHERE email = $1")
             .bind(email)

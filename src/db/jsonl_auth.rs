@@ -95,6 +95,22 @@ impl JsonlAuthDb {
                 ) {
                     let email = email.to_string();
                     let role = self.resolve_role(&email);
+                    let active = entry
+                        .get("active")
+                        .and_then(|v| v.as_bool())
+                        .or_else(|| self.users.lock().unwrap().get(&email).map(|u| u.active))
+                        .unwrap_or(true);
+                    let last_login = entry
+                        .get("last_login")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .or_else(|| {
+                            self.users
+                                .lock()
+                                .unwrap()
+                                .get(&email)
+                                .and_then(|u| u.last_login.clone())
+                        });
                     self.users.lock().unwrap().insert(
                         email.clone(),
                         StoredUser {
@@ -102,9 +118,9 @@ impl JsonlAuthDb {
                             display_name: display_name.to_string(),
                             provider: provider.to_string(),
                             role,
-                            active: true,
+                            active,
                             created_at: created_at.to_string(),
-                            last_login: None,
+                            last_login,
                         },
                     );
                 }
@@ -228,6 +244,38 @@ impl JsonlAuthDb {
                     }
                 }
             }
+            "user-delete" => {
+                if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
+                    self.users.lock().unwrap().remove(email);
+                    self.admins.lock().unwrap().remove(email);
+                    if self.top_admin.lock().unwrap().as_deref() == Some(email) {
+                        *self.top_admin.lock().unwrap() = None;
+                    }
+                    let key_ids: Vec<String> = self
+                        .api_keys
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .filter(|k| k.email == email)
+                        .map(|k| k.key_id.clone())
+                        .collect();
+                    for key_id in key_ids {
+                        if let Some(removed) = self.api_keys.lock().unwrap().remove(&key_id) {
+                            self.api_key_by_hash
+                                .lock()
+                                .unwrap()
+                                .remove(&removed.key_hash);
+                        }
+                    }
+                    self.share_grants.lock().unwrap().retain(|grant| {
+                        grant.owner_email != email
+                            && grant.grantee_email != email
+                            && grant.path != email
+                            && !grant.path.starts_with(&format!("{email}/"))
+                    });
+                    self.sessions.retain(|_, sess| sess.email != email);
+                }
+            }
             _ => {
                 eprintln!("auth: unknown JSONL kind: {kind}");
             }
@@ -248,6 +296,8 @@ impl AuthDb for JsonlAuthDb {
             "display_name": user.display_name,
             "provider": user.provider,
             "created_at": user.created_at,
+            "active": user.active,
+            "last_login": user.last_login,
         });
         self.append_entry(&entry)?;
         self.apply_entry(&entry);
@@ -300,6 +350,16 @@ impl AuthDb for JsonlAuthDb {
         self.append_entry(&entry)?;
         self.apply_entry(&entry);
         Ok(())
+    }
+
+    async fn delete_user(&self, email: &str) -> anyhow::Result<bool> {
+        if !self.users.lock().unwrap().contains_key(email) {
+            return Ok(false);
+        }
+        let entry = serde_json::json!({ "kind": "user-delete", "email": email });
+        self.append_entry(&entry)?;
+        self.apply_entry(&entry);
+        Ok(true)
     }
 
     async fn update_last_login(&self, _email: &str, _at: &str) -> anyhow::Result<()> {

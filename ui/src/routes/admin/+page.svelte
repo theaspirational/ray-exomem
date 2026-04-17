@@ -41,12 +41,13 @@
 		email: string;
 		role: string;
 		status: string;
-		last_login: string;
+		last_login: string | null;
 	}
 	let users = $state<AdminUser[]>([]);
 	let usersLoading = $state(false);
 	let usersError = $state<string | null>(null);
 	let userActioning = $state<string | null>(null);
+	let userDeleting = $state<string | null>(null);
 
 	async function fetchUsers() {
 		usersLoading = true;
@@ -69,10 +70,13 @@
 	async function deactivateUser(email: string) {
 		userActioning = email;
 		try {
-			const resp = await fetch(`${authApiBase()}/auth/admin/users/${encodeURIComponent(email)}`, {
-				method: 'DELETE',
-				credentials: 'include'
-			});
+			const resp = await fetch(
+				`${authApiBase()}/auth/admin/users/${encodeURIComponent(email)}/deactivate`,
+				{
+					method: 'POST',
+					credentials: 'include'
+				}
+			);
 			if (!resp.ok) {
 				toast.error('Failed to deactivate user');
 				return;
@@ -83,6 +87,37 @@
 			toast.error('Failed to deactivate user');
 		} finally {
 			userActioning = null;
+		}
+	}
+
+	async function deleteUser(email: string) {
+		if (!confirm(`Delete ${email} and permanently remove their namespace data?`)) return;
+		userDeleting = email;
+		try {
+			const resp = await fetch(`${authApiBase()}/auth/admin/users/${encodeURIComponent(email)}`, {
+				method: 'DELETE',
+				credentials: 'include'
+			});
+			if (!resp.ok) {
+				const body = await resp.json().catch(() => ({}));
+				toast.error(body.message || 'Failed to delete user');
+				return;
+			}
+			toast.success(`Deleted ${email}`);
+			await fetchUsers();
+			if (activeTab === 'sessions') {
+				await fetchSessions();
+			}
+			if (activeTab === 'api-keys') {
+				await fetchApiKeys();
+			}
+			if (activeTab === 'shares') {
+				await fetchShares();
+			}
+		} catch {
+			toast.error('Failed to delete user');
+		} finally {
+			userDeleting = null;
 		}
 	}
 
@@ -112,7 +147,7 @@
 	// --- Sessions ---
 	interface AdminSession {
 		session_id: string;
-		user: string;
+		email: string;
 		created_at: string;
 	}
 	let sessions = $state<AdminSession[]>([]);
@@ -163,7 +198,7 @@
 	// --- API Keys ---
 	interface AdminApiKey {
 		key_id: string;
-		user: string;
+		email: string;
 		label: string;
 		created_at: string;
 	}
@@ -214,9 +249,9 @@
 
 	// --- Shares ---
 	interface AdminShare {
-		owner: string;
+		owner_email: string;
 		path: string;
-		grantee: string;
+		grantee_email: string;
 		permission: string;
 		created_at: string;
 	}
@@ -409,7 +444,7 @@
 		loadTab(activeTab);
 	});
 
-	function formatDate(iso: string): string {
+	function formatDate(iso: string | null): string {
 		if (!iso) return '--';
 		try {
 			return new Date(iso).toLocaleString(undefined, {
@@ -492,36 +527,59 @@
 										{formatDate(user.last_login)}
 									</td>
 									<td class="px-3 py-2">
-										{#if user.status === 'deactivated'}
-											<Button
-												variant="ghost"
-												size="sm"
-												disabled={userActioning === user.email}
-												onclick={() => activateUser(user.email)}
-											>
-												{#if userActioning === user.email}
-													<Loader2 class="size-3.5 animate-spin" />
-												{:else}
-													<UserCheck class="size-3.5 text-green-400" />
-												{/if}
-												Activate
-											</Button>
-										{:else}
-											<Button
-												variant="ghost"
-												size="sm"
-												disabled={userActioning === user.email ||
-													user.email === auth.user?.email}
-												onclick={() => deactivateUser(user.email)}
-											>
-												{#if userActioning === user.email}
-													<Loader2 class="size-3.5 animate-spin" />
-												{:else}
-													<UserX class="size-3.5 text-red-400" />
-												{/if}
-												Deactivate
-											</Button>
-										{/if}
+										<div class="flex items-center gap-2">
+											{#if user.status === 'deactivated'}
+												<Button
+													variant="ghost"
+													size="sm"
+													disabled={userActioning === user.email ||
+														userDeleting === user.email ||
+														!auth.isTopAdmin}
+													onclick={() => activateUser(user.email)}
+												>
+													{#if userActioning === user.email}
+														<Loader2 class="size-3.5 animate-spin" />
+													{:else}
+														<UserCheck class="size-3.5 text-green-400" />
+													{/if}
+													Activate
+												</Button>
+											{:else}
+												<Button
+													variant="ghost"
+													size="sm"
+													disabled={userActioning === user.email ||
+														userDeleting === user.email ||
+														user.email === auth.user?.email ||
+														!auth.isTopAdmin}
+													onclick={() => deactivateUser(user.email)}
+												>
+													{#if userActioning === user.email}
+														<Loader2 class="size-3.5 animate-spin" />
+													{:else}
+														<UserX class="size-3.5 text-red-400" />
+													{/if}
+													Deactivate
+												</Button>
+											{/if}
+											{#if auth.isTopAdmin}
+												<Button
+													variant="ghost"
+													size="sm"
+													disabled={userDeleting === user.email ||
+														userActioning === user.email ||
+														user.email === auth.user?.email}
+													onclick={() => deleteUser(user.email)}
+												>
+													{#if userDeleting === user.email}
+														<Loader2 class="size-3.5 animate-spin" />
+													{:else}
+														<Trash2 class="size-3.5 text-red-400" />
+													{/if}
+													Delete
+												</Button>
+											{/if}
+										</div>
 									</td>
 								</tr>
 							{/each}
@@ -559,7 +617,7 @@
 							{#each sessions as session (session.session_id)}
 								<tr class="text-zinc-300">
 									<td class="px-3 py-2 font-mono text-xs">{session.session_id}</td>
-									<td class="px-3 py-2 text-xs">{session.user}</td>
+									<td class="px-3 py-2 text-xs">{session.email}</td>
 									<td class="px-3 py-2 text-xs text-zinc-500">
 										{formatDate(session.created_at)}
 									</td>
@@ -614,7 +672,7 @@
 						<tbody class="divide-y divide-zinc-800">
 							{#each apiKeys as key (key.key_id)}
 								<tr class="text-zinc-300">
-									<td class="px-3 py-2 text-xs">{key.user}</td>
+									<td class="px-3 py-2 text-xs">{key.email}</td>
 									<td class="px-3 py-2 text-xs">{key.label}</td>
 									<td class="px-3 py-2 font-mono text-xs">{key.key_id}</td>
 									<td class="px-3 py-2 text-xs text-zinc-500">
@@ -671,9 +729,9 @@
 						<tbody class="divide-y divide-zinc-800">
 							{#each shares as share, i (i)}
 								<tr class="text-zinc-300">
-									<td class="px-3 py-2 text-xs">{share.owner}</td>
+									<td class="px-3 py-2 text-xs">{share.owner_email}</td>
 									<td class="px-3 py-2 font-mono text-xs">{share.path}</td>
-									<td class="px-3 py-2 text-xs">{share.grantee}</td>
+									<td class="px-3 py-2 text-xs">{share.grantee_email}</td>
 									<td class="px-3 py-2">
 										<Badge variant="outline" class="text-xs">{share.permission}</Badge>
 									</td>

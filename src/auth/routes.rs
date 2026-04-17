@@ -193,8 +193,18 @@ async fn login(
         .with_status(500)
     })?;
 
+    if let Some(existing) = store.get_user_record(&identity.email).await {
+        if !existing.active {
+            return Err(
+                ApiError::new("user_deactivated", "this account has been deactivated")
+                    .with_status(403),
+            );
+        }
+    }
+
     // Create session.
     let session_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
 
     let user = User {
         email: identity.email.clone(),
@@ -210,6 +220,9 @@ async fn login(
     // Persist user record.
     store
         .record_user(&identity.email, &identity.display_name, &identity.provider)
+        .await;
+    store
+        .record_session(&session_id, &identity.email, &expires_at)
         .await;
 
     // First user ever becomes persisted top-admin.
@@ -248,7 +261,7 @@ async fn logout(
 
     // Evict session if present.
     if let Some(sid) = &user.session_id {
-        store.evict_session(sid);
+        store.delete_session(sid).await;
     }
 
     let cookie = clear_session_cookie();
