@@ -7,7 +7,6 @@
 	import { base } from '$app/paths';
 	import { Separator } from '$lib/components/ui/separator/index.js';
 	import { Toaster } from '$lib/components/ui/sonner/index.js';
-	import ActorIdentityDialog from '$lib/ActorIdentityDialog.svelte';
 	import CommandPalette from '$lib/CommandPalette.svelte';
 	import { commandPaletteState } from '$lib/commandPaletteState.svelte';
 	import Drawer from '$lib/Drawer.svelte';
@@ -124,8 +123,7 @@
 		</div>
 		<StatusBar />
 		<CommandPalette bind:open={commandPaletteState.open} />
-		<ActorIdentityDialog />
-		<Toaster richColors position="bottom-right" />
+			<Toaster richColors position="bottom-right" />
 	</div>
 {:else}
 	<div class="flex h-screen items-center justify-center bg-zinc-900 text-zinc-500">

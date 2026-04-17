@@ -36,10 +36,31 @@
 	let generatedKey = $state<GeneratedKey | null>(null);
 
 	let revoking = $state<string | null>(null);
+	let actorValue = $state('user');
+	let savingActor = $state(false);
 
 	onMount(() => {
+		const storedActor = localStorage.getItem('ray-exomem-actor')?.trim();
+		actorValue = storedActor || 'user';
+		if (!storedActor) {
+			localStorage.setItem('ray-exomem-actor', 'user');
+		}
 		fetchKeys();
 	});
+
+	async function saveActor() {
+		const next = actorValue.trim() || 'user';
+		savingActor = true;
+		try {
+			localStorage.setItem('ray-exomem-actor', next);
+			actorValue = next;
+			toast.success('Actor saved');
+		} catch {
+			toast.error('Failed to save actor');
+		} finally {
+			savingActor = false;
+		}
+	}
 
 	async function fetchKeys() {
 		keysLoading = true;
@@ -187,6 +208,36 @@
 			<Button variant="destructive" size="sm" onclick={() => auth.logout()}>
 				<LogOut class="size-3.5" />
 				Logout
+			</Button>
+		</div>
+	</Card>
+
+	<Card class="border-zinc-800 bg-zinc-900/80">
+		<div class="space-y-4">
+			<div class="space-y-1">
+				<h2 class="text-sm font-medium text-zinc-400">Actor</h2>
+				<p class="text-xs text-zinc-500">
+					Used as write attribution from this browser. Default value is <span class="font-mono">user</span>.
+				</p>
+			</div>
+			<div class="space-y-2">
+				<label class="text-xs text-zinc-500" for="profile-actor">Actor name</label>
+				<Input
+					id="profile-actor"
+					bind:value={actorValue}
+					class="border-zinc-700 bg-zinc-950 font-mono text-sm"
+					placeholder="user"
+					autocomplete="username"
+					onkeydown={(e) => {
+						if (e.key === 'Enter') void saveActor();
+					}}
+				/>
+			</div>
+			<Button variant="outline" size="sm" disabled={savingActor} onclick={() => void saveActor()}>
+				{#if savingActor}
+					<Loader2 class="size-3.5 animate-spin" />
+				{/if}
+				Save Actor
 			</Button>
 		</div>
 	</Card>
