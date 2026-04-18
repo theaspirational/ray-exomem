@@ -138,7 +138,26 @@ fn auth_user_response(user: &User) -> AuthUserResponse {
 const BOOTSTRAP_SENTINEL_PREDICATE: &str = "onboarding/bootstrap_version";
 const BOOTSTRAP_SENTINEL_VALUE: &str = "v1";
 
-type BootstrapFactSpec = (&'static str, &'static str, &'static str);
+/// Literal value embedded in bootstrap specs. Stored in a static table so we
+/// pre-type numeric profile fields as `FactValue::I64` at definition time —
+/// this is what makes datalog `cmp` rules (e.g. `(< ?w 60)`) work against
+/// the seeded health-profile facts without string parsing.
+#[derive(Clone, Copy)]
+enum BootstrapLiteral {
+    I64(i64),
+    Str(&'static str),
+}
+
+impl BootstrapLiteral {
+    fn as_fact_value(self) -> crate::fact_value::FactValue {
+        match self {
+            BootstrapLiteral::I64(n) => crate::fact_value::FactValue::I64(n),
+            BootstrapLiteral::Str(s) => crate::fact_value::FactValue::Str(s.to_string()),
+        }
+    }
+}
+
+type BootstrapFactSpec = (&'static str, &'static str, BootstrapLiteral);
 
 fn bootstrap_ctx(email: &str, session_id: &str) -> MutationContext {
     MutationContext {
@@ -151,52 +170,76 @@ fn bootstrap_ctx(email: &str, session_id: &str) -> MutationContext {
 
 fn health_bootstrap_facts() -> &'static [BootstrapFactSpec] {
     &[
-        ("health/profile/age", "profile/age", "30"),
-        ("health/profile/height_cm", "profile/height_cm", "175"),
-        ("health/profile/weight_kg", "profile/weight_kg", "75"),
-        ("health/profile/units", "profile/units", "metric"),
+        ("health/profile/age", "profile/age", BootstrapLiteral::I64(30)),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            BootstrapLiteral::I64(175),
+        ),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            BootstrapLiteral::I64(75),
+        ),
+        (
+            "health/profile/units",
+            "profile/units",
+            BootstrapLiteral::Str("metric"),
+        ),
         (
             "health/onboarding/disclaimer",
             "onboarding/disclaimer",
-            "general_wellness_example_not_medical_advice",
+            BootstrapLiteral::Str("general_wellness_example_not_medical_advice"),
         ),
         (
             "onboarding/bootstrap_version",
             BOOTSTRAP_SENTINEL_PREDICATE,
-            BOOTSTRAP_SENTINEL_VALUE,
+            BootstrapLiteral::Str(BOOTSTRAP_SENTINEL_VALUE),
         ),
     ]
 }
 
 fn work_main_bootstrap_facts() -> &'static [BootstrapFactSpec] {
     &[
-        ("workspace/purpose", "workspace/purpose", "personal work area"),
+        (
+            "workspace/purpose",
+            "workspace/purpose",
+            BootstrapLiteral::Str("personal work area"),
+        ),
         (
             "workspace/next_step",
             "workspace/next_step",
-            "create projects, facts, or sessions here",
+            BootstrapLiteral::Str("create projects, facts, or sessions here"),
         ),
         (
             "onboarding/bootstrap_version",
             BOOTSTRAP_SENTINEL_PREDICATE,
-            BOOTSTRAP_SENTINEL_VALUE,
+            BootstrapLiteral::Str(BOOTSTRAP_SENTINEL_VALUE),
         ),
     ]
 }
 
 fn work_example_bootstrap_facts() -> &'static [BootstrapFactSpec] {
     &[
-        ("project/name", "project/name", "Example Project"),
-        ("project/status", "project/status", "active"),
+        (
+            "project/name",
+            "project/name",
+            BootstrapLiteral::Str("Example Project"),
+        ),
+        (
+            "project/status",
+            "project/status",
+            BootstrapLiteral::Str("active"),
+        ),
         (
             "project/next_step",
             "project/next_step",
-            "inspect facts, graph, and sessions",
+            BootstrapLiteral::Str("inspect facts, graph, and sessions"),
         ),
         (
             "onboarding/bootstrap_version",
             BOOTSTRAP_SENTINEL_PREDICATE,
-            BOOTSTRAP_SENTINEL_VALUE,
+            BootstrapLiteral::Str(BOOTSTRAP_SENTINEL_VALUE),
         ),
     ]
 }
@@ -243,9 +286,17 @@ async fn seed_bootstrap_exom(
             return Ok(());
         }
 
-        for (fact_id, predicate, value) in facts {
-            es.brain
-                .assert_fact(fact_id, predicate, value, 1.0, "bootstrap", None, None, ctx)?;
+        for (fact_id, predicate, literal) in facts {
+            es.brain.assert_fact(
+                fact_id,
+                predicate,
+                literal.as_fact_value(),
+                1.0,
+                "bootstrap",
+                None,
+                None,
+                ctx,
+            )?;
         }
 
         for rule_text in rules {
