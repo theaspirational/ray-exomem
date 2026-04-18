@@ -1111,6 +1111,127 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-type fact sub-tables
+// ---------------------------------------------------------------------------
+
+/// Typed fact sub-tables split by `FactValue` variant. Each is a 3-column
+/// table `(fact_id, predicate, value)` with a homogeneously-typed `value`
+/// column so rayforce2 can apply `<`, `>=`, `sum`, `avg` etc. natively.
+///
+///   * `facts_i64` — rows where the fact value is `FactValue::I64(n)`. The
+///     `value_i64` column is a bare `RAY_I64` (no datom tag), enabling live
+///     numeric cmp in Datalog rule bodies: `(< ?w 60)`.
+///   * `facts_str` — rows where the fact value is `FactValue::Str(s)`. The
+///     `value_str` column is a `RAY_I64` holding STR-tagged datoms
+///     (`encode_string_datom`), same encoding as the shared eav V column.
+///   * `facts_sym` — rows where the fact value is `FactValue::Sym(s)`. The
+///     `value_sym` column is a `RAY_I64` holding SYM-tagged datoms
+///     (`encode_symbol_datom`), identity-comparable with `==`.
+///
+/// The `fact_id` and `predicate` columns always use the same encoding as
+/// the shared datoms table: `fact_id` is STR-tagged (via `encode_string_datom`)
+/// and `predicate` is interned as a bare sym ID (`sym_intern`). The column
+/// type is `RAY_SYM` for `predicate` to match how datoms registers attrs.
+pub struct TypedFactTables {
+    pub facts_i64: RayObj,
+    pub facts_str: RayObj,
+    pub facts_sym: RayObj,
+}
+
+fn build_single_typed_fact_table(
+    rows: &[(i64, i64, i64)],
+    value_col_name: &str,
+    value_col_type: i8,
+) -> Result<RayObj> {
+    unsafe {
+        let tbl = ffi::ray_table_new(3);
+        if tbl.is_null() {
+            bail!("failed to allocate typed fact table");
+        }
+        let capacity = rows.len() as i64;
+        let e_col = ffi::ray_vec_new(ffi::RAY_I64, capacity);
+        let a_col = ffi::ray_vec_new(ffi::RAY_SYM, capacity);
+        let v_col = ffi::ray_vec_new(value_col_type, capacity);
+        if e_col.is_null() || a_col.is_null() || v_col.is_null() {
+            if !e_col.is_null() {
+                ffi::ray_release(e_col);
+            }
+            if !a_col.is_null() {
+                ffi::ray_release(a_col);
+            }
+            if !v_col.is_null() {
+                ffi::ray_release(v_col);
+            }
+            ffi::ray_release(tbl);
+            bail!("failed to allocate typed fact columns");
+        }
+        let mut e = e_col;
+        let mut a = a_col;
+        let mut v = v_col;
+        for (entity, attribute, value) in rows {
+            e = ffi::ray_vec_append(e, entity as *const i64 as *const _);
+            a = ffi::ray_vec_append(a, attribute as *const i64 as *const _);
+            v = ffi::ray_vec_append(v, value as *const i64 as *const _);
+            if e.is_null() || a.is_null() || v.is_null() {
+                if !e.is_null() {
+                    ffi::ray_release(e);
+                }
+                if !a.is_null() {
+                    ffi::ray_release(a);
+                }
+                if !v.is_null() {
+                    ffi::ray_release(v);
+                }
+                ffi::ray_release(tbl);
+                bail!("failed to append typed fact row");
+            }
+        }
+        let tbl = ffi::ray_table_add_col(tbl, sym_intern("fact_id"), e);
+        ffi::ray_release(e);
+        let tbl = ffi::ray_table_add_col(tbl, sym_intern("predicate"), a);
+        ffi::ray_release(a);
+        let tbl = ffi::ray_table_add_col(tbl, sym_intern(value_col_name), v);
+        ffi::ray_release(v);
+        RayObj::from_raw(tbl)
+    }
+}
+
+/// Build the three typed fact sub-tables for the current (active) facts in
+/// this brain. Call sites must re-invoke after every mutation and rebind
+/// the tables in the Rayforce2 env so rule-body `(facts_i64 ?e ?a ?v)`
+/// atoms see fresh data.
+pub fn build_typed_fact_tables(brain: &Brain) -> Result<TypedFactTables> {
+    use crate::fact_value::FactValue;
+
+    let facts = brain.current_facts();
+    let mut i64_rows: Vec<(i64, i64, i64)> = Vec::new();
+    let mut str_rows: Vec<(i64, i64, i64)> = Vec::new();
+    let mut sym_rows: Vec<(i64, i64, i64)> = Vec::new();
+    for fact in &facts {
+        let entity = encode_string_datom(&fact.fact_id);
+        let attribute = sym_intern(&fact.predicate);
+        match &fact.value {
+            FactValue::I64(n) => i64_rows.push((entity, attribute, *n)),
+            FactValue::Str(s) => str_rows.push((entity, attribute, encode_string_datom(s))),
+            FactValue::Sym(s) => sym_rows.push((entity, attribute, encode_symbol_datom(&s.sym))),
+        }
+    }
+    Ok(TypedFactTables {
+        facts_i64: build_single_typed_fact_table(&i64_rows, "value_i64", ffi::RAY_I64)?,
+        facts_str: build_single_typed_fact_table(&str_rows, "value_str", ffi::RAY_I64)?,
+        facts_sym: build_single_typed_fact_table(&sym_rows, "value_sym", ffi::RAY_I64)?,
+    })
+}
+
+/// Well-known rayforce2 env names used by [`TypedFactTables`]. Rules reference
+/// `(facts_i64 ?e ?a ?v)` by these bare names. Server query handlers rebind
+/// each one to the executing exom's sub-tables immediately before running a
+/// query so the shared names always resolve to the right data.
+pub const FACTS_I64_ENV: &str = "facts_i64";
+pub const FACTS_STR_ENV: &str = "facts_str";
+pub const FACTS_SYM_ENV: &str = "facts_sym";
+
+// ---------------------------------------------------------------------------
 // Column builder helpers
 // ---------------------------------------------------------------------------
 
