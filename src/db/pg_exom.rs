@@ -6,6 +6,26 @@ use sqlx::{PgPool, Row};
 
 use crate::brain::{Belief, BeliefStatus, Branch, EntityId, Fact, Observation, Tx, TxAction, TxId};
 use crate::db::ExomDb;
+use crate::fact_value::FactValue;
+
+/// Encode a typed fact value as the text payload persisted in `facts.value`.
+/// Uses JSON — `20`, `"Basil"`, `{"$sym":"active"}` — so the variant is preserved
+/// losslessly in the database (schema remains `text`).
+fn fact_value_to_pg_text(v: &FactValue) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| v.display())
+}
+
+/// Decode a fact value from the text payload in `facts.value`.
+///
+/// Backward-compat: rows written before the FactValue refactor store bare
+/// text like `75` or `metric` that does not parse as JSON. Those are read as
+/// `FactValue::Str(raw)` so existing databases keep loading without a migration.
+fn fact_value_from_pg_text(raw: &str) -> FactValue {
+    if let Ok(parsed) = serde_json::from_str::<FactValue>(raw) {
+        return parsed;
+    }
+    FactValue::Str(raw.to_string())
+}
 
 pub struct PgExomDb {
     pool: PgPool,
@@ -83,10 +103,11 @@ fn tx_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Tx> {
 }
 
 fn fact_from_row(row: &sqlx::postgres::PgRow) -> anyhow::Result<Fact> {
+    let raw_value: String = row.get("value");
     Ok(Fact {
         fact_id: row.get("fact_id"),
         predicate: row.get("predicate"),
-        value: row.get("value"),
+        value: fact_value_from_pg_text(&raw_value),
         created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
         created_by_tx: i64_to_txid(row.get::<i64, _>("created_by_tx"))?,
         superseded_by_tx: row
@@ -191,6 +212,7 @@ async fn insert_fact<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
     let created_at = parse_timestamptz(&f.created_at)?;
     let valid_from = parse_timestamptz(&f.valid_from)?;
     let valid_to = parse_timestamptz_opt(f.valid_to.as_deref())?;
+    let value_text = fact_value_to_pg_text(&f.value);
     sqlx::query(
         r#"
         INSERT INTO facts (
@@ -203,7 +225,7 @@ async fn insert_fact<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
     .bind(exom_path)
     .bind(&f.fact_id)
     .bind(&f.predicate)
-    .bind(&f.value)
+    .bind(value_text)
     .bind(created_at)
     .bind(txid_to_i64(f.created_by_tx))
     .bind(f.superseded_by_tx.map(txid_to_i64))
