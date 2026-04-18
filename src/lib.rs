@@ -7,6 +7,7 @@ pub mod context;
 pub mod datom;
 pub mod db;
 pub mod exom;
+pub mod fact_value;
 pub mod ffi;
 pub mod http_error;
 pub mod mcp;
