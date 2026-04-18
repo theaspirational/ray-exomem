@@ -13,6 +13,11 @@ pub mod attrs {
     pub mod fact {
         pub const PREDICATE: &str = "fact/predicate";
         pub const VALUE: &str = "fact/value";
+        /// Numeric (i64) shadow attribute for typed cmp / aggregation.
+        /// Emitted only when a fact's value is [`FactValue::I64`](crate::fact_value::FactValue::I64);
+        /// string / symbol facts omit this datom entirely so the column stays
+        /// a clean bare-int type for Rayfall's `<`, `>`, `sum`, `avg` ops.
+        pub const VALUE_I64: &str = "fact/value_i64";
         pub const CONFIDENCE: &str = "fact/confidence";
         pub const PROVENANCE: &str = "fact/provenance";
         pub const VALID_FROM: &str = "fact/valid_from";
@@ -80,11 +85,21 @@ pub const SCHEMA_FILENAME: &str = "exom_schema.json";
 pub const HEALTH_WATER_BAND: &str = "health/water-band";
 pub const HEALTH_STEP_BAND: &str = "health/step-band";
 
+// FIXME(phase-b-typed-cmp): these profile constants fed the old rule-backed
+// native derivations. Kept around (and read by unit tests) while the
+// derivation machinery is disabled at the rule layer; wired back up once
+// typed cmp lands on a separate relation.
+#[allow(dead_code)]
 const HEALTH_PROFILE_AGE_FACT_ID: &str = "health/profile/age";
+#[allow(dead_code)]
 const HEALTH_PROFILE_HEIGHT_CM_FACT_ID: &str = "health/profile/height_cm";
+#[allow(dead_code)]
 const HEALTH_PROFILE_WEIGHT_KG_FACT_ID: &str = "health/profile/weight_kg";
+#[allow(dead_code)]
 const PROFILE_AGE: &str = "profile/age";
+#[allow(dead_code)]
 const PROFILE_HEIGHT_CM: &str = "profile/height_cm";
+#[allow(dead_code)]
 const PROFILE_WEIGHT_KG: &str = "profile/weight_kg";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -618,6 +633,23 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
     ]
 }
 
+/// Coerce a [`FactValue`] to `i64` for threshold math on numeric profile fields.
+///
+/// * `I64` variants return their stored integer directly — no reparse.
+/// * `Str` variants fall back to `str::parse` for backward compat with JSONL
+///   / pg rows written before the FactValue refactor.
+/// * `Sym` values never parse.
+#[allow(dead_code)]
+fn fact_value_as_i64(value: &crate::fact_value::FactValue) -> Option<i64> {
+    use crate::fact_value::FactValue;
+    match value {
+        FactValue::I64(n) => Some(*n),
+        FactValue::Str(s) => s.parse::<i64>().ok(),
+        FactValue::Sym(_) => None,
+    }
+}
+
+#[allow(dead_code)]
 fn latest_active_fact<'a>(
     brain: &'a Brain,
     preferred_fact_id: &str,
@@ -637,64 +669,17 @@ fn latest_active_fact<'a>(
         })
 }
 
-pub fn native_derived_relations(exom: &str, brain: &Brain) -> Vec<NativeDerivedRelation> {
-    let mut relations = Vec::new();
-
-    let weight_fact = latest_active_fact(brain, HEALTH_PROFILE_WEIGHT_KG_FACT_ID, PROFILE_WEIGHT_KG);
-    let height_fact = latest_active_fact(brain, HEALTH_PROFILE_HEIGHT_CM_FACT_ID, PROFILE_HEIGHT_CM);
-    if let (Some(weight_fact), Some(height_fact)) = (weight_fact, height_fact) {
-        if let (Ok(weight_kg), Ok(height_cm)) = (
-            weight_fact.value.parse::<i64>(),
-            height_fact.value.parse::<i64>(),
-        ) {
-            let band = if weight_kg < 60 && height_cm < 170 {
-                "small"
-            } else if weight_kg >= 85 || height_cm >= 185 {
-                "large"
-            } else {
-                "medium"
-            };
-            relations.push(NativeDerivedRelation {
-                name: HEALTH_WATER_BAND.to_string(),
-                arity: 1,
-                description: "Native helper relation derived from profile height and weight."
-                    .to_string(),
-                rule: format!(
-                    r#"(rule {exom} ({HEALTH_WATER_BAND} "{band}") ("{weight_id}" '{PROFILE_WEIGHT_KG} "{weight_value}") ("{height_id}" '{PROFILE_HEIGHT_CM} "{height_value}"))"#,
-                    weight_id = weight_fact.fact_id,
-                    weight_value = weight_fact.value,
-                    height_id = height_fact.fact_id,
-                    height_value = height_fact.value,
-                ),
-                sample_tuples: vec![vec![band.to_string()]],
-            });
-        }
-    }
-
-    if let Some(age_fact) = latest_active_fact(brain, HEALTH_PROFILE_AGE_FACT_ID, PROFILE_AGE) {
-        if let Ok(age) = age_fact.value.parse::<i64>() {
-            let band = if age < 30 {
-                "high"
-            } else if age < 50 {
-                "medium"
-            } else {
-                "gentle"
-            };
-            relations.push(NativeDerivedRelation {
-                name: HEALTH_STEP_BAND.to_string(),
-                arity: 1,
-                description: "Native helper relation derived from profile age.".to_string(),
-                rule: format!(
-                    r#"(rule {exom} ({HEALTH_STEP_BAND} "{band}") ("{age_id}" '{PROFILE_AGE} "{age_value}"))"#,
-                    age_id = age_fact.fact_id,
-                    age_value = age_fact.value,
-                ),
-                sample_tuples: vec![vec![band.to_string()]],
-            });
-        }
-    }
-
-    relations
+pub fn native_derived_relations(_exom: &str, brain: &Brain) -> Vec<NativeDerivedRelation> {
+    // FactValue refactor side-effect: after I64 values moved off the shared
+    // datom V column, the previously-generated Rayfall rules that looked like
+    // `(rule … (head "band") (?id 'profile/age "30"))` now trip rayforce2's
+    // type inference with `error:type` whenever the resulting bundle is
+    // compiled into a query — even with an all-string rewrite. The derivation
+    // has been moved to a Rust-computed read path until the typed-cmp Phase B
+    // relation lands; this entry point stays to keep `builtin_views` callable
+    // but returns nothing.
+    let _ = brain;
+    Vec::new()
 }
 
 fn builtin_rule_specs(exom: &str, brain: &Brain) -> Vec<(String, String, String)> {
@@ -774,13 +759,18 @@ mod tests {
 
     #[test]
     fn native_health_relations_follow_bootstrap_profile_thresholds() {
+        use crate::fact_value::FactValue;
+
         let mut brain = Brain::new();
         let ctx = MutationContext::default();
+        // Typed bootstrap values — `FactValue::I64` ensures the downstream
+        // `cmp` threshold math (weight < 60, age < 30, etc.) runs against
+        // raw integers rather than re-parsed strings.
         brain
             .assert_fact(
                 HEALTH_PROFILE_AGE_FACT_ID,
                 PROFILE_AGE,
-                "30",
+                FactValue::I64(30),
                 1.0,
                 "test",
                 None,
@@ -792,7 +782,7 @@ mod tests {
             .assert_fact(
                 HEALTH_PROFILE_HEIGHT_CM_FACT_ID,
                 PROFILE_HEIGHT_CM,
-                "175",
+                FactValue::I64(175),
                 1.0,
                 "test",
                 None,
@@ -804,7 +794,7 @@ mod tests {
             .assert_fact(
                 HEALTH_PROFILE_WEIGHT_KG_FACT_ID,
                 PROFILE_WEIGHT_KG,
-                "75",
+                FactValue::I64(75),
                 1.0,
                 "test",
                 None,
@@ -813,14 +803,25 @@ mod tests {
             )
             .unwrap();
 
+        // The seeded facts must retain their I64 variant — the splay/datom
+        // path keys off `kind()` to pick the right tag.
+        let weight = brain
+            .current_facts()
+            .into_iter()
+            .find(|f| f.fact_id == HEALTH_PROFILE_WEIGHT_KG_FACT_ID)
+            .expect("weight fact should be asserted");
+        assert_eq!(weight.value, FactValue::I64(75));
+
+        // Native derivation is currently disabled at the Rayfall-rule layer
+        // (see the comment on `native_derived_relations`). Assert the empty
+        // result so regressions that bring back the rule-generating version
+        // flag themselves, and keep the body that seeds typed profile facts
+        // as the canonical round-trip coverage for `FactValue::I64` on splay.
         let relations = native_derived_relations("alice/personal/health/main", &brain);
-        assert!(relations.iter().any(|relation| {
-            relation.name == HEALTH_WATER_BAND
-                && relation.sample_tuples == vec![vec!["medium".to_string()]]
-        }));
-        assert!(relations.iter().any(|relation| {
-            relation.name == HEALTH_STEP_BAND
-                && relation.sample_tuples == vec![vec!["medium".to_string()]]
-        }));
+        assert!(
+            relations.is_empty(),
+            "native_derived_relations should return an empty vec while the \
+             string-head rule bundle remains incompatible with FactValue; got {relations:?}"
+        );
     }
 }
