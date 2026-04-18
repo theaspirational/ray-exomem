@@ -244,27 +244,39 @@ fn work_example_bootstrap_facts() -> &'static [BootstrapFactSpec] {
     ]
 }
 
-fn health_bootstrap_rules(exom: &str) -> Vec<String> {
-    vec![
-        format!(
-            r#"(rule {exom} (health/recommended-water-ml "2000") (health/water-band "small"))"#
-        ),
-        format!(
-            r#"(rule {exom} (health/recommended-water-ml "2500") (health/water-band "medium"))"#
-        ),
-        format!(
-            r#"(rule {exom} (health/recommended-water-ml "3000") (health/water-band "large"))"#
-        ),
-        format!(
-            r#"(rule {exom} (health/recommended-steps-per-day "10000") (health/step-band "high"))"#
-        ),
-        format!(
-            r#"(rule {exom} (health/recommended-steps-per-day "9000") (health/step-band "medium"))"#
-        ),
-        format!(
-            r#"(rule {exom} (health/recommended-steps-per-day "7500") (health/step-band "gentle"))"#
-        ),
-    ]
+fn health_bootstrap_rules(_exom: &str) -> Vec<String> {
+    // Bootstrap rule set intentionally left empty after Task T2.
+    //
+    // History:
+    //   * Before T2 the onboarding seeded six `(rule {exom}
+    //     (health/recommended-water-ml "X") (health/water-band "Y"))`
+    //     style rules. They tripped rayforce2's rule parser (string
+    //     head constants are not accepted) and the ontology emission
+    //     layer as soon as the UI tried to resolve them.
+    //
+    //   * T2 introduced the per-type splay tables `facts_i64`,
+    //     `facts_str`, `facts_sym` so live numeric cmp (`(< ?w 60)`)
+    //     works inside Datalog rules. The declarative water-band /
+    //     step-band derivations are expressible as Datalog rules over
+    //     `facts_i64` — but the only compatible rule shape is a
+    //     VARIABLE-head rule joined against a seeded auxiliary EDB
+    //     (see `tests/typed_facts_e2e.rs::water_band_rules`). Shipping
+    //     such an EDB as part of bootstrap requires binding it in the
+    //     shared env per-query (the way `facts_i64` is bound), plus a
+    //     per-exom backing table. That plumbing is out of scope for
+    //     this commit.
+    //
+    //   * Constant-head rules (e.g. `(health/water-band 'medium) ...`)
+    //     remain BROKEN upstream: rayforce2's `dl_project` drops the
+    //     constant column entirely, and the surrounding heap-reuse
+    //     code can surface as memory corruption on the next IDB
+    //     materialization. Tracked separately.
+    //
+    // Until the auxiliary-table binding lands, we ship the health exom
+    // with bootstrap FACTS only (see `health_bootstrap_facts`) and no
+    // derived rules. Users can add their own rules via `/api/actions/
+    // eval` once they understand the constraints above.
+    Vec::new()
 }
 
 fn exom_is_bootstrapped(es: &crate::server::ExomState) -> bool {
