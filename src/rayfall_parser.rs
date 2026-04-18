@@ -272,6 +272,23 @@ pub fn datom_query_projection_roles(query_source: &str) -> Option<Vec<Option<Dat
         return None;
     }
 
+    // Only infer datom roles for raw triple patterns. In Rayfall / rayforce2
+    // a rule invocation starts with a bare predicate name, while a triple
+    // pattern starts with either a ?variable, a quoted symbol / string
+    // (e.g. `'foo`, `"bar"`), an underscore, or a bare integer. A rule
+    // invocation like `(pair ?w ?h)` must not be interpreted as
+    // `(?entity 'attr ?value)` — that misleads the i64 cell decoder into
+    // calling sym_lookup on raw values.
+    let first = terms.first()?.as_str();
+    let looks_triple = first.starts_with('?')
+        || first.starts_with('\'')
+        || first.starts_with('"')
+        || first == "_"
+        || first.parse::<i64>().is_ok();
+    if !looks_triple {
+        return None;
+    }
+
     let mut out = vec![None; find_vars.len()];
     for (i, var) in find_vars.iter().enumerate() {
         if terms[0] == *var {
