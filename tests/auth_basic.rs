@@ -329,7 +329,10 @@ fn login_bootstrap_is_idempotent_and_preserves_existing_content() {
         "alice@co.com/personal/health/main",
     );
     assert_eq!(health_before["facts"].as_array().unwrap().len(), 6);
-    assert_eq!(health_before["rules"].as_array().unwrap().len(), 6);
+    // Health bootstrap rules were removed in Task T2 — they will return
+    // once the auxiliary binding for the water-band / step-band
+    // derivations lands (see auth/routes.rs::health_bootstrap_rules).
+    assert!(health_before["rules"].as_array().unwrap().is_empty());
 
     assert_fact_with_id(
         &daemon.base_url,
