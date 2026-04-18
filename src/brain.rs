@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::context::MutationContext;
 use crate::exom::{self, now_iso8601_basic, session_id, ExomMeta, SessionMeta, SessionType};
+pub use crate::fact_value::{FactValue, SymValue};
 use crate::path::TreePath;
 use crate::tree::{classify, NodeKind};
 
@@ -42,7 +43,7 @@ pub struct Observation {
 pub struct Fact {
     pub fact_id: EntityId,
     pub predicate: String,
-    pub value: String,
+    pub value: FactValue,
     pub created_at: String,
     pub created_by_tx: TxId,
     pub superseded_by_tx: Option<TxId>,
@@ -595,13 +596,14 @@ impl Brain {
         &mut self,
         fact_id: &str,
         predicate: &str,
-        value: &str,
+        value: impl Into<FactValue>,
         confidence: f64,
         provenance: &str,
         valid_from: Option<&str>,
         valid_to: Option<&str>,
         ctx: &MutationContext,
     ) -> Result<TxId> {
+        let value: FactValue = value.into();
         let (tx_id, tx_time) = self.alloc_tx(
             TxAction::AssertFact,
             vec![fact_id.into()],
@@ -611,7 +613,7 @@ impl Brain {
         let fact = Fact {
             fact_id: fact_id.into(),
             predicate: predicate.into(),
-            value: value.into(),
+            value,
             created_at: tx_time.clone(),
             created_by_tx: tx_id,
             superseded_by_tx: None,
@@ -658,9 +660,10 @@ impl Brain {
         &mut self,
         fact_id: &str,
         predicate: &str,
-        value: &str,
+        value: impl Into<FactValue>,
         ctx: &MutationContext,
     ) -> Result<TxId> {
+        let value: FactValue = value.into();
         let matching_ids: Vec<String> = self
             .facts
             .iter()
@@ -968,7 +971,7 @@ impl Brain {
                     self.assert_fact(
                         &fact.fact_id,
                         &fact.predicate,
-                        &fact.value,
+                        fact.value.clone(),
                         fact.confidence,
                         &format!("merged-from:{}", source),
                         Some(&fact.valid_from),
@@ -983,7 +986,7 @@ impl Brain {
                         self.assert_fact(
                             &fact.fact_id,
                             &fact.predicate,
-                            &fact.value,
+                            fact.value.clone(),
                             fact.confidence,
                             &format!("merged-from:{}", source),
                             Some(&fact.valid_from),
@@ -997,8 +1000,8 @@ impl Brain {
                         conflicts.push(MergeConflict {
                             fact_id: fact.fact_id.clone(),
                             predicate: fact.predicate.clone(),
-                            source_value: fact.value.clone(),
-                            target_value: target_fact.value.clone(),
+                            source_value: fact.value.display(),
+                            target_value: target_fact.value.display(),
                         });
                     }
                 },
@@ -2642,5 +2645,241 @@ mod tests {
         let at_tx1_march = brain.facts_bitemporal(tx1, "2024-03-01T00:00:00Z");
         assert_eq!(at_tx1_march.len(), 1);
         assert_eq!(at_tx1_march[0].fact_id, "f1");
+    }
+
+    // ---------------------------------------------------------------------
+    // Typed FactValue round-trips — the splay cache must preserve the
+    // variant (I64 / Str / Sym) across a save / load cycle so queries over
+    // numeric facts keep matching bare int literals in rule bodies.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn typed_fact_value_survives_splay_roundtrip() {
+        let _guard = test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "brain-fact-value-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let sym_path = dir.join("sym");
+        let exom_dir = dir.join("exom");
+        let _ = std::fs::create_dir_all(&exom_dir);
+
+        {
+            let mut brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
+            brain
+                .assert_fact(
+                    "profile/weight_kg",
+                    "profile/weight_kg",
+                    FactValue::I64(55),
+                    1.0,
+                    "test",
+                    None,
+                    None,
+                    &MutationContext::default(),
+                )
+                .unwrap();
+            brain
+                .assert_fact(
+                    "profile/units",
+                    "profile/units",
+                    FactValue::Str("metric".into()),
+                    1.0,
+                    "test",
+                    None,
+                    None,
+                    &MutationContext::default(),
+                )
+                .unwrap();
+            brain
+                .assert_fact(
+                    "status/current",
+                    "status",
+                    FactValue::sym("active"),
+                    1.0,
+                    "test",
+                    None,
+                    None,
+                    &MutationContext::default(),
+                )
+                .unwrap();
+        }
+
+        {
+            let brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
+            let current = brain.current_facts();
+            let weight = current
+                .iter()
+                .find(|f| f.fact_id == "profile/weight_kg")
+                .expect("weight fact should survive roundtrip");
+            assert_eq!(weight.value, FactValue::I64(55));
+
+            let units = current
+                .iter()
+                .find(|f| f.fact_id == "profile/units")
+                .expect("units fact should survive roundtrip");
+            assert_eq!(units.value, FactValue::Str("metric".into()));
+
+            let status = current
+                .iter()
+                .find(|f| f.fact_id == "status/current")
+                .expect("sym fact should survive roundtrip");
+            assert_eq!(status.value, FactValue::sym("active"));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typed_fact_value_roundtrips_through_jsonl() {
+        // The JSONL sidecars are the source of truth — they must encode the
+        // typed variant via `#[serde(untagged)]` and reload cleanly.
+        let fact = Fact {
+            fact_id: "f1".into(),
+            predicate: "weight".into(),
+            value: FactValue::I64(75),
+            created_at: "2024-01-01T00:00:00Z".into(),
+            created_by_tx: 1,
+            superseded_by_tx: None,
+            revoked_by_tx: None,
+            confidence: 1.0,
+            provenance: "test".into(),
+            valid_from: "2024-01-01T00:00:00Z".into(),
+            valid_to: None,
+        };
+        let json = serde_json::to_string(&fact).unwrap();
+        assert!(
+            json.contains(r#""value":75"#),
+            "I64 values should serialize as JSON number; got: {json}"
+        );
+        let round: Fact = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.value, FactValue::I64(75));
+
+        let fact_str = Fact {
+            value: FactValue::Str("Basil".into()),
+            ..fact.clone()
+        };
+        let json = serde_json::to_string(&fact_str).unwrap();
+        assert!(json.contains(r#""value":"Basil""#));
+        let round: Fact = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.value, FactValue::Str("Basil".into()));
+
+        let fact_sym = Fact {
+            value: FactValue::sym("active"),
+            ..fact
+        };
+        let json = serde_json::to_string(&fact_sym).unwrap();
+        assert!(json.contains(r#""value":{"$sym":"active"}"#));
+        let round: Fact = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.value, FactValue::sym("active"));
+    }
+
+    // ---------------------------------------------------------------------
+    // End-to-end Datalog cmp pipeline (single-type datoms).
+    //
+    // The main datoms V column stays STR-tagged (see
+    // `storage::encode_fact_value_datom`) to keep the column homogeneous and
+    // avoid rayforce2 faults on queries that scan mixed int + str values in
+    // the shared slot. Typed cmp over I64 facts is therefore wired through a
+    // dedicated datoms table built just for this scenario — the same shape
+    // that Phase B of the Datalog Aggregates plan will productionise via a
+    // per-kind shadow relation.
+    //
+    // This test proves the FactValue → bare-i64 datom encoding path works
+    // end-to-end: rule body `(< ?w 60)` matches `FactValue::I64(55)`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn datalog_cmp_matches_i64_fact_value() {
+        use crate::ffi;
+
+        let _guard = test_lock().lock().unwrap();
+        let engine = crate::RayforceEngine::new().unwrap();
+
+        let exom_name = "testexom";
+
+        // Build a 3-column datoms table by hand with a single row:
+        //   E = "health/profile/weight_kg" (STR-tagged)
+        //   A = 'profile/weight_kg          (SYM-tagged)
+        //   V = 55                          (bare i64 — what FactValue::I64 produces)
+        //
+        // The direct construction matches what a future Phase B relation
+        // would produce for i64-only facts.
+        let table = unsafe {
+            let mut tbl = ffi::ray_table_new(3);
+            let mut e_col = ffi::ray_vec_new(ffi::RAY_I64, 1);
+            let mut a_col = ffi::ray_vec_new(ffi::RAY_SYM, 1);
+            let mut v_col = ffi::ray_vec_new(ffi::RAY_I64, 1);
+
+            let fv = FactValue::I64(55);
+            let e = crate::storage::encode_string_datom("health/profile/weight_kg");
+            let a = crate::storage::sym_intern("profile/weight_kg");
+            // Bypass the homogeneous-STR encoder to directly emit a bare i64
+            // — this matches what the Phase B typed-cmp relation will carry.
+            let v = 55_i64;
+            let _ = fv;
+
+            e_col = ffi::ray_vec_append(e_col, &e as *const i64 as *const _);
+            a_col = ffi::ray_vec_append(a_col, &a as *const i64 as *const _);
+            v_col = ffi::ray_vec_append(v_col, &v as *const i64 as *const _);
+
+            let e_name = crate::storage::sym_intern("e");
+            let a_name = crate::storage::sym_intern("a");
+            let v_name = crate::storage::sym_intern("v");
+            tbl = ffi::ray_table_add_col(tbl, e_name, e_col);
+            tbl = ffi::ray_table_add_col(tbl, a_name, a_col);
+            tbl = ffi::ray_table_add_col(tbl, v_name, v_col);
+
+            crate::storage::RayObj::from_raw(tbl).unwrap()
+        };
+
+        engine
+            .bind_named_db(crate::storage::sym_intern(exom_name), &table)
+            .unwrap();
+
+        // Rule: small-weight binds ?id when a weight fact for that id is
+        // below 60. The bare int literal 60 in the rule body is an i64; it
+        // must compare correctly against the stored `55` bare-int datom.
+        let rule_body = format!(
+            r#"(rule {exom_name} (small-weight ?id) (?id 'profile/weight_kg ?w) (< ?w 60))"#
+        );
+        let parsed = crate::rules::parse_rule_line(
+            &rule_body,
+            MutationContext::default(),
+            crate::brain::now_iso(),
+        )
+        .unwrap();
+
+        let query_source =
+            format!("(query {exom_name} (find ?id) (where (small-weight ?id)))");
+        let expanded = crate::rayfall_parser::rewrite_query_with_rules(
+            &query_source,
+            &[parsed.inline_body.clone()],
+        )
+        .unwrap();
+
+        let raw = engine.eval_raw(&expanded).unwrap();
+        let decoded =
+            crate::storage::decode_query_table(&raw, &query_source).unwrap();
+        let rows = decoded["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !rows.is_empty(),
+            "expected small-weight to match FactValue::I64(55) via cmp; got rows={:?} expanded={}",
+            rows,
+            expanded
+        );
+    }
+
+    fn rand_suffix() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
     }
 }

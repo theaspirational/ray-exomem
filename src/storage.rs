@@ -207,6 +207,38 @@ pub fn encode_symbol_datom(value: &str) -> i64 {
     datom::encode_sym(sym_id)
 }
 
+/// Encode a [`FactValue`] as the tagged datom that fills the shared
+/// `?fact ?attr ?value` slot in the datoms relation.
+///
+/// The datoms V column MUST be homogeneous: rayforce2's per-column type
+/// inference faults (or silently returns `error:type`) when queries scan a
+/// column that mixes tags in the same slot. We therefore STR-tag every
+/// variant here — numeric and symbol values render to their display form
+/// and are interned as strings alongside `Str` values. Typed numeric cmp
+/// / aggregation is routed through a SECOND dedicated relation (see Phase
+/// B of the Datalog Aggregates plan).
+///
+/// Callers that want typed cmp can construct a one-off datoms table with
+/// bare int I64 values (as the unit test `datalog_cmp_matches_i64_fact_value`
+/// does) as long as the V column is not mixed with other tags.
+pub fn encode_fact_value_datom(value: &crate::fact_value::FactValue) -> i64 {
+    use crate::fact_value::FactValue;
+    match value {
+        FactValue::I64(n) => encode_string_datom(&n.to_string()),
+        FactValue::Sym(s) => encode_string_datom(&s.sym),
+        FactValue::Str(s) => encode_string_datom(s),
+    }
+}
+
+/// Return the raw int payload if this is a [`FactValue::I64`], else `None`.
+/// Reserved for the Phase B typed-cmp relation.
+pub fn encode_fact_value_i64_datom(value: &crate::fact_value::FactValue) -> Option<i64> {
+    match value {
+        crate::fact_value::FactValue::I64(n) => Some(*n),
+        _ => None,
+    }
+}
+
 pub fn decode_datom_to_string(encoded: i64) -> Result<String> {
     let kind = datom::kind(encoded);
     if kind == datom::KIND_I64 {
@@ -539,6 +571,24 @@ fn push_datom_row_with_encoded_value(
     Ok(())
 }
 
+fn push_datom_row_fact_value(
+    e_col: &mut *mut ffi::ray_t,
+    a_col: &mut *mut ffi::ray_t,
+    v_col: &mut *mut ffi::ray_t,
+    entity: &str,
+    attribute: &str,
+    value: &crate::fact_value::FactValue,
+) -> Result<()> {
+    push_datom_row_with_encoded_value(
+        e_col,
+        a_col,
+        v_col,
+        entity,
+        attribute,
+        encode_fact_value_datom(value),
+    )
+}
+
 pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
     let facts = brain.current_facts();
     let txs = brain.current_transactions();
@@ -618,7 +668,7 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
 
         for fact in facts {
             if let Err(err) = (|| -> Result<()> {
-                push_datom_row(
+                push_datom_row_fact_value(
                     &mut e_col,
                     &mut a_col,
                     &mut v_col,
@@ -634,7 +684,7 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
                     system_schema::attrs::fact::PREDICATE,
                     encode_symbol_datom(&fact.predicate),
                 )?;
-                push_datom_row(
+                push_datom_row_fact_value(
                     &mut e_col,
                     &mut a_col,
                     &mut v_col,
@@ -1259,11 +1309,27 @@ fn decode_string_vec(s: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 pub fn build_fact_table(facts: &[Fact]) -> RayObj {
-    let mut b = TableBuilder::new(11);
+    use crate::fact_value::FactValue;
+    // Columns: fact_id, predicate, value (raw form), value_kind,
+    // created_at, created_by_tx, superseded_by_tx, revoked_by_tx, confidence,
+    // provenance, valid_from, valid_to.
+    let mut b = TableBuilder::new(12);
 
     let fact_ids: Vec<&str> = facts.iter().map(|f| f.fact_id.as_str()).collect();
     let predicates: Vec<&str> = facts.iter().map(|f| f.predicate.as_str()).collect();
-    let values: Vec<&str> = facts.iter().map(|f| f.value.as_str()).collect();
+    // Raw payload form — ints render as "55", syms as bare "active" (no
+    // leading quote), strings as themselves. Paired with `value_kind` so the
+    // reader can reconstruct the variant on reload.
+    let values_owned: Vec<String> = facts
+        .iter()
+        .map(|f| match &f.value {
+            FactValue::I64(n) => n.to_string(),
+            FactValue::Sym(s) => s.sym.clone(),
+            FactValue::Str(s) => s.clone(),
+        })
+        .collect();
+    let values: Vec<&str> = values_owned.iter().map(|s| s.as_str()).collect();
+    let value_kinds: Vec<&str> = facts.iter().map(|f| f.value.kind()).collect();
     let created_ats: Vec<&str> = facts.iter().map(|f| f.created_at.as_str()).collect();
     let created_by: Vec<i64> = facts.iter().map(|f| f.created_by_tx as i64).collect();
     let superseded: Vec<i64> = facts
@@ -1284,6 +1350,7 @@ pub fn build_fact_table(facts: &[Fact]) -> RayObj {
     b.add_sym_col("fact_id", &fact_ids);
     b.add_sym_col("predicate", &predicates);
     b.add_str_col("value", &values);
+    b.add_sym_col("value_kind", &value_kinds);
     b.add_str_col("created_at", &created_ats);
     b.add_i64_col("created_by_tx", &created_by, None);
     b.add_i64_col("superseded_by_tx", &superseded, Some(&superseded_nulls));
@@ -1297,27 +1364,49 @@ pub fn build_fact_table(facts: &[Fact]) -> RayObj {
 }
 
 pub fn load_facts(table: &RayObj) -> Result<Vec<Fact>> {
+    use crate::fact_value::FactValue;
+
     let tbl = table.as_ptr();
     let nrows = unsafe { ffi::ray_table_nrows(tbl) };
+    let ncols = unsafe { ffi::ray_table_ncols(tbl) };
 
     let fact_ids = read_sym_col(tbl, 0, nrows)?;
     let predicates = read_sym_col(tbl, 1, nrows)?;
     let values = read_str_col(tbl, 2, nrows);
-    let created_ats = read_str_col(tbl, 3, nrows);
-    let created_by = read_i64_col(tbl, 4, nrows);
-    let superseded = read_i64_nullable_col(tbl, 5, nrows);
-    let revoked = read_i64_nullable_col(tbl, 6, nrows);
-    let confidences = read_f64_col(tbl, 7, nrows);
-    let provenances = read_sym_col(tbl, 8, nrows)?;
-    let valid_froms = read_str_col(tbl, 9, nrows);
-    let valid_tos = read_sym_nullable_col(tbl, 10, nrows)?;
+    // `value_kind` was introduced alongside FactValue. Older splay caches
+    // (persisted before this refactor) do not include it — fall back to "str"
+    // for every row when the column is missing so existing on-disk data keeps
+    // loading without a rebuild.
+    let has_value_kind = ncols >= 12;
+    let value_kinds: Vec<String> = if has_value_kind {
+        read_sym_col(tbl, 3, nrows)?
+    } else {
+        (0..nrows as usize).map(|_| "str".to_string()).collect()
+    };
+    let kind_offset: i64 = if has_value_kind { 1 } else { 0 };
+    let created_ats = read_str_col(tbl, 3 + kind_offset, nrows);
+    let created_by = read_i64_col(tbl, 4 + kind_offset, nrows);
+    let superseded = read_i64_nullable_col(tbl, 5 + kind_offset, nrows);
+    let revoked = read_i64_nullable_col(tbl, 6 + kind_offset, nrows);
+    let confidences = read_f64_col(tbl, 7 + kind_offset, nrows);
+    let provenances = read_sym_col(tbl, 8 + kind_offset, nrows)?;
+    let valid_froms = read_str_col(tbl, 9 + kind_offset, nrows);
+    let valid_tos = read_sym_nullable_col(tbl, 10 + kind_offset, nrows)?;
 
     let mut facts = Vec::with_capacity(nrows as usize);
     for i in 0..nrows as usize {
+        let typed_value = match value_kinds[i].as_str() {
+            "i64" => values[i]
+                .parse::<i64>()
+                .map(FactValue::I64)
+                .unwrap_or_else(|_| FactValue::Str(values[i].clone())),
+            "sym" => FactValue::sym(values[i].clone()),
+            _ => FactValue::Str(values[i].clone()),
+        };
         facts.push(Fact {
             fact_id: fact_ids[i].clone(),
             predicate: predicates[i].clone(),
-            value: values[i].clone(),
+            value: typed_value,
             created_at: created_ats[i].clone(),
             created_by_tx: created_by[i] as u64,
             superseded_by_tx: superseded[i].map(|v| v as u64),
