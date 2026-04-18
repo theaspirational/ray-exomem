@@ -422,7 +422,9 @@ enum Commands {
     Assert {
         /// Predicate name (e.g. "sky-color").
         predicate: String,
-        /// Value (e.g. "blue").
+        /// Value (e.g. "blue"). Defaults to auto-typing (numeric strings like
+        /// "75" become i64; otherwise string). Override with --as-str /
+        /// --as-sym / --as-i64.
         value: String,
         /// Stable fact id for future updates/retractions. Defaults to the predicate name.
         #[arg(long)]
@@ -439,6 +441,15 @@ enum Commands {
         /// When this fact ceased being true (ISO 8601). Omit for open-ended.
         #[arg(long)]
         valid_to: Option<String>,
+        /// Force the value to be stored as a plain string (skip auto-typing).
+        #[arg(long, conflicts_with_all = ["as_sym", "as_i64"])]
+        as_str: bool,
+        /// Force the value to be stored as a symbol.
+        #[arg(long, conflicts_with_all = ["as_str", "as_i64"])]
+        as_sym: bool,
+        /// Force the value to be parsed as an i64 (fails if parse fails).
+        #[arg(long, conflicts_with_all = ["as_str", "as_sym"])]
+        as_i64: bool,
         /// Target exom.
         #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
@@ -1031,7 +1042,7 @@ fn assert_fact_json(
     headers: &[(&str, &str)],
     fact_id: &str,
     predicate: &str,
-    value: &str,
+    value: serde_json::Value,
     confidence: f64,
     provenance: &str,
     valid_from: Option<&str>,
@@ -1097,7 +1108,16 @@ fn replace_fact_json(
         }
     }
     assert_fact_json(
-        c, exom, headers, fact_id, predicate, value, 1.0, provenance, valid_from, valid_to,
+        c,
+        exom,
+        headers,
+        fact_id,
+        predicate,
+        serde_json::Value::String(value.to_string()),
+        1.0,
+        provenance,
+        valid_from,
+        valid_to,
     )
 }
 
@@ -1720,6 +1740,9 @@ fn main() {
             source,
             valid_from,
             valid_to,
+            as_str,
+            as_sym,
+            as_i64,
             exom,
             addr,
             actor,
@@ -1738,6 +1761,26 @@ fn main() {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
+            // Pick the FactValue variant from --as-* flags, otherwise
+            // auto-detect (numeric strings → i64, else string).
+            let fv = if as_i64 {
+                match value.parse::<i64>() {
+                    Ok(n) => ray_exomem::fact_value::FactValue::I64(n),
+                    Err(e) => {
+                        eprintln!("error: --as-i64 requires an integer value: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else if as_sym {
+                ray_exomem::fact_value::FactValue::sym(value.clone())
+            } else if as_str {
+                ray_exomem::fact_value::FactValue::Str(value.clone())
+            } else {
+                ray_exomem::fact_value::FactValue::auto(&value)
+            };
+            let value_json = serde_json::to_value(&fv).unwrap_or_else(|_| {
+                serde_json::Value::String(fv.display())
+            });
             if uses_structured_assert {
                 match assert_fact_json(
                     &c,
@@ -1745,7 +1788,7 @@ fn main() {
                     &h,
                     &fact_id,
                     &predicate,
-                    &value,
+                    value_json,
                     confidence_value,
                     &provenance,
                     valid_from.as_deref(),
@@ -1763,7 +1806,7 @@ fn main() {
                     exom,
                     fact_id.replace('"', "\\\""),
                     predicate.replace('"', "\\\""),
-                    value.replace('"', "\\\""),
+                    fv.display().replace('"', "\\\""),
                 );
                 match c.post_text_with_headers("/api/actions/eval", &ray, &h) {
                     Ok(body) => println!("{}", body),
