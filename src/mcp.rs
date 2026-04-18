@@ -381,6 +381,17 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
             message: e.to_string(),
         })?;
 
+    if let Err(e) = crate::server::bind_typed_facts_for_exom(
+        &state.engine,
+        &exoms,
+        &expanded.exom_name,
+    ) {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("failed to bind typed facts: {e}"),
+        });
+    }
+
     match state.engine.eval_raw(&expanded.expanded_query) {
         Ok(raw) => {
             let output =

@@ -60,6 +60,10 @@ use crate::{
 pub struct ExomState {
     pub brain: Brain,
     pub datoms: RayObj,
+    /// Per-type fact sub-tables. Rebound to the fixed env names
+    /// `facts_i64` / `facts_str` / `facts_sym` immediately before each query
+    /// so rule bodies can use `(facts_i64 ?e ?a ?v)` with live, typed values.
+    pub typed_facts: storage::TypedFactTables,
     pub rules: Vec<ParsedRule>,
     pub exom_disk: Option<PathBuf>,
 }
@@ -137,6 +141,7 @@ impl AppState {
                     ExomState {
                         brain: Brain::new(),
                         datoms: storage::build_datoms_table(&Brain::new())?,
+                        typed_facts: storage::build_typed_fact_tables(&Brain::new())?,
                         rules: Vec::new(),
                         exom_disk: None,
                     },
@@ -275,6 +280,7 @@ async fn load_exom_preferring_db(
                 }
             }
             let datoms = storage::build_datoms_table(&brain)?;
+            let typed_facts = storage::build_typed_fact_tables(&brain)?;
             let rules_p = exom_disk.join("rules.ray");
             let rules = if rules_p.exists() {
                 let src = std::fs::read_to_string(&rules_p)?;
@@ -296,6 +302,7 @@ async fn load_exom_preferring_db(
             return Ok(ExomState {
                 brain,
                 datoms,
+                typed_facts,
                 rules,
                 exom_disk: Some(exom_disk.to_path_buf()),
             });
@@ -602,6 +609,7 @@ pub fn load_exom_from_tree_path(
         }
     }
     let datoms = storage::build_datoms_table(&brain)?;
+    let typed_facts = storage::build_typed_fact_tables(&brain)?;
     let rules_p = exom_disk.join("rules.ray");
     let rules = if rules_p.exists() {
         let src = std::fs::read_to_string(&rules_p)?;
@@ -623,6 +631,7 @@ pub fn load_exom_from_tree_path(
     Ok(ExomState {
         brain,
         datoms,
+        typed_facts,
         rules,
         exom_disk: Some(exom_disk.to_path_buf()),
     })
@@ -643,6 +652,7 @@ fn refresh_exom_binding(
         .get_mut(exom_name)
         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
     es.datoms = storage::build_datoms_table(&es.brain)?;
+    es.typed_facts = storage::build_typed_fact_tables(&es.brain)?;
     state
         .engine
         .bind_named_db(storage::sym_intern(exom_name), &es.datoms)?;
@@ -662,6 +672,38 @@ fn refresh_exom_binding(
         let ontology = system_schema::build_exom_ontology(exom_name, &es.brain, &es.rules);
         let _ = system_schema::save_exom_ontology(&schema_p, &ontology);
     }
+    Ok(())
+}
+
+/// Bind the executing exom's per-type fact sub-tables under the shared env
+/// names (`facts_i64` / `facts_str` / `facts_sym`) right before running a
+/// query. Rayforce2's auto-EDB hook (`ray_query_fn`) then picks them up for
+/// any rule body that references `(facts_i64 ?e ?a ?v)` etc.
+///
+/// The bindings are per-process (globally shared in the runtime env), so
+/// concurrent queries against different exoms race unless serialized. The
+/// existing `state.exoms` mutex already serializes the mutation path;
+/// callers MUST hold `state.exoms.lock()` before invoking this helper.
+pub(crate) fn bind_typed_facts_for_exom(
+    engine: &crate::backend::RayforceEngine,
+    exoms: &HashMap<String, ExomState>,
+    exom_name: &str,
+) -> anyhow::Result<()> {
+    let es = exoms
+        .get(exom_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
+    engine.bind_named_db(
+        storage::sym_intern(storage::FACTS_I64_ENV),
+        &es.typed_facts.facts_i64,
+    )?;
+    engine.bind_named_db(
+        storage::sym_intern(storage::FACTS_STR_ENV),
+        &es.typed_facts.facts_str,
+    )?;
+    engine.bind_named_db(
+        storage::sym_intern(storage::FACTS_SYM_ENV),
+        &es.typed_facts.facts_sym,
+    )?;
     Ok(())
 }
 
@@ -1749,6 +1791,7 @@ fn eval_query_form(
     query: &CanonicalQuery,
 ) -> anyhow::Result<(String, Option<serde_json::Value>)> {
     let expanded = expand_canonical_query(exoms, engine, query.emit(), query)?;
+    bind_typed_facts_for_exom(engine, exoms, &expanded.exom_name)?;
     let raw = engine.eval_raw(&expanded.expanded_query)?;
     if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE {
         let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
@@ -1772,6 +1815,7 @@ fn query_relation_rows(
     );
     let query = lower_query_request(&source, None, "schema relation sample")?;
     let expanded = expand_canonical_query(exoms, engine, source, &query)?;
+    bind_typed_facts_for_exom(engine, exoms, &expanded.exom_name)?;
     let raw = engine.eval_raw(&expanded.expanded_query)?;
     if unsafe { ffi::ray_obj_type(raw.as_ptr()) } != ffi::RAY_TABLE {
         return Ok(Vec::new());
@@ -1854,6 +1898,13 @@ async fn api_query_post(
                 .into_response();
         }
     };
+    if let Err(e) = bind_typed_facts_for_exom(&state.engine, &exoms, &expanded.exom_name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to bind typed facts: {e}")})),
+        )
+            .into_response();
+    }
     match state.engine.eval_raw(&expanded.expanded_query) {
         Ok(raw) => {
             let (output, decoded) = if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE
@@ -3466,6 +3517,12 @@ async fn api_factory_reset(
         brain: Brain::new(),
         datoms: match storage::build_datoms_table(&Brain::new()) {
             Ok(d) => d,
+            Err(e) => {
+                return ApiError::new("error", e.to_string()).into_response();
+            }
+        },
+        typed_facts: match storage::build_typed_fact_tables(&Brain::new()) {
+            Ok(t) => t,
             Err(e) => {
                 return ApiError::new("error", e.to_string()).into_response();
             }
