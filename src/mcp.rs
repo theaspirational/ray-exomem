@@ -429,7 +429,25 @@ async fn tool_assert_fact(
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let predicate = require_str(args, "predicate")?;
-    let value = require_str(args, "value")?;
+    // MCP accepts typed JSON values (20 / "text" / {"$sym": "foo"}) plus bare
+    // strings for legacy clients. Bare strings run through `FactValue::auto`
+    // so numeric input like "75" is stored as I64, enabling datalog cmp rules
+    // over the fact.
+    let value_raw = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
+    let value = match &value_raw {
+        serde_json::Value::Null => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "missing required argument 'value'".into(),
+            });
+        }
+        serde_json::Value::String(s) => crate::fact_value::FactValue::auto(s),
+        other => serde_json::from_value::<crate::fact_value::FactValue>(other.clone())
+            .map_err(|e| JsonRpcError {
+                code: -32602,
+                message: format!("invalid 'value': {e}"),
+            })?,
+    };
     let fact_id = get_str(args, "fact_id").unwrap_or(predicate).to_string();
 
     let ctx = crate::context::MutationContext {

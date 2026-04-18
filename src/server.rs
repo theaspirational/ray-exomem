@@ -1507,7 +1507,11 @@ struct AssertFactBody {
     branch: Option<String>,
     fact_id: Option<String>,
     predicate: String,
-    value: String,
+    /// Typed fact value. Accepts JSON:
+    ///   * `20` → `FactValue::I64`
+    ///   * `"Basil"` → `FactValue::Str`
+    ///   * `{"$sym": "active"}` → `FactValue::Sym`
+    value: crate::fact_value::FactValue,
     #[serde(default = "default_confidence")]
     confidence: f64,
     #[serde(default)]
@@ -1585,7 +1589,7 @@ async fn api_assert_fact(
         ex.brain.assert_fact(
             &fact_id,
             &predicate,
-            &value,
+            value.clone(),
             confidence,
             &provenance,
             valid_from.as_deref(),
@@ -1604,9 +1608,13 @@ async fn api_assert_fact(
                 )
             {
                 let tree_root = server_tree_root(&state);
-                if let Err(e) =
-                    brain::mirror_session_meta_to_disk(&tree_root, &exom_path, &predicate, &value)
-                {
+                let display_value = value.display();
+                if let Err(e) = brain::mirror_session_meta_to_disk(
+                    &tree_root,
+                    &exom_path,
+                    &predicate,
+                    &display_value,
+                ) {
                     eprintln!(
                         "[ray-exomem] mirror_session_meta_to_disk failed (best-effort): {}",
                         e
@@ -3093,7 +3101,7 @@ async fn api_export(
             exom_slash,
             f.fact_id.replace('"', "\\\""),
             f.predicate.replace('"', "\\\""),
-            f.value.replace('"', "\\\""),
+            f.value.display().replace('"', "\\\""),
         ));
         let valid_to_str = f.valid_to.as_deref().unwrap_or("inf");
         out.push_str(&format!(" ;; @valid[{}, {}]", f.valid_from, valid_to_str));
@@ -3535,7 +3543,9 @@ async fn api_schema(
                 entry.push(vec![
                     serde_json::Value::String(fact.fact_id.clone()),
                     serde_json::Value::String(fact.predicate.clone()),
-                    serde_json::Value::String(fact.value.clone()),
+                    serde_json::to_value(&fact.value).unwrap_or_else(|_| {
+                        serde_json::Value::String(fact.value.display())
+                    }),
                     serde_json::json!(fact.confidence),
                     serde_json::json!({
                         "valid_from": fact.valid_from,
