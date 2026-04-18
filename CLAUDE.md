@@ -35,6 +35,32 @@ ray-exomem stop
 
 Use `ray-exomem serve --bind 127.0.0.1:9780` for foreground debugging.
 
+## Local dev with Cloudflare tunnel
+
+Developer runs local daemon + Cloudflare tunnel, reached at **https://devmem.trydev.app/ray-exomem/**. Assume this is the live test surface, not a bare `localhost`.
+
+Components:
+
+- **Postgres**: container `ddd-postgres-1` (`postgres:17-alpine`, port 5432). ray-exomem uses role `ray_exomem` / db `ray_exomem`. Superuser for admin: `rapidcrm`.
+- **`.env` at repo root** (gitignored) holds `GOOGLE_CLIENT_ID`, `ALLOWED_DOMAINS`, `DATABASE_URL`. No dotenv loader in Rust — export with `set -a; source .env; set +a` before launching.
+- **Build**: Postgres backend is feature-gated → `cargo build --release --features postgres`.
+- **Daemon** (foreground, backgrounded via shell):
+  ```bash
+  set -a; source .env; set +a
+  ray-exomem serve --bind 127.0.0.1:9780 \
+    --auth-provider google --google-client-id "$GOOGLE_CLIENT_ID" \
+    --allowed-domains "$ALLOWED_DOMAINS" --database-url "$DATABASE_URL"
+  ```
+  Note: the `daemon` subcommand lacks the auth flags, so local dev uses `serve`.
+- **Cloudflare tunnel**: named `devmem` (id `1bc8be11-197d-4f57-8115-4af051fa626a`), config at `~/.cloudflared/devmem.yml`, ingress → `http://localhost:9780`. Run with `cloudflared --config ~/.cloudflared/devmem.yml tunnel run devmem`. The older `ridtech` tunnel is unrelated.
+- **Google OAuth console**: `https://devmem.trydev.app` must be listed under *Authorized JavaScript origins* for the client ID. GSI id_token flow → no redirect URI needed.
+
+Gotchas specific to this setup:
+
+- `cloudflared tunnel route dns <name> <host>` can silently target whichever tunnel appears first in `~/.cloudflared/config.yml`. Always pass `--config ~/.cloudflared/devmem.yml` (and `--overwrite-dns` when re-routing) so the CNAME points at the intended tunnel.
+- Fresh Postgres means the default `main` exom doesn't exist yet, so `/api/status` (no `?exom=`) returns 500 `exom not found` until one is created. Use `?exom=work/main` or any existing exom to smoke-test.
+- When changing auth/postgres flags, fully stop the daemon (`ray-exomem stop`) before restarting — the new `serve` invocation will not take over a daemonised instance bound to the same port.
+
 ## Important gotchas
 
 - Use `ln -f`, not `cp`, when deploying the binary on macOS. `com.apple.provenance` can make copied binaries hang silently.
