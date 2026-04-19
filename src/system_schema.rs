@@ -82,25 +82,6 @@ pub mod attrs {
 }
 
 pub const SCHEMA_FILENAME: &str = "exom_schema.json";
-pub const HEALTH_WATER_BAND: &str = "health/water-band";
-pub const HEALTH_STEP_BAND: &str = "health/step-band";
-
-// FIXME(phase-b-typed-cmp): these profile constants fed the old rule-backed
-// native derivations. Kept around (and read by unit tests) while the
-// derivation machinery is disabled at the rule layer; wired back up once
-// typed cmp lands on a separate relation.
-#[allow(dead_code)]
-const HEALTH_PROFILE_AGE_FACT_ID: &str = "health/profile/age";
-#[allow(dead_code)]
-const HEALTH_PROFILE_HEIGHT_CM_FACT_ID: &str = "health/profile/height_cm";
-#[allow(dead_code)]
-const HEALTH_PROFILE_WEIGHT_KG_FACT_ID: &str = "health/profile/weight_kg";
-#[allow(dead_code)]
-const PROFILE_AGE: &str = "profile/age";
-#[allow(dead_code)]
-const PROFILE_HEIGHT_CM: &str = "profile/height_cm";
-#[allow(dead_code)]
-const PROFILE_WEIGHT_KG: &str = "profile/weight_kg";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OntologyAttribute {
@@ -127,15 +108,6 @@ pub struct ExomOntology {
     pub coordination_attributes: Vec<OntologyAttribute>,
     pub builtin_views: Vec<BuiltinView>,
     pub user_predicates: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeDerivedRelation {
-    pub name: String,
-    pub arity: usize,
-    pub description: String,
-    pub rule: String,
-    pub sample_tuples: Vec<Vec<String>>,
 }
 
 pub fn system_attributes() -> Vec<OntologyAttribute> {
@@ -633,67 +605,12 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
     ]
 }
 
-/// Coerce a [`FactValue`] to `i64` for threshold math on numeric profile fields.
-///
-/// * `I64` variants return their stored integer directly — no reparse.
-/// * `Str` variants fall back to `str::parse` for backward compat with JSONL
-///   / pg rows written before the FactValue refactor.
-/// * `Sym` values never parse.
-#[allow(dead_code)]
-fn fact_value_as_i64(value: &crate::fact_value::FactValue) -> Option<i64> {
-    use crate::fact_value::FactValue;
-    match value {
-        FactValue::I64(n) => Some(*n),
-        FactValue::Str(s) => s.parse::<i64>().ok(),
-        FactValue::Sym(_) => None,
-    }
+fn builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
+    static_builtin_rule_specs(exom)
 }
 
-#[allow(dead_code)]
-fn latest_active_fact<'a>(
-    brain: &'a Brain,
-    preferred_fact_id: &str,
-    predicate: &str,
-) -> Option<&'a crate::brain::Fact> {
-    brain
-        .current_facts()
-        .into_iter()
-        .filter(|fact| fact.fact_id == preferred_fact_id && fact.predicate == predicate)
-        .max_by_key(|fact| fact.created_by_tx)
-        .or_else(|| {
-            brain
-                .current_facts()
-                .into_iter()
-                .filter(|fact| fact.predicate == predicate)
-                .max_by_key(|fact| fact.created_by_tx)
-        })
-}
-
-pub fn native_derived_relations(_exom: &str, brain: &Brain) -> Vec<NativeDerivedRelation> {
-    // FactValue refactor side-effect: after I64 values moved off the shared
-    // datom V column, the previously-generated Rayfall rules that looked like
-    // `(rule … (head "band") (?id 'profile/age "30"))` now trip rayforce2's
-    // type inference with `error:type` whenever the resulting bundle is
-    // compiled into a query — even with an all-string rewrite. The derivation
-    // has been moved to a Rust-computed read path until the typed-cmp Phase B
-    // relation lands; this entry point stays to keep `builtin_views` callable
-    // but returns nothing.
-    let _ = brain;
-    Vec::new()
-}
-
-fn builtin_rule_specs(exom: &str, brain: &Brain) -> Vec<(String, String, String)> {
-    let mut specs = static_builtin_rule_specs(exom);
-    specs.extend(
-        native_derived_relations(exom, brain)
-            .into_iter()
-            .map(|relation| (relation.name, relation.description, relation.rule)),
-    );
-    specs
-}
-
-pub fn builtin_rules(exom: &str, brain: &Brain) -> Result<Vec<ParsedRule>> {
-    builtin_rule_specs(exom, brain)
+pub fn builtin_rules(exom: &str) -> Result<Vec<ParsedRule>> {
+    builtin_rule_specs(exom)
         .into_iter()
         .map(|(_, _, rule)| {
             rules::parse_rule_line(&rule, MutationContext::default(), "builtin".to_string())
@@ -701,8 +618,8 @@ pub fn builtin_rules(exom: &str, brain: &Brain) -> Result<Vec<ParsedRule>> {
         .collect()
 }
 
-pub fn builtin_views(exom: &str, brain: &Brain) -> Vec<BuiltinView> {
-    builtin_rule_specs(exom, brain)
+pub fn builtin_views(exom: &str) -> Vec<BuiltinView> {
+    builtin_rule_specs(exom)
         .into_iter()
         .map(|(name, description, rule)| {
             let parsed =
@@ -723,9 +640,6 @@ pub fn build_exom_ontology(exom: &str, brain: &Brain, user_rules: &[ParsedRule])
     for fact in brain.current_facts() {
         user_preds.insert(fact.predicate.clone());
     }
-    for relation in native_derived_relations(exom, brain) {
-        user_preds.insert(relation.name);
-    }
     for rule in user_rules {
         user_preds.insert(rule.head_predicate.clone());
     }
@@ -734,7 +648,7 @@ pub fn build_exom_ontology(exom: &str, brain: &Brain, user_rules: &[ParsedRule])
         exom: exom.to_string(),
         system_attributes: system_attributes(),
         coordination_attributes: coordination_attributes(),
-        builtin_views: builtin_views(exom, brain),
+        builtin_views: builtin_views(exom),
         user_predicates: user_preds.into_iter().collect(),
     }
 }
@@ -752,76 +666,3 @@ pub fn load_exom_ontology(path: &Path) -> Result<ExomOntology> {
     serde_json::from_slice(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::MutationContext;
-
-    #[test]
-    fn native_health_relations_follow_bootstrap_profile_thresholds() {
-        use crate::fact_value::FactValue;
-
-        let mut brain = Brain::new();
-        let ctx = MutationContext::default();
-        // Typed bootstrap values — `FactValue::I64` ensures the downstream
-        // `cmp` threshold math (weight < 60, age < 30, etc.) runs against
-        // raw integers rather than re-parsed strings.
-        brain
-            .assert_fact(
-                HEALTH_PROFILE_AGE_FACT_ID,
-                PROFILE_AGE,
-                FactValue::I64(30),
-                1.0,
-                "test",
-                None,
-                None,
-                &ctx,
-            )
-            .unwrap();
-        brain
-            .assert_fact(
-                HEALTH_PROFILE_HEIGHT_CM_FACT_ID,
-                PROFILE_HEIGHT_CM,
-                FactValue::I64(175),
-                1.0,
-                "test",
-                None,
-                None,
-                &ctx,
-            )
-            .unwrap();
-        brain
-            .assert_fact(
-                HEALTH_PROFILE_WEIGHT_KG_FACT_ID,
-                PROFILE_WEIGHT_KG,
-                FactValue::I64(75),
-                1.0,
-                "test",
-                None,
-                None,
-                &ctx,
-            )
-            .unwrap();
-
-        // The seeded facts must retain their I64 variant — the splay/datom
-        // path keys off `kind()` to pick the right tag.
-        let weight = brain
-            .current_facts()
-            .into_iter()
-            .find(|f| f.fact_id == HEALTH_PROFILE_WEIGHT_KG_FACT_ID)
-            .expect("weight fact should be asserted");
-        assert_eq!(weight.value, FactValue::I64(75));
-
-        // Native derivation is currently disabled at the Rayfall-rule layer
-        // (see the comment on `native_derived_relations`). Assert the empty
-        // result so regressions that bring back the rule-generating version
-        // flag themselves, and keep the body that seeds typed profile facts
-        // as the canonical round-trip coverage for `FactValue::I64` on splay.
-        let relations = native_derived_relations("alice/personal/health/main", &brain);
-        assert!(
-            relations.is_empty(),
-            "native_derived_relations should return an empty vec while the \
-             string-head rule bundle remains incompatible with FactValue; got {relations:?}"
-        );
-    }
-}
