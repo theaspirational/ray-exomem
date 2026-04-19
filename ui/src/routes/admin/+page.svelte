@@ -10,14 +10,15 @@
 		UserCheck,
 		Plus,
 		ShieldCheck,
-		ShieldOff
+		ShieldOff,
+		AlertTriangle
 	} from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import Input from '$lib/components/ui/input/input.svelte';
 	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import { auth } from '$lib/auth.svelte';
-	import { getExomemBaseUrl } from '$lib/exomem.svelte';
+	import { getExomemBaseUrl, factoryReset } from '$lib/exomem.svelte';
 
 	function authApiBase(): string {
 		return getExomemBaseUrl().replace('/ray-exomem', '');
@@ -31,7 +32,8 @@
 		{ id: 'api-keys', label: 'API Keys' },
 		{ id: 'shares', label: 'Shares' },
 		{ id: 'domains', label: 'Domains' },
-		{ id: 'admins', label: 'Admins', topAdminOnly: true }
+		{ id: 'admins', label: 'Admins', topAdminOnly: true },
+		{ id: 'system', label: 'System', topAdminOnly: true }
 	];
 
 	const visibleTabs = $derived(tabs.filter((t) => !t.topAdminOnly || auth.isTopAdmin));
@@ -405,6 +407,50 @@
 			toast.error('Failed to revoke admin');
 		} finally {
 			adminRevoking = null;
+		}
+	}
+
+	// --- System / factory-reset ---
+	const FACTORY_RESET_PHRASE = 'reset';
+	let factoryResetArmed = $state(false);
+	let factoryResetConfirm = $state('');
+	let factoryResetRunning = $state(false);
+	let factoryResetError = $state<string | null>(null);
+	let factoryResetResult = $state<{ removed_exoms: string[] } | null>(null);
+
+	const factoryResetReady = $derived(
+		factoryResetConfirm.trim().toLowerCase() === FACTORY_RESET_PHRASE
+	);
+
+	function armFactoryReset() {
+		factoryResetArmed = true;
+		factoryResetConfirm = '';
+		factoryResetError = null;
+		factoryResetResult = null;
+	}
+
+	function cancelFactoryReset() {
+		factoryResetArmed = false;
+		factoryResetConfirm = '';
+		factoryResetError = null;
+	}
+
+	async function runFactoryReset() {
+		if (!factoryResetReady || factoryResetRunning) return;
+		factoryResetRunning = true;
+		factoryResetError = null;
+		try {
+			const res = await factoryReset();
+			factoryResetResult = { removed_exoms: res.removed_exoms ?? [] };
+			factoryResetArmed = false;
+			factoryResetConfirm = '';
+			toast.success(`Factory reset complete (${res.removed_exoms?.length ?? 0} exoms removed)`);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			factoryResetError = msg;
+			toast.error(msg);
+		} finally {
+			factoryResetRunning = false;
 		}
 	}
 
@@ -877,6 +923,89 @@
 							{/each}
 						</div>
 					{/if}
+				</div>
+			</Tabs.Content>
+		{/if}
+
+		<!-- System Tab (top-admin only) -->
+		{#if auth.isTopAdmin}
+			<Tabs.Content value="system" class="pt-4">
+				<div class="space-y-6">
+					<div class="space-y-3 rounded-md border border-red-900/50 bg-red-950/20 p-4">
+						<div class="flex items-center gap-2">
+							<AlertTriangle class="size-4 text-red-400" />
+							<h2 class="text-sm font-semibold text-zinc-100">Factory reset</h2>
+						</div>
+						<p class="text-sm text-zinc-400">
+							Wipes every exom, fact, rule, and transaction across the entire server. Only the
+							default <span class="font-mono">main</span> exom remains, empty. This cannot be undone.
+						</p>
+
+						{#if factoryResetResult}
+							<div
+								class="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-sm text-zinc-300"
+							>
+								<p>
+									Factory reset complete. Removed
+									<span class="font-mono text-zinc-100"
+										>{factoryResetResult.removed_exoms.length}</span
+									>
+									exom{factoryResetResult.removed_exoms.length === 1 ? '' : 's'}.
+								</p>
+								<p class="mt-1 text-xs text-zinc-500">Reload the page to refresh UI state.</p>
+							</div>
+						{/if}
+
+						{#if factoryResetError}
+							<p class="text-sm text-red-400">{factoryResetError}</p>
+						{/if}
+
+						{#if !factoryResetArmed}
+							<div>
+								<Button variant="destructive" size="sm" onclick={armFactoryReset}>
+									<AlertTriangle class="size-3.5" />
+									Factory reset
+								</Button>
+							</div>
+						{:else}
+							<div class="space-y-3">
+								<p class="text-xs text-zinc-400">
+									Type <span class="font-mono text-zinc-200">{FACTORY_RESET_PHRASE}</span> to
+									confirm.
+								</p>
+								<div class="flex items-center gap-2">
+									<Input
+										bind:value={factoryResetConfirm}
+										placeholder={FACTORY_RESET_PHRASE}
+										disabled={factoryResetRunning}
+										autocomplete="off"
+										class="max-w-xs border-zinc-700 bg-zinc-950 text-sm"
+									/>
+									<Button
+										variant="destructive"
+										size="sm"
+										disabled={!factoryResetReady || factoryResetRunning}
+										onclick={runFactoryReset}
+									>
+										{#if factoryResetRunning}
+											<Loader2 class="size-3.5 animate-spin" />
+										{:else}
+											<Trash2 class="size-3.5" />
+										{/if}
+										Yes, wipe everything
+									</Button>
+									<Button
+										variant="ghost"
+										size="sm"
+										disabled={factoryResetRunning}
+										onclick={cancelFactoryReset}
+									>
+										Cancel
+									</Button>
+								</div>
+							</div>
+						{/if}
+					</div>
 				</div>
 			</Tabs.Content>
 		{/if}
