@@ -244,39 +244,96 @@ fn work_example_bootstrap_facts() -> &'static [BootstrapFactSpec] {
     ]
 }
 
-fn health_bootstrap_rules(_exom: &str) -> Vec<String> {
-    // Bootstrap rule set intentionally left empty after Task T2.
+fn health_bootstrap_rules(exom: &str) -> Vec<String> {
+    // Plan B2 + B3 declarative health-band rules, rewritten against the
+    // T2 per-type splay tables (`facts_i64`). With rayforce2 commit
+    // 862846e (feature/datalog-aggregates) shipping typed head constants
+    // and STR-to-SYM body-constant interning, the plan's rule shape
+    // `(health/water-band "small") :- ...` is now directly expressible.
     //
-    // History:
-    //   * Before T2 the onboarding seeded six `(rule {exom}
-    //     (health/recommended-water-ml "X") (health/water-band "Y"))`
-    //     style rules. They tripped rayforce2's rule parser (string
-    //     head constants are not accepted) and the ontology emission
-    //     layer as soon as the UI tried to resolve them.
+    // Two invariants enforced here:
     //
-    //   * T2 introduced the per-type splay tables `facts_i64`,
-    //     `facts_str`, `facts_sym` so live numeric cmp (`(< ?w 60)`)
-    //     works inside Datalog rules. The declarative water-band /
-    //     step-band derivations are expressible as Datalog rules over
-    //     `facts_i64` — but the only compatible rule shape is a
-    //     VARIABLE-head rule joined against a seeded auxiliary EDB
-    //     (see `tests/typed_facts_e2e.rs::water_band_rules`). Shipping
-    //     such an EDB as part of bootstrap requires binding it in the
-    //     shared env per-query (the way `facts_i64` is bound), plus a
-    //     per-exom backing table. That plumbing is out of scope for
-    //     this commit.
+    // 1. Rule ORDER matters. rayforce2 commits an IDB's column types on
+    //    the first rule that adds rows to it. A rec rule that
+    //    references `(health/step-band "medium")` in its body, but is
+    //    declared before the step-band derivation rules, pins the
+    //    step-band IDB to default (RAY_I64) — later RAY_SYM-headed
+    //    step-band rules produce spurious cross-rule rows ("medium"
+    //    leaks into the "high" slot). Derive bands FIRST, compose rec
+    //    rules on TOP.
     //
-    //   * Constant-head rules (e.g. `(health/water-band 'medium) ...`)
-    //     remain BROKEN upstream: rayforce2's `dl_project` drops the
-    //     constant column entirely, and the surrounding heap-reuse
-    //     code can surface as memory corruption on the next IDB
-    //     materialization. Tracked separately.
+    // 2. The plan's "medium" rule uses `(not (health/water-band
+    //    "small")) (not (health/water-band "large"))` to express the
+    //    complement. That is not stratification-safe in rayforce2: the
+    //    medium rule writes the same predicate it negates (same head
+    //    `health/water-band`), so the stratifier cannot place medium in
+    //    a strictly higher stratum. We replace the negations with their
+    //    positive-body equivalents:
     //
-    // Until the auxiliary-table binding lands, we ship the health exom
-    // with bootstrap FACTS only (see `health_bootstrap_facts`) and no
-    // derived rules. Users can add their own rules via `/api/actions/
-    // eval` once they understand the constraints above.
-    Vec::new()
+    //      NOT (w<60 AND h<170) == (w>=60) OR (h>=170)
+    //      NOT (w>=85 OR h>=185) == (w<85) AND (h<185)
+    //
+    //    Joined: medium ← ((w>=60) OR (h>=170)) AND (w<85) AND (h<185).
+    //    The disjunction lowers to two separate rules (standard Datalog
+    //    idiom). Semantics identical to the plan; no negation needed.
+    //
+    // Both invariants are exercised end-to-end by the `plan_verbatim_*`
+    // tests in `tests/typed_facts_e2e.rs`.
+    vec![
+        // water-band small: w < 60 AND h < 170
+        format!(
+            r#"(rule {exom} (health/water-band "small") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (< ?w 60) (< ?h 170))"#
+        ),
+        // water-band large: w >= 85
+        format!(
+            r#"(rule {exom} (health/water-band "large") (facts_i64 ?w_id 'profile/weight_kg ?w) (>= ?w 85))"#
+        ),
+        // water-band large: h >= 185
+        format!(
+            r#"(rule {exom} (health/water-band "large") (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?h 185))"#
+        ),
+        // water-band medium: w >= 60 AND w < 85 AND h < 185
+        format!(
+            r#"(rule {exom} (health/water-band "medium") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?w 60) (< ?w 85) (< ?h 185))"#
+        ),
+        // water-band medium: h >= 170 AND w < 85 AND h < 185
+        format!(
+            r#"(rule {exom} (health/water-band "medium") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?h 170) (< ?w 85) (< ?h 185))"#
+        ),
+        // step-band high: age < 30
+        format!(
+            r#"(rule {exom} (health/step-band "high") (facts_i64 ?id 'profile/age ?a) (< ?a 30))"#
+        ),
+        // step-band medium: 30 <= age < 50
+        format!(
+            r#"(rule {exom} (health/step-band "medium") (facts_i64 ?id 'profile/age ?a) (>= ?a 30) (< ?a 50))"#
+        ),
+        // step-band gentle: age >= 50
+        format!(
+            r#"(rule {exom} (health/step-band "gentle") (facts_i64 ?id 'profile/age ?a) (>= ?a 50))"#
+        ),
+        // Composable recommended-* rules (band → recommendation) —
+        // declared AFTER band rules so the band IDBs exist with SYM
+        // column types before these rec rules reference them.
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "2000") (health/water-band "small"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "2500") (health/water-band "medium"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "3000") (health/water-band "large"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "10000") (health/step-band "high"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "9000") (health/step-band "medium"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "7500") (health/step-band "gentle"))"#
+        ),
+    ]
 }
 
 fn exom_is_bootstrapped(es: &crate::server::ExomState) -> bool {
