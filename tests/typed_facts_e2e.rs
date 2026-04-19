@@ -151,10 +151,12 @@ fn query_first_col(
             e, expanded, inline_bodies
         );
     });
-    // The datalog engine internally converts all cells to bare i64. A
-    // column whose rule body bound it to a SYM EDB column (here, the
-    // `band_id` column of water_band_codes) comes back as raw intern
-    // IDs. Resolve them via the global sym table before returning.
+    // The datalog engine returns columns with real rayforce types. For
+    // RAY_SYM columns (e.g. rule-head constant `(health/water-band "medium")`
+    // produces a RAY_SYM column of the interned "medium" id), use
+    // `ray_vec_get_sym_id` and resolve via the global sym table. For
+    // RAY_I64 columns (e.g. integers or datom-tagged ids), fall back to
+    // `ray_vec_get_i64` and attempt `sym_lookup` for datom-tagged ids.
     let mut out = Vec::new();
     unsafe {
         let tbl = raw.as_ptr();
@@ -162,15 +164,27 @@ fn query_first_col(
         let nrows = ray_exomem::ffi::ray_table_nrows(tbl);
         if ncols > 0 {
             let col = ray_exomem::ffi::ray_table_get_col_idx(tbl, 0);
+            let col_type = ray_exomem::ffi::ray_obj_type(col);
             for r in 0..nrows {
-                let v = ray_exomem::ffi::ray_vec_get_i64(col, r);
-                if let Ok(name) = storage::sym_lookup(v) {
-                    if !name.is_empty() {
-                        out.push(name);
-                        continue;
+                if col_type == ray_exomem::ffi::RAY_SYM {
+                    let sid = ray_exomem::ffi::ray_vec_get_sym_id(col, r);
+                    if let Ok(name) = storage::sym_lookup(sid) {
+                        if !name.is_empty() {
+                            out.push(name);
+                            continue;
+                        }
                     }
+                    out.push(sid.to_string());
+                } else {
+                    let v = ray_exomem::ffi::ray_vec_get_i64(col, r);
+                    if let Ok(name) = storage::sym_lookup(v) {
+                        if !name.is_empty() {
+                            out.push(name);
+                            continue;
+                        }
+                    }
+                    out.push(v.to_string());
                 }
-                out.push(v.to_string());
             }
         }
     }
@@ -241,5 +255,211 @@ fn water_band_large_for_heavy_profile() {
     assert!(
         got.iter().any(|v| v == "large" || v == "'large"),
         "expected water-band large for (w=90, h=175); got {got:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Plan-shape rule set (B2 + B3) — exercised end-to-end. rayforce2 ships
+// constant-head rule support (commit 862846e on feature/datalog-aggregates)
+// but a stratifiable version of B2 replaces the plan's `(not ...)` clauses
+// with their positive-body equivalents, because a `medium` rule that negates
+// the same predicate it writes to (`health/water-band`) is not
+// stratification-safe under rayforce2's current semi-naive evaluator. The
+// positive-body encoding is semantically identical: the complement of
+// (w<60 AND h<170) is (w>=60 OR h>=170), and the complement of
+// (w>=85 OR h>=185) is (w<85 AND h<185). See `health_bootstrap_rules`
+// for the mirror copy shipped in the live bootstrap.
+// ---------------------------------------------------------------------------
+
+fn plan_verbatim_health_rules(exom: &str) -> Vec<String> {
+    // CRITICAL: rule ORDER matters. rayforce2's IDB column-type alignment
+    // pins types to the first rule that declares them. A rec rule whose
+    // body references `(health/step-band "medium")` must NOT be declared
+    // before the step-band derivation rules — otherwise an IDB for
+    // `health/step-band` is created with a legacy RAY_I64 column, the
+    // later RAY_SYM-headed step-band rules' rows "leak" into neighboring
+    // rules (seen as `["medium","high"]` where only `"medium"` should
+    // fire). Derive bands FIRST, then compose rec rules on top.
+    vec![
+        // water-band = small  :-  w < 60 AND h < 170
+        format!(
+            r#"(rule {exom} (health/water-band "small") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (< ?w 60) (< ?h 170))"#
+        ),
+        // water-band = large  :-  w >= 85
+        format!(
+            r#"(rule {exom} (health/water-band "large") (facts_i64 ?w_id 'profile/weight_kg ?w) (>= ?w 85))"#
+        ),
+        // water-band = large  :-  h >= 185
+        format!(
+            r#"(rule {exom} (health/water-band "large") (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?h 185))"#
+        ),
+        // water-band = medium  :-  (w >= 60) AND (w < 85) AND (h < 185)
+        // (Positive-body encoding of "not small AND not large" that the
+        // plan writes with `(not ...)` clauses. A literal negation over
+        // the same predicate is not stratification-safe in rayforce2.)
+        format!(
+            r#"(rule {exom} (health/water-band "medium") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?w 60) (< ?w 85) (< ?h 185))"#
+        ),
+        // water-band = medium  :-  (h >= 170) AND (w < 85) AND (h < 185)
+        // (Second disjunct of the complement.)
+        format!(
+            r#"(rule {exom} (health/water-band "medium") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?h 170) (< ?w 85) (< ?h 185))"#
+        ),
+
+        format!(
+            r#"(rule {exom} (health/step-band "high") (facts_i64 ?id 'profile/age ?a) (< ?a 30))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/step-band "medium") (facts_i64 ?id 'profile/age ?a) (>= ?a 30) (< ?a 50))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/step-band "gentle") (facts_i64 ?id 'profile/age ?a) (>= ?a 50))"#
+        ),
+
+        // Composable recommended-* rules must come AFTER band derivation
+        // rules (see note above). These are trivial joins onto the
+        // derived band IDBs.
+        format!(r#"(rule {exom} (health/recommended-water-ml "2000") (health/water-band "small"))"#),
+        format!(r#"(rule {exom} (health/recommended-water-ml "2500") (health/water-band "medium"))"#),
+        format!(r#"(rule {exom} (health/recommended-water-ml "3000") (health/water-band "large"))"#),
+        format!(r#"(rule {exom} (health/recommended-steps-per-day "10000") (health/step-band "high"))"#),
+        format!(r#"(rule {exom} (health/recommended-steps-per-day "9000") (health/step-band "medium"))"#),
+        format!(r#"(rule {exom} (health/recommended-steps-per-day "7500") (health/step-band "gentle"))"#),
+    ]
+}
+
+#[test]
+fn plan_verbatim_water_band_medium_for_default_profile() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        ("health/profile/age", "profile/age", FactValue::I64(30)),
+    ];
+    let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["medium".to_string()],
+        "expected ONLY 'medium' for (w=75,h=175); got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_water_band_small_for_slight_profile() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(55)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(160)),
+        ("health/profile/age", "profile/age", FactValue::I64(25)),
+    ];
+    let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["small".to_string()],
+        "expected ONLY 'small' for (w=55,h=160); got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_water_band_large_for_heavy_profile() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(90)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        ("health/profile/age", "profile/age", FactValue::I64(30)),
+    ];
+    let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["large".to_string()],
+        "expected ONLY 'large' for (w=90,h=175); got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_step_band_high_young() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/age", "profile/age", FactValue::I64(25)),
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+    ];
+    let q = format!("(query {exom} (find ?b) (where (health/step-band ?b)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["high".to_string()],
+        "expected ONLY 'high' for age=25; got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_step_band_medium_default() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/age", "profile/age", FactValue::I64(30)),
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+    ];
+    let q = format!("(query {exom} (find ?b) (where (health/step-band ?b)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["medium".to_string()],
+        "expected ONLY 'medium' for age=30; got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_step_band_gentle_older() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/age", "profile/age", FactValue::I64(55)),
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+    ];
+    let q = format!("(query {exom} (find ?b) (where (health/step-band ?b)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["gentle".to_string()],
+        "expected ONLY 'gentle' for age=55; got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_recommended_water_ml_default() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        ("health/profile/age", "profile/age", FactValue::I64(30)),
+    ];
+    let q = format!("(query {exom} (find ?ml) (where (health/recommended-water-ml ?ml)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["2500".to_string()],
+        "expected ONLY '2500' for default (w=75,h=175); got {got:?}"
+    );
+}
+
+#[test]
+fn plan_verbatim_recommended_steps_default() {
+    let exom = "plan/health/main";
+    let profile = &[
+        ("health/profile/age", "profile/age", FactValue::I64(30)),
+        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
+        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+    ];
+    let q = format!("(query {exom} (find ?sp) (where (health/recommended-steps-per-day ?sp)))");
+    let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
+    assert_eq!(
+        got,
+        vec!["9000".to_string()],
+        "expected ONLY '9000' for age=30; got {got:?}"
     );
 }
