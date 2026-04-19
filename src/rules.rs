@@ -95,8 +95,74 @@ pub fn parse_rule_head(inline_body: &str) -> Result<(String, usize)> {
     if pred.is_empty() {
         bail!("empty predicate in rule head");
     }
-    let arity = head_inner.matches('?').count();
+    // Arity is the count of positional args AFTER the predicate.  The old
+    // implementation counted `?` chars, which undercounts rule heads whose
+    // slots are typed literal constants (e.g. `(health/water-band "small")`).
+    // rayforce2 accepts both `?var` and `<const>` in head positions, so the
+    // rule's arity reflects the number of whitespace-separated tokens,
+    // minus the predicate itself.  Quoted strings containing spaces are not
+    // supported by this helper — rule bodies that need them should escape
+    // them as separate non-head clauses.
+    let arity = tokenize_head_args(head_inner);
     Ok((pred.to_string(), arity))
+}
+
+/// Count positional arguments in a rule head's inner tokens.  Treats quoted
+/// strings as single tokens.  Returns the count of arg tokens (predicate
+/// itself is excluded).
+fn tokenize_head_args(head_inner: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = head_inner.chars().peekable();
+    let mut seen_pred = false;
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        // Consume one token.
+        if c == '"' {
+            // Quoted string: consume until matching quote (handle \").
+            chars.next();
+            while let Some(&c) = chars.peek() {
+                chars.next();
+                if c == '\\' {
+                    chars.next(); // skip escaped char
+                    continue;
+                }
+                if c == '"' {
+                    break;
+                }
+            }
+        } else if c == '(' {
+            // Parenthesised sub-expression (rare in heads, but treat as one token).
+            let mut depth = 0;
+            while let Some(&c) = chars.peek() {
+                chars.next();
+                if c == '(' {
+                    depth += 1;
+                } else if c == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Bare symbol/number/literal.
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                chars.next();
+            }
+        }
+        if !seen_pred {
+            seen_pred = true;
+        } else {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Build a [ParsedRule] from a stored or evaluated `(rule ...)` line.
