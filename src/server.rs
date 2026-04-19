@@ -637,8 +637,8 @@ pub fn load_exom_from_tree_path(
     })
 }
 
-fn combined_rules(exom: &str, brain: &Brain, user_rules: &[ParsedRule]) -> anyhow::Result<Vec<ParsedRule>> {
-    let mut rules = system_schema::builtin_rules(exom, brain)?;
+fn combined_rules(exom: &str, user_rules: &[ParsedRule]) -> anyhow::Result<Vec<ParsedRule>> {
+    let mut rules = system_schema::builtin_rules(exom)?;
     rules.extend_from_slice(user_rules);
     Ok(rules)
 }
@@ -1078,7 +1078,7 @@ async fn api_status(
     let uptime = state.start_time.elapsed().as_secs();
     let facts = brain.current_facts();
     let beliefs = brain.current_beliefs();
-    let all_rules = match combined_rules(&exom_slash, brain, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -1757,7 +1757,7 @@ fn expand_canonical_query(
         let es = exoms
             .get(&exom_name)
             .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
-        combined_rules(&exom_name, &es.brain, &es.rules)?
+        combined_rules(&exom_name, &es.rules)?
             .into_iter()
             .map(|rule| rule.inline_body)
             .collect()
@@ -3067,7 +3067,7 @@ async fn api_explain(
         Ok(e) => e,
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
-    let all_rules = match combined_rules(&exom_slash, &es.brain, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };
@@ -3579,7 +3579,7 @@ async fn api_schema(
     let tree_root = state.tree_root.as_deref();
     let sym_path = state.sym_path.as_deref();
     let mut relations = Vec::new();
-    let (fact_groups, has_intervals_map, obs_tuples, belief_tuples, has_belief_intervals, all_rules, ontology, known_derived_samples) =
+    let (fact_groups, has_intervals_map, obs_tuples, belief_tuples, has_belief_intervals, all_rules, ontology) =
         {
             let es =
                 match get_or_load_exom(&mut exoms, &state.engine, &exom_slash, tree_root, sym_path)
@@ -3588,7 +3588,7 @@ async fn api_schema(
                     Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
                 };
             let brain = &es.brain;
-            let all_rules = match combined_rules(&exom_slash, brain, &es.rules) {
+            let all_rules = match combined_rules(&exom_slash, &es.rules) {
                 Ok(r) => r,
                 Err(e) => return ApiError::new("error", e.to_string()).into_response(),
             };
@@ -3647,66 +3647,6 @@ async fn api_schema(
                 })
                 .collect();
 
-            let mut known_derived_samples: HashMap<String, Vec<Vec<serde_json::Value>>> =
-                HashMap::new();
-            let native_relations = system_schema::native_derived_relations(&exom_slash, brain);
-            let water_band = native_relations
-                .iter()
-                .find(|relation| relation.name == system_schema::HEALTH_WATER_BAND)
-                .and_then(|relation| relation.sample_tuples.first())
-                .and_then(|tuple| tuple.first())
-                .cloned();
-            let step_band = native_relations
-                .iter()
-                .find(|relation| relation.name == system_schema::HEALTH_STEP_BAND)
-                .and_then(|relation| relation.sample_tuples.first())
-                .and_then(|tuple| tuple.first())
-                .cloned();
-            for relation in native_relations {
-                known_derived_samples.insert(
-                    relation.name,
-                    relation
-                        .sample_tuples
-                        .into_iter()
-                        .map(|tuple| tuple.into_iter().map(serde_json::Value::String).collect())
-                        .collect(),
-                );
-            }
-            if es
-                .rules
-                .iter()
-                .any(|rule| rule.head_predicate == "health/recommended-water-ml")
-            {
-                if let Some(value) = match water_band.as_deref() {
-                    Some("small") => Some("2000"),
-                    Some("medium") => Some("2500"),
-                    Some("large") => Some("3000"),
-                    _ => None,
-                } {
-                    known_derived_samples.insert(
-                        "health/recommended-water-ml".to_string(),
-                        vec![vec![serde_json::Value::String(value.to_string())]],
-                    );
-                }
-            }
-            if es
-                .rules
-                .iter()
-                .any(|rule| rule.head_predicate == "health/recommended-steps-per-day")
-            {
-                if let Some(value) = match step_band.as_deref() {
-                    Some("high") => Some("10000"),
-                    Some("medium") => Some("9000"),
-                    Some("gentle") => Some("7500"),
-                    _ => None,
-                } {
-                    known_derived_samples.insert(
-                        "health/recommended-steps-per-day".to_string(),
-                        vec![vec![serde_json::Value::String(value.to_string())]],
-                    );
-                }
-            }
-
             let ontology = system_schema::build_exom_ontology(&exom_slash, brain, &es.rules);
             (
                 fact_groups,
@@ -3716,7 +3656,6 @@ async fn api_schema(
                 has_belief_intervals,
                 all_rules,
                 ontology,
-                known_derived_samples,
             )
         };
 
@@ -3810,8 +3749,7 @@ async fn api_schema(
         if include_samples {
             let rows = query_relation_rows(&exoms, &state.engine, &exom_slash, &pred_name, arity)
                 .ok()
-                .filter(|rows| !rows.is_empty())
-                .or_else(|| known_derived_samples.get(&pred_name).cloned());
+                .filter(|rows| !rows.is_empty());
             if let Some(rows) = rows {
                 rel["cardinality"] = serde_json::json!(rows.len());
                 rel["sample_tuples"] =
@@ -4047,7 +3985,7 @@ async fn api_provenance(
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
     let facts = es.brain.current_facts();
-    let all_rules = match combined_rules(&exom_slash, &es.brain, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };
@@ -4137,7 +4075,7 @@ async fn api_derived_handler(
         Ok(e) => e,
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
-    let all_rules = match combined_rules(&exom_slash, &es.brain, &es.rules) {
+    let all_rules = match combined_rules(&exom_slash, &es.rules) {
         Ok(r) => r,
         Err(e) => return ApiError::new("error", e.to_string()).into_response(),
     };
