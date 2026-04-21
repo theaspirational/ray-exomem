@@ -114,24 +114,28 @@ impl AppState {
                 // their names. This keeps persisted symbol IDs stable across
                 // binary upgrades — builtins get appended after, not before.
                 let engine = if sym.exists() {
-                    match RayforceEngine::new_with_sym(&sym) {
-                        Ok(e) => e,
-                        Err(_) => {
-                            eprintln!(
-                                "[ray-exomem] WARNING: symbol table incompatible. \
-                                 Recovering from JSONL sidecars: {}",
-                                root.display()
-                            );
-                            if sym.exists() {
-                                let _ = std::fs::remove_file(&sym);
-                            }
-                            let sym_lk = root.join("sym.lk");
-                            if sym_lk.exists() {
-                                let _ = std::fs::remove_file(&sym_lk);
-                            }
-                            RayforceEngine::new()?
+                    let (engine, sym_err) = RayforceEngine::new_with_sym(&sym)?;
+                    if sym_err != crate::ffi::RAY_OK {
+                        // Sym file was present but load failed. Drop it and
+                        // let JSONL replay rebuild. The runtime itself is
+                        // live — new_with_sym succeeded with an empty sym
+                        // table, so we already have a working engine with
+                        // only builtins registered.
+                        eprintln!(
+                            "[ray-exomem] WARNING: symbol table load failed \
+                             (error code {}). Recovering from JSONL sidecars: {}",
+                            sym_err,
+                            root.display()
+                        );
+                        if sym.exists() {
+                            let _ = std::fs::remove_file(&sym);
+                        }
+                        let sym_lk = root.join("sym.lk");
+                        if sym_lk.exists() {
+                            let _ = std::fs::remove_file(&sym_lk);
                         }
                     }
+                    engine
                 } else {
                     RayforceEngine::new()?
                 };

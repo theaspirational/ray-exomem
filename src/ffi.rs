@@ -48,6 +48,10 @@ extern "C" {
 
     pub fn ray_runtime_create(argc: c_int, argv: *mut *mut c_char) -> *mut ray_runtime_t;
     pub fn ray_runtime_create_with_sym(sym_path: *const c_char) -> *mut ray_runtime_t;
+    pub fn ray_runtime_create_with_sym_err(
+        sym_path: *const c_char,
+        out_sym_err: *mut ray_err_t,
+    ) -> *mut ray_runtime_t;
     pub fn ray_runtime_destroy(rt: *mut ray_runtime_t);
 
     // -----------------------------------------------------------------------
