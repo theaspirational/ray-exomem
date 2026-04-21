@@ -42,7 +42,7 @@ pub const DEFAULT_EXOM: &str = "main";
 use crate::{
     auth::{middleware::MaybeUser, User},
     backend::RayforceEngine,
-    brain::{self, Belief, Brain, Branch, Fact, MergePolicy, Observation, Tx},
+    brain::{self, Brain, MergePolicy},
     context::{self, MutationContext},
     ffi,
     http_error::ApiError,
@@ -116,14 +116,14 @@ impl AppState {
                 let engine = if sym.exists() {
                     let (engine, sym_err) = RayforceEngine::new_with_sym(&sym)?;
                     if sym_err != crate::ffi::RAY_OK {
-                        // Sym file was present but load failed. Drop it and
-                        // let JSONL replay rebuild. The runtime itself is
-                        // live — new_with_sym succeeded with an empty sym
-                        // table, so we already have a working engine with
-                        // only builtins registered.
+                        // Sym file was present but load failed. Drop it so the
+                        // next mutation can re-intern from the splay tables.
+                        // The runtime itself is live — new_with_sym succeeded
+                        // with an empty sym table, so we already have a
+                        // working engine with only builtins registered.
                         eprintln!(
                             "[ray-exomem] WARNING: symbol table load failed \
-                             (error code {}). Recovering from JSONL sidecars: {}",
+                             (error code {}); clearing stale sym file at {}",
                             sym_err,
                             root.display()
                         );
@@ -269,7 +269,7 @@ fn load_exom_from_tree_path_inner(
 }
 
 /// Load an exom, preferring Postgres data when ExomDb is available and has data.
-/// Falls back to disk (splay/JSONL) otherwise.
+/// Falls back to the on-disk splay tables otherwise.
 async fn load_exom_preferring_db(
     exom_db: Option<&Arc<dyn crate::db::ExomDb>>,
     exom_disk: &std::path::Path,
@@ -577,6 +577,13 @@ fn server_tree_root(state: &AppState) -> PathBuf {
         .unwrap_or_else(crate::storage::tree_root)
 }
 
+fn server_sym_path(state: &AppState) -> PathBuf {
+    state
+        .sym_path
+        .clone()
+        .unwrap_or_else(|| crate::storage::data_dir().join("sym"))
+}
+
 /// Lazy-load an exom by slash key, inserting into the map if found on disk.
 fn get_or_load_exom<'a>(
     exoms: &'a mut HashMap<String, ExomState>,
@@ -606,11 +613,7 @@ pub fn load_exom_from_tree_path(
     sym_path: &std::path::Path,
     slash_key: &str,
 ) -> anyhow::Result<ExomState> {
-    let mut brain = {
-        let b = Brain::open_exom(exom_disk, sym_path)?;
-        b.save_all_jsonl()?;
-        b
-    };
+    let mut brain = Brain::open_exom(exom_disk, sym_path)?;
     let meta_p = exom_disk.join(crate::exom::META_FILENAME);
     if meta_p.exists() {
         if let Ok(meta) = crate::exom::read_meta(exom_disk) {
@@ -783,39 +786,29 @@ async fn exom_db_save_brain_snapshot(state: &AppState, exom_name: &str) {
     }
 }
 
-/// Sync JSONL on disk under `disk` to Postgres (e.g. session exoms not loaded in `AppState`).
+/// Sync the splay-backed state on disk under `disk` to Postgres. Used for session
+/// exoms that are not yet loaded into `AppState` (e.g. right after `session_new`).
 async fn exom_db_sync_from_disk(
     db: &Arc<dyn crate::db::ExomDb>,
     exom_slash: &str,
     disk: &std::path::Path,
+    sym_path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let txs: Vec<Tx> = storage::load_jsonl(&disk.join("tx.jsonl"))?;
-    let facts: Vec<Fact> = storage::load_jsonl(&disk.join("fact.jsonl"))?;
-    let observations: Vec<Observation> = storage::load_jsonl(&disk.join("observation.jsonl"))?;
-    let beliefs: Vec<Belief> = storage::load_jsonl(&disk.join("belief.jsonl"))?;
-    let branches: Vec<Branch> = storage::load_jsonl(&disk.join("branch.jsonl"))?;
-    db.save_transactions(exom_slash, &txs).await?;
-    db.save_facts(exom_slash, &facts).await?;
-    db.save_observations(exom_slash, &observations).await?;
-    db.save_beliefs(exom_slash, &beliefs).await?;
-    db.save_branches(exom_slash, &branches).await?;
+    let brain = Brain::open_exom(disk, sym_path)?;
+    db.save_transactions(exom_slash, brain.transactions()).await?;
+    db.save_facts(exom_slash, brain.all_facts()).await?;
+    db.save_observations(exom_slash, brain.observations()).await?;
+    db.save_beliefs(exom_slash, brain.all_beliefs()).await?;
+    db.save_branches(exom_slash, brain.branches()).await?;
     Ok(())
 }
 
-/// After in-memory mutation + splay rebuild, write JSONL sidecars or mirror to Postgres.
+/// After in-memory mutation + splay rebuild, mirror the new state to Postgres
+/// when `ExomDb` is configured. No-op otherwise — splay is the on-disk source
+/// of truth.
 async fn persist_exom_storage(state: &AppState, exom_name: &str) {
     if state.exom_db.is_some() {
         exom_db_save_brain_snapshot(state, exom_name).await;
-    } else {
-        let exoms = state.exoms.lock().unwrap();
-        if let Some(es) = exoms.get(exom_name) {
-            if let Err(e) = es.brain.save_all_jsonl() {
-                eprintln!(
-                    "[ray-exomem] warning: JSONL write failed for {}: {e}",
-                    exom_name
-                );
-            }
-        }
     }
 }
 
@@ -925,6 +918,7 @@ async fn build_tree_root_for_admin(
     opts: &crate::tree::WalkOptions,
 ) -> std::io::Result<crate::tree::TreeNode> {
     let tree_root = server_tree_root(state);
+    let sym_path = server_sym_path(state);
     let mut namespaces = BTreeSet::new();
     namespaces.insert(user.namespace_root().to_string());
     if let Some(ref auth_store) = state.auth_store {
@@ -936,7 +930,12 @@ async fn build_tree_root_for_admin(
     let mut children = Vec::new();
     for namespace in namespaces {
         let root_path = namespace_path(&namespace)?;
-        children.push(crate::tree::walk_or_empty(&tree_root, &root_path, opts)?);
+        children.push(crate::tree::walk_or_empty(
+            &tree_root,
+            &sym_path,
+            &root_path,
+            opts,
+        )?);
     }
 
     Ok(crate::tree::TreeNode::Folder {
@@ -952,8 +951,14 @@ async fn build_tree_root_for_user(
     opts: &crate::tree::WalkOptions,
 ) -> std::io::Result<crate::tree::TreeNode> {
     let tree_root = server_tree_root(state);
+    let sym_path = server_sym_path(state);
     let own_root = namespace_path(user.namespace_root())?;
-    let mut children = vec![crate::tree::walk_or_empty(&tree_root, &own_root, opts)?];
+    let mut children = vec![crate::tree::walk_or_empty(
+        &tree_root,
+        &sym_path,
+        &own_root,
+        opts,
+    )?];
 
     if let Some(ref auth_store) = state.auth_store {
         let mut by_owner: BTreeMap<String, Vec<crate::path::TreePath>> = BTreeMap::new();
@@ -981,6 +986,7 @@ async fn build_tree_root_for_user(
             let owner_root = namespace_path(&owner)?;
             children.push(crate::tree::walk_shared_projection(
                 &tree_root,
+                &sym_path,
                 &owner_root,
                 &shared_paths,
                 opts,
@@ -1003,19 +1009,21 @@ async fn build_tree_path_for_user(
 ) -> Result<crate::tree::TreeNode, ApiError> {
     let Some(ref auth_store) = state.auth_store else {
         let tree_root = server_tree_root(state);
-        return crate::tree::walk(&tree_root, requested, opts)
+        let sym_path = server_sym_path(state);
+        return crate::tree::walk(&tree_root, &sym_path, requested, opts)
             .map_err(|e| ApiError::new("io", e.to_string()));
     };
 
     let tree_root = server_tree_root(state);
+    let sym_path = server_sym_path(state);
     let requested_slash = requested.to_slash_string();
     let direct_level =
         crate::auth::access::resolve_access(user, &requested_slash, auth_store).await;
     if direct_level.can_read() {
         let walk_result = if requested.len() == 1 {
-            crate::tree::walk_or_empty(&tree_root, requested, opts)
+            crate::tree::walk_or_empty(&tree_root, &sym_path, requested, opts)
         } else {
-            crate::tree::walk(&tree_root, requested, opts)
+            crate::tree::walk(&tree_root, &sym_path, requested, opts)
         };
         return walk_result.map_err(|e| ApiError::new("io", e.to_string()));
     }
@@ -1048,7 +1056,7 @@ async fn build_tree_path_for_user(
         .with_status(403));
     }
 
-    crate::tree::walk_shared_projection(&tree_root, requested, &shared_paths, opts)
+    crate::tree::walk_shared_projection(&tree_root, &sym_path, requested, &shared_paths, opts)
         .map_err(|e| ApiError::new("io", e.to_string()))
 }
 
@@ -1172,6 +1180,7 @@ async fn api_tree(
     }
 
     let tree_root = server_tree_root(&state);
+    let sym_path = server_sym_path(&state);
     let opts = crate::tree::WalkOptions {
         depth: q.depth.or(Some(usize::MAX)),
         include_archived: q.archived.as_deref() == Some("true"),
@@ -1191,9 +1200,9 @@ async fn api_tree(
                 Ok(tp) => {
                     if user.is_admin() {
                         let walk_result = if tp.len() == 1 {
-                            crate::tree::walk_or_empty(&tree_root, &tp, &opts)
+                            crate::tree::walk_or_empty(&tree_root, &sym_path, &tp, &opts)
                         } else {
-                            crate::tree::walk(&tree_root, &tp, &opts)
+                            crate::tree::walk(&tree_root, &sym_path, &tp, &opts)
                         };
                         walk_result
                     } else {
@@ -1211,9 +1220,9 @@ async fn api_tree(
         }
     } else {
         match q.path.as_deref().filter(|s| !s.is_empty()) {
-            None => crate::tree::walk_root(&tree_root, &opts),
+            None => crate::tree::walk_root(&tree_root, &sym_path, &opts),
             Some(p) => match p.parse::<crate::path::TreePath>() {
-                Ok(tp) => crate::tree::walk(&tree_root, &tp, &opts),
+                Ok(tp) => crate::tree::walk(&tree_root, &sym_path, &tp, &opts),
                 Err(e) => {
                     let err = ApiError::new("bad_path", e.to_string());
                     return err.into_response();
@@ -1340,8 +1349,10 @@ async fn api_session_new(
         body.actor.unwrap_or_default()
     };
     let tree_root = server_tree_root(&state);
+    let sym_path = server_sym_path(&state);
     match brain::session_new(
         &tree_root,
+        &sym_path,
         &project_path,
         session_type,
         &label,
@@ -1354,7 +1365,9 @@ async fn api_session_new(
                 let disk = session_path.to_disk_path(&tree_root);
                 let slash = session_path.to_slash_string();
                 let db = db.clone();
-                if let Err(e) = exom_db_sync_from_disk(&db, &slash, &disk).await {
+                if let Err(e) =
+                    exom_db_sync_from_disk(&db, &slash, &disk, &sym_path).await
+                {
                     eprintln!("[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}");
                 }
             }
@@ -1398,13 +1411,16 @@ async fn api_session_join(
             .into_response();
     }
     let tree_root = server_tree_root(&state);
-    match brain::session_join(&tree_root, &session_path, &actor) {
+    let sym_path = server_sym_path(&state);
+    match brain::session_join(&tree_root, &sym_path, &session_path, &actor) {
         Ok(branch) => {
             if let Some(ref db) = state.exom_db {
                 let disk = session_path.to_disk_path(&tree_root);
                 let slash = session_path.to_slash_string();
                 let db = db.clone();
-                if let Err(e) = exom_db_sync_from_disk(&db, &slash, &disk).await {
+                if let Err(e) =
+                    exom_db_sync_from_disk(&db, &slash, &disk, &sym_path).await
+                {
                     eprintln!("[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}");
                 }
             }
@@ -1455,6 +1471,7 @@ async fn api_branch_create(
             .into_response();
     }
     let tree_root = server_tree_root(&state);
+    let sym_path = server_sym_path(&state);
     let disk = exom_path.to_disk_path(&tree_root);
     let meta = match crate::exom::read_meta(&disk) {
         Ok(m) => m,
@@ -1484,7 +1501,7 @@ async fn api_branch_create(
             .into_response();
         }
     }
-    match brain::create_branch(&tree_root, &exom_path, &branch_name) {
+    match brain::create_branch(&tree_root, &sym_path, &exom_path, &branch_name) {
         Ok(()) => {
             emit_tree_changed(&state);
             Json(serde_json::json!({
@@ -1616,7 +1633,10 @@ async fn api_assert_fact(
 
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
-        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, branch_str, &actor_str) {
+        let sym_path = server_sym_path(&state);
+        if let Err(e) =
+            brain::precheck_write(&tree_root, &sym_path, &exom_path, branch_str, &actor_str)
+        {
             return ApiError::from(e).into_response();
         }
     }
@@ -2727,7 +2747,10 @@ async fn api_create_branch(
 
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
-        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
+        let sym_path = server_sym_path(&state);
+        if let Err(e) =
+            brain::precheck_write(&tree_root, &sym_path, &exom_path, "main", &ctx.actor)
+        {
             return ApiError::from(e).into_response();
         }
     }
@@ -3401,7 +3424,10 @@ async fn api_retract_all(
 
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
-        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &ctx.actor) {
+        let sym_path = server_sym_path(&state);
+        if let Err(e) =
+            brain::precheck_write(&tree_root, &sym_path, &exom_path, "main", &ctx.actor)
+        {
             return ApiError::from(e).into_response();
         }
     }
@@ -3466,7 +3492,10 @@ async fn api_wipe(
 
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
-        if let Err(e) = brain::precheck_write(&tree_root, &exom_path, "main", &actor) {
+        let sym_path = server_sym_path(&state);
+        if let Err(e) =
+            brain::precheck_write(&tree_root, &sym_path, &exom_path, "main", &actor)
+        {
             return ApiError::from(e).into_response();
         }
     }

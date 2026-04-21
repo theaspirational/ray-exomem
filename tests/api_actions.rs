@@ -221,13 +221,13 @@ fn nested_exoms_do_not_collide() {
     }))
     .unwrap();
 
-    // The on-disk files must be in their respective tree paths.
+    // The on-disk splay tables must be in their respective tree paths.
     assert!(
-        d.tree_root().join("work/main/fact.jsonl").exists(),
+        d.tree_root().join("work/main/fact/.d").exists(),
         "work::main facts must live under tree/work/main/"
     );
     assert!(
-        d.tree_root().join("lab/main/fact.jsonl").exists(),
+        d.tree_root().join("lab/main/fact/.d").exists(),
         "lab::main facts must live under tree/lab/main/"
     );
 

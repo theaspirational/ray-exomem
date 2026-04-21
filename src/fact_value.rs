@@ -1,8 +1,8 @@
 //! Typed values for facts.
 //!
-//! `FactValue` carries type info end-to-end (API → assert → JSONL → splay →
-//! datalog query). This enables comparison / aggregation operators in Rayfall
-//! rules over numeric fact values without re-parsing strings.
+//! `FactValue` carries type info end-to-end (API → assert → splay → datalog
+//! query). This enables comparison / aggregation operators in Rayfall rules
+//! over numeric fact values without re-parsing strings.
 //!
 //! ## Serde encoding (JSON)
 //!
@@ -11,9 +11,9 @@
 //!   * `{"$sym": "foo"}` (object) → `FactValue::Sym`
 //!   * `"abc"` (string) → `FactValue::Str` (fallback)
 //!
-//! Variant ORDER is load-bearing — I64 first, Sym next, Str last. Existing
-//! JSONL files that wrote `"75"` (string) keep loading as `FactValue::Str("75")`
-//! until a typed assert replaces them.
+//! Variant ORDER is load-bearing — I64 first, Sym next, Str last. Legacy
+//! serialized data that wrote `"75"` (string) keeps loading as
+//! `FactValue::Str("75")` until a typed assert replaces it.
 //!
 //! ## Splay encoding
 //!
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_roundtrip_preserves_variant() {
+    fn serde_roundtrip_preserves_variant() {
         for v in [
             FactValue::I64(75),
             FactValue::Str("Basil".into()),

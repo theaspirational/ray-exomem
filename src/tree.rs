@@ -74,15 +74,17 @@ pub struct WalkOptions {
 
 pub fn walk(
     tree_root: &std::path::Path,
+    sym_path: &std::path::Path,
     start: &crate::path::TreePath,
     opts: &WalkOptions,
 ) -> std::io::Result<TreeNode> {
     let start_disk = start.to_disk_path(tree_root);
-    walk_inner(&start_disk, start, 0, opts)
+    walk_inner(&start_disk, sym_path, start, 0, opts)
 }
 
 fn walk_inner(
     disk: &std::path::Path,
+    sym_path: &std::path::Path,
     path: &crate::path::TreePath,
     depth: usize,
     opts: &WalkOptions,
@@ -110,12 +112,13 @@ fn walk_inner(
                     children: vec![],
                 });
             }
-            // FIXME(nested-exoms-task-4.4): write tests/walk_stats.rs once HTTP API is path-aware
-            let stats = crate::brain::read_exom_stats(disk).unwrap_or(crate::brain::ExomStats {
-                fact_count: 0,
-                last_tx: None,
-                branches: vec![],
-            });
+            let stats = crate::brain::read_exom_stats(disk, sym_path).unwrap_or(
+                crate::brain::ExomStats {
+                    fact_count: 0,
+                    last_tx: None,
+                    branches: vec![],
+                },
+            );
             Ok(TreeNode::Exom {
                 name,
                 path: slash,
@@ -146,7 +149,13 @@ fn walk_inner(
                     })?;
                     let sub_disk = entry.path();
                     if sub_disk.is_dir() {
-                        children.push(walk_inner(&sub_disk, &sub_path, depth + 1, opts)?);
+                        children.push(walk_inner(
+                            &sub_disk,
+                            sym_path,
+                            &sub_path,
+                            depth + 1,
+                            opts,
+                        )?);
                     }
                 }
             }
@@ -161,7 +170,11 @@ fn walk_inner(
 
 /// Walk the top-level entries under `tree_root`. Returns a synthetic Folder node with
 /// name="" and path="" whose children are all top-level directories.
-pub fn walk_root(tree_root: &std::path::Path, opts: &WalkOptions) -> std::io::Result<TreeNode> {
+pub fn walk_root(
+    tree_root: &std::path::Path,
+    sym_path: &std::path::Path,
+    opts: &WalkOptions,
+) -> std::io::Result<TreeNode> {
     use std::fs;
     let mut children = vec![];
     if tree_root.exists() {
@@ -177,7 +190,7 @@ pub fn walk_root(tree_root: &std::path::Path, opts: &WalkOptions) -> std::io::Re
                     name.parse().map_err(|e: crate::path::PathError| {
                         std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
                     })?;
-                children.push(walk(tree_root, &p, opts)?);
+                children.push(walk(tree_root, sym_path, &p, opts)?);
             }
         }
     }
@@ -211,6 +224,7 @@ pub fn empty_folder(path: &TreePath) -> TreeNode {
 
 pub fn walk_or_empty(
     tree_root: &std::path::Path,
+    sym_path: &std::path::Path,
     path: &crate::path::TreePath,
     opts: &WalkOptions,
 ) -> std::io::Result<TreeNode> {
@@ -218,7 +232,7 @@ pub fn walk_or_empty(
     if !disk.exists() {
         return Ok(empty_folder(path));
     }
-    walk(tree_root, path, opts)
+    walk(tree_root, sym_path, path, opts)
 }
 
 /// Build a synthetic folder tree for a shared view.
@@ -228,6 +242,7 @@ pub fn walk_or_empty(
 /// just the descendants needed to reach the shared paths, without leaking sibling nodes.
 pub fn walk_shared_projection(
     tree_root: &std::path::Path,
+    sym_path: &std::path::Path,
     requested: &crate::path::TreePath,
     shared_paths: &[crate::path::TreePath],
     opts: &WalkOptions,
@@ -236,7 +251,7 @@ pub fn walk_shared_projection(
         .iter()
         .any(|grant| tree_path_starts_with(requested, grant))
     {
-        return walk_or_empty(tree_root, requested, opts);
+        return walk_or_empty(tree_root, sym_path, requested, opts);
     }
 
     let descendants: Vec<_> = shared_paths
@@ -267,9 +282,9 @@ pub fn walk_shared_projection(
             .iter()
             .any(|grant| tree_path_starts_with(&child_path, grant));
         let child = if child_is_fully_shared {
-            walk_or_empty(tree_root, &child_path, opts)?
+            walk_or_empty(tree_root, sym_path, &child_path, opts)?
         } else {
-            walk_shared_projection(tree_root, &child_path, shared_paths, opts)?
+            walk_shared_projection(tree_root, sym_path, &child_path, shared_paths, opts)?
         };
         children.push(child);
     }
@@ -401,10 +416,12 @@ mod tests {
     #[test]
     fn walks_a_scaffolded_project() {
         let d = tempdir().unwrap();
+        let sym = d.path().join("sym");
         crate::scaffold::init_project(d.path(), &"work::ath::lynx::orsl".parse().unwrap()).unwrap();
         let root: crate::path::TreePath = "work".parse().unwrap();
         let node = walk(
             d.path(),
+            &sym,
             &root,
             &WalkOptions {
                 depth: Some(5),
@@ -422,9 +439,11 @@ mod tests {
     #[test]
     fn walk_or_empty_returns_empty_folder_for_missing_namespace() {
         let d = tempdir().unwrap();
+        let sym = d.path().join("sym");
         let path: TreePath = "alice@co.com".parse().unwrap();
         let node = walk_or_empty(
             d.path(),
+            &sym,
             &path,
             &WalkOptions {
                 depth: Some(5),
@@ -452,6 +471,7 @@ mod tests {
     #[test]
     fn shared_projection_reveals_only_the_ancestor_chain_for_deep_share() {
         let d = tempdir().unwrap();
+        let sym = d.path().join("sym");
         fs::create_dir_all(d.path().join("alice/shared/docs/topic")).unwrap();
         fs::create_dir_all(d.path().join("alice/private/secret")).unwrap();
 
@@ -459,6 +479,7 @@ mod tests {
         let shared_paths = vec!["alice/shared/docs".parse().unwrap()];
         let node = walk_shared_projection(
             d.path(),
+            &sym,
             &requested,
             &shared_paths,
             &WalkOptions {
@@ -486,6 +507,7 @@ mod tests {
     #[test]
     fn shared_projection_shows_full_subtree_once_shared_root_is_reached() {
         let d = tempdir().unwrap();
+        let sym = d.path().join("sym");
         fs::create_dir_all(d.path().join("alice/shared/docs/topic")).unwrap();
         fs::create_dir_all(d.path().join("alice/shared/assets/img")).unwrap();
         fs::create_dir_all(d.path().join("alice/private/secret")).unwrap();
@@ -494,6 +516,7 @@ mod tests {
         let shared_paths = vec!["alice/shared".parse().unwrap()];
         let node = walk_shared_projection(
             d.path(),
+            &sym,
             &requested,
             &shared_paths,
             &WalkOptions {

@@ -179,18 +179,6 @@ pub enum DirtyTable {
     Branch,
 }
 
-impl DirtyTable {
-    fn name(&self) -> &'static str {
-        match self {
-            DirtyTable::Tx => "tx",
-            DirtyTable::Fact => "fact",
-            DirtyTable::Observation => "observation",
-            DirtyTable::Belief => "belief",
-            DirtyTable::Branch => "branch",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Brain {
     observations: Vec<Observation>,
@@ -308,63 +296,8 @@ impl Brain {
         Ok(brain)
     }
 
-    /// Recover a brain from JSONL sidecar files (used when the sym/splay
-    /// tables are corrupt after a binary upgrade). Rebuilds splay tables
-    /// and the sym file from the recovered data.
-    pub fn open_exom_from_jsonl(exom_dir: &Path, sym_path: &Path) -> Result<Self> {
-        use crate::storage;
-
-        let mut brain = Brain::new();
-        brain.data_dir = Some(exom_dir.to_path_buf());
-        brain.sym_path = Some(sym_path.to_path_buf());
-
-        brain.transactions = storage::load_jsonl(&exom_dir.join("tx.jsonl"))?;
-        if let Some(last) = brain.transactions.last() {
-            brain.next_tx = last.tx_id + 1;
-        }
-        brain.tx_branch_index = brain
-            .transactions
-            .iter()
-            .map(|tx| (tx.tx_id, tx.branch_id.clone()))
-            .collect();
-
-        brain.facts = storage::load_jsonl(&exom_dir.join("fact.jsonl"))?;
-        brain.observations = storage::load_jsonl(&exom_dir.join("observation.jsonl"))?;
-        brain.beliefs = storage::load_jsonl(&exom_dir.join("belief.jsonl"))?;
-        brain.branches = storage::load_jsonl(&exom_dir.join("branch.jsonl"))?;
-
-        // Ensure "main" branch exists
-        if !brain.branches.iter().any(|b| b.branch_id == "main") {
-            brain.branches.insert(
-                0,
-                Branch {
-                    branch_id: "main".into(),
-                    name: "main".into(),
-                    parent_branch_id: None,
-                    created_tx_id: 0,
-                    archived: false,
-                    claimed_by: None,
-                },
-            );
-        }
-
-        // Rebuild splay tables + sym from the recovered data
-        brain.save()?;
-
-        let n_facts = brain.facts.len();
-        let n_txs = brain.transactions.len();
-        eprintln!(
-            "[ray-exomem] recovered {} facts, {} transactions from JSONL",
-            n_facts, n_txs
-        );
-
-        Ok(brain)
-    }
-
     /// Load brain state from an [`ExomDb`](crate::db::ExomDb) backend (e.g. Postgres).
-    /// Rebuilds splay tables and sym for rayforce2 query (same shape as
-    /// [`Self::open_exom_from_jsonl`]). JSONL sidecars are optional and are written by
-    /// the server layer when not using `ExomDb`.
+    /// Rebuilds splay tables and sym for rayforce2 query.
     pub async fn open_exom_from_db(
         exom_db: &dyn crate::db::ExomDb,
         exom_path: &str,
@@ -491,36 +424,6 @@ impl Brain {
         let dir = data_dir.join(name);
         storage::save_table(&ray_table, &dir, sym_path)?;
         storage::sym_save(sym_path)?;
-        Ok(())
-    }
-
-    /// Write JSONL sidecar for a specific table. Called by the server layer in JSONL-only mode.
-    pub fn write_jsonl(&self, table: DirtyTable) -> Result<()> {
-        use crate::storage;
-        let Some(data_dir) = &self.data_dir else {
-            return Ok(());
-        };
-        let jsonl_path = data_dir.join(format!("{}.jsonl", table.name()));
-        match &table {
-            DirtyTable::Tx => storage::save_jsonl(&self.transactions, &jsonl_path),
-            DirtyTable::Fact => storage::save_jsonl(&self.facts, &jsonl_path),
-            DirtyTable::Observation => storage::save_jsonl(&self.observations, &jsonl_path),
-            DirtyTable::Belief => storage::save_jsonl(&self.beliefs, &jsonl_path),
-            DirtyTable::Branch => storage::save_jsonl(&self.branches, &jsonl_path),
-        }
-    }
-
-    /// Write all JSONL sidecars (e.g. after mutations in JSONL mode, or at startup backfill).
-    pub fn save_all_jsonl(&self) -> Result<()> {
-        for table in [
-            DirtyTable::Tx,
-            DirtyTable::Fact,
-            DirtyTable::Observation,
-            DirtyTable::Belief,
-            DirtyTable::Branch,
-        ] {
-            self.write_jsonl(table)?;
-        }
         Ok(())
     }
 
@@ -1535,7 +1438,7 @@ pub fn now_iso() -> String {
 // Free functions — session / exom lifecycle
 // ---------------------------------------------------------------------------
 
-/// Summary statistics for a single exom directory read off the JSONL sidecars.
+/// Summary statistics for a single exom directory read off the splay tables.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ExomStats {
     pub fact_count: u64,
@@ -1543,28 +1446,42 @@ pub struct ExomStats {
     pub branches: Vec<String>,
 }
 
-/// Read fact count, last-transaction time, and branch list from the JSONL
-/// sidecars in `exom_disk`. Uses no FFI and has no side effects on disk.
-///
-/// Returns `Ok(ExomStats::default())` (zeros/None) when the exom has never
-/// had any transactions written.
-pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
-    use crate::storage::load_jsonl;
+/// Read fact count, last-transaction time, and branch list from the splay
+/// tables in `exom_disk`. Returns `Ok(ExomStats::default())` (zeros/None)
+/// when the exom has never had any transactions written.
+pub fn read_exom_stats(exom_disk: &Path, sym_path: &Path) -> std::io::Result<ExomStats> {
+    use crate::storage;
 
-    let facts: Vec<Fact> = load_jsonl(&exom_disk.join("fact.jsonl"))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let load_table = |name: &str| -> std::io::Result<Option<storage::RayObj>> {
+        let dir = exom_disk.join(name);
+        if !storage::table_exists(&dir) {
+            return Ok(None);
+        }
+        storage::load_table(&dir, sym_path)
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    };
 
-    let txs: Vec<Tx> = load_jsonl(&exom_disk.join("tx.jsonl"))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    let branches_raw: Vec<Branch> = load_jsonl(&exom_disk.join("branch.jsonl"))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    let fact_count = facts.iter().filter(|f| f.revoked_by_tx.is_none()).count() as u64;
-    let last_tx = {
-        let mut sorted: Vec<&Tx> = txs.iter().collect();
-        sorted.sort_by_key(|t| t.tx_id);
-        sorted.last().map(|t| t.tx_time.clone())
+    let fact_count = match load_table("fact")? {
+        Some(tbl) => storage::load_facts(&tbl)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+            .iter()
+            .filter(|f| f.revoked_by_tx.is_none())
+            .count() as u64,
+        None => 0,
+    };
+    let last_tx = match load_table("tx")? {
+        Some(tbl) => {
+            let txs: Vec<Tx> = storage::load_txs(&tbl)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            txs.iter().max_by_key(|t| t.tx_id).map(|t| t.tx_time.clone())
+        }
+        None => None,
+    };
+    let branches_raw: Vec<Branch> = match load_table("branch")? {
+        Some(tbl) => storage::load_branches(&tbl)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        None => Vec::new(),
     };
 
     let mut branch_names: Vec<String> = branches_raw
@@ -1574,7 +1491,7 @@ pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
         .collect();
 
     // Always include "main" — it is implicitly created and may not have a
-    // branch.jsonl entry in freshly-scaffolded exoms.
+    // branch record in freshly-scaffolded exoms.
     if !branch_names.contains(&"main".to_string()) {
         branch_names.insert(0, "main".to_string());
     }
@@ -1587,47 +1504,33 @@ pub fn read_exom_stats(exom_disk: &Path) -> std::io::Result<ExomStats> {
 }
 
 // ---------------------------------------------------------------------------
-// Branch JSONL helpers (no FFI, no Brain instance required)
+// Standalone branch helpers (operate on the branch splay table directly,
+// no Brain instance required).
 // ---------------------------------------------------------------------------
 
-/// Load all branches from the JSONL sidecar in `exom_disk`.
-/// Returns an empty vec (treated as "just main, unclaimed") when the file
-/// doesn't exist — consistent with `read_exom_stats`.
-fn load_branches_jsonl(exom_disk: &Path) -> anyhow::Result<Vec<Branch>> {
-    use crate::storage::load_jsonl;
-    load_jsonl(&exom_disk.join("branch.jsonl"))
+fn io_err(e: anyhow::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
 }
 
-/// Save the full branch list back to `branch.jsonl` atomically.
-fn save_branches_jsonl(exom_disk: &Path, branches: &[Branch]) -> std::io::Result<()> {
-    use crate::storage::save_jsonl;
-    save_jsonl(branches, &exom_disk.join("branch.jsonl"))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-}
-
-/// Create a new branch record in `branch.jsonl` for the given exom.
-/// Idempotent: if a non-archived branch with this name already exists, returns Ok without
-/// modifying it. `claimed_by` is always set to `None` on creation.
-///
-/// The `exom_path` is the path to the session/exom node in the tree (e.g. `work::sessions/xyz`).
+/// Create a new branch record for the given exom. Idempotent: if a non-archived
+/// branch with this name already exists, returns Ok without modifying it.
+/// `claimed_by` is always set to `None` on creation.
 pub fn create_branch(
     tree_root: &Path,
+    sym_path: &Path,
     exom_path: &TreePath,
     branch_name: &str,
 ) -> Result<(), crate::scaffold::ScaffoldError> {
     let disk = exom_path.to_disk_path(tree_root);
-    let mut branches = load_branches_jsonl(&disk).map_err(|e| {
-        crate::scaffold::ScaffoldError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-    })?;
+    let mut branches = crate::storage::load_branches_from_disk(&disk, sym_path)
+        .map_err(|e| crate::scaffold::ScaffoldError::Io(io_err(e)))?;
 
-    // Idempotent: don't duplicate
     if branches
         .iter()
         .any(|b| b.name == branch_name && !b.archived)
     {
         return Ok(());
     }
-    // "main" is a special implicit branch; synthesise its entry to persist it
     let parent = if branch_name == "main" {
         None
     } else {
@@ -1641,29 +1544,30 @@ pub fn create_branch(
         archived: false,
         claimed_by: None,
     });
-    save_branches_jsonl(&disk, &branches)?;
+    crate::storage::save_branches_to_disk(&disk, sym_path, &branches)
+        .map_err(|e| crate::scaffold::ScaffoldError::Io(io_err(e)))?;
     Ok(())
 }
 
-/// TOFU-claim a branch for `actor` in `branch.jsonl`.
+/// TOFU-claim a branch for `actor`.
 ///
 /// - If `claimed_by` is None → set it to `actor` and persist.
 /// - If `claimed_by == actor` → no-op (idempotent).
 /// - If `claimed_by == someone_else` → `Err(WriteError::BranchOwned(owner))`.
 /// - If the branch doesn't exist → `Err(WriteError::BranchMissing(name))`.
 ///
-/// "main" is considered to always exist even when branch.jsonl is absent.
+/// "main" is considered to always exist even when the branch table is absent.
 pub fn claim_branch(
     tree_root: &Path,
+    sym_path: &Path,
     exom_path: &TreePath,
     branch_name: &str,
     actor: &str,
 ) -> Result<(), WriteError> {
     let disk = exom_path.to_disk_path(tree_root);
-    let mut branches = load_branches_jsonl(&disk)
-        .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    let mut branches = crate::storage::load_branches_from_disk(&disk, sym_path)
+        .map_err(|e| WriteError::Io(io_err(e)))?;
 
-    // Synthesise implicit "main" if it's not in the file yet
     let main_implicit = branches.is_empty() || !branches.iter().any(|b| b.name == "main");
     if main_implicit && branch_name == "main" {
         branches.push(Branch {
@@ -1685,10 +1589,11 @@ pub fn claim_branch(
 
     match &b.claimed_by {
         Some(owner) if owner != actor => return Err(WriteError::BranchOwned(owner.clone())),
-        Some(_) => {} // already claimed by same actor — idempotent
+        Some(_) => {}
         None => {
             b.claimed_by = Some(actor.to_string());
-            save_branches_jsonl(&disk, &branches)?;
+            crate::storage::save_branches_to_disk(&disk, sym_path, &branches)
+                .map_err(|e| WriteError::Io(io_err(e)))?;
         }
     }
     Ok(())
@@ -1718,6 +1623,7 @@ pub enum WriteError {
 /// is the first writer (TOFU claim).
 pub fn precheck_write(
     tree_root: &Path,
+    sym_path: &Path,
     exom_path: &TreePath,
     branch: &str,
     actor: &str,
@@ -1742,11 +1648,10 @@ pub fn precheck_write(
         }
     }
 
-    // Branch existence check: load branches from JSONL sidecar (no FFI).
-    let branches = load_branches_jsonl(&disk)
-        .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    let branches = crate::storage::load_branches_from_disk(&disk, sym_path)
+        .map_err(|e| WriteError::Io(io_err(e)))?;
 
-    // "main" is always implicitly present even when branch.jsonl is absent or empty.
+    // "main" is always implicitly present even when the branch table is absent.
     let branch_exists =
         branch == "main" || branches.iter().any(|b| b.name == branch && !b.archived);
 
@@ -1754,8 +1659,7 @@ pub fn precheck_write(
         return Err(WriteError::BranchMissing(branch.to_string()));
     }
 
-    // TOFU ownership claim via claim_branch (reads + conditionally writes JSONL).
-    claim_branch(tree_root, exom_path, branch, actor)
+    claim_branch(tree_root, sym_path, exom_path, branch, actor)
 }
 
 /// Mirror writes to `session/label`, `session/closed_at`, or
@@ -1788,6 +1692,7 @@ pub fn mirror_session_meta_to_disk(
 /// `exom.json`. No splay-table writes — metadata only.
 pub fn session_new(
     tree_root: &Path,
+    sym_path: &Path,
     project_path: &TreePath,
     session_type: SessionType,
     label: &str,
@@ -1842,7 +1747,7 @@ pub fn session_new(
     });
     exom::write_meta(&disk, &meta)?;
 
-    // Pre-create branch records in branch.jsonl for every participant.
+    // Pre-create branch records for every participant.
     // Orchestrator gets "main"; each other agent gets a branch named after themselves.
     for agent_name in &agents_final {
         let branch_name = if agent_name == actor {
@@ -1850,10 +1755,10 @@ pub fn session_new(
         } else {
             agent_name.as_str()
         };
-        create_branch(tree_root, &session_path, branch_name)?;
+        create_branch(tree_root, sym_path, &session_path, branch_name)?;
     }
     // TOFU-claim "main" immediately for the orchestrator.
-    claim_branch(tree_root, &session_path, "main", actor).map_err(|e| {
+    claim_branch(tree_root, sym_path, &session_path, "main", actor).map_err(|e| {
         crate::scaffold::ScaffoldError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
     })?;
 
@@ -1875,6 +1780,7 @@ pub fn session_new(
 /// the session's `agents` list before calling this function.
 pub fn session_join(
     tree_root: &Path,
+    sym_path: &Path,
     session_path: &TreePath,
     actor: &str,
 ) -> Result<String, WriteError> {
@@ -1897,8 +1803,8 @@ pub fn session_join(
     }
 
     // The branch for this actor must exist (created by session_new).
-    let branches = load_branches_jsonl(&disk)
-        .map_err(|e| WriteError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    let branches = crate::storage::load_branches_from_disk(&disk, sym_path)
+        .map_err(|e| WriteError::Io(io_err(e)))?;
     let branch_name = actor;
     let exists = branch_name == "main"
         || branches
@@ -1908,8 +1814,7 @@ pub fn session_join(
         return Err(WriteError::BranchMissing(branch_name.to_string()));
     }
 
-    // TOFU-claim the branch.
-    claim_branch(tree_root, session_path, branch_name, actor)?;
+    claim_branch(tree_root, sym_path, session_path, branch_name, actor)?;
     Ok(branch_name.to_string())
 }
 
@@ -1922,13 +1827,21 @@ mod session_tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn test_sym(d: &tempfile::TempDir) -> std::path::PathBuf {
+        d.path().join("sym")
+    }
+
     #[test]
     fn creates_session_with_correct_name() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap()).unwrap();
         let project: TreePath = "work::ath".parse().unwrap();
         let session = session_new(
             d.path(),
+            &sym,
             &project,
             SessionType::Multi,
             "landing",
@@ -1950,10 +1863,14 @@ mod session_tests {
 
     #[test]
     fn mirroring_updates_exom_json() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
         let session = session_new(
             d.path(),
+            &sym,
             &"work".parse().unwrap(),
             SessionType::Single,
             "old",
@@ -1985,15 +1902,24 @@ mod session_tests {
 
     #[test]
     fn session_new_rejects_bad_label() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
         let p: TreePath = "work".parse().unwrap();
-        assert!(session_new(d.path(), &p, SessionType::Single, "", "me", &[]).is_err());
-        assert!(session_new(d.path(), &p, SessionType::Single, "bad/name", "me", &[]).is_err());
-        assert!(session_new(d.path(), &p, SessionType::Single, "bad::name", "me", &[]).is_err());
-        assert!(session_new(d.path(), &p, SessionType::Single, "bad name", "me", &[]).is_err());
+        assert!(session_new(d.path(), &sym, &p, SessionType::Single, "", "me", &[]).is_err());
+        assert!(
+            session_new(d.path(), &sym, &p, SessionType::Single, "bad/name", "me", &[]).is_err()
+        );
+        assert!(
+            session_new(d.path(), &sym, &p, SessionType::Single, "bad::name", "me", &[]).is_err()
+        );
+        assert!(
+            session_new(d.path(), &sym, &p, SessionType::Single, "bad name", "me", &[]).is_err()
+        );
         // empty actor
-        assert!(session_new(d.path(), &p, SessionType::Single, "ok", "", &[]).is_err());
+        assert!(session_new(d.path(), &sym, &p, SessionType::Single, "ok", "", &[]).is_err());
     }
 }
 
@@ -2006,73 +1932,109 @@ mod tofu_tests {
         s.parse().unwrap()
     }
 
+    fn test_sym(d: &tempfile::TempDir) -> std::path::PathBuf {
+        d.path().join("sym")
+    }
+
     #[test]
     fn rejects_unknown_exom() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
-        let err = precheck_write(d.path(), &tp("work::nope"), "main", "me").unwrap_err();
+        let sym = test_sym(&d);
+        let err = precheck_write(d.path(), &sym, &tp("work::nope"), "main", "me").unwrap_err();
         assert!(matches!(err, WriteError::NoSuchExom(_)));
     }
 
     #[test]
     fn rejects_missing_actor() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
-        let err = precheck_write(d.path(), &tp("work::main"), "main", "").unwrap_err();
+        let err = precheck_write(d.path(), &sym, &tp("work::main"), "main", "").unwrap_err();
         assert!(matches!(err, WriteError::ActorRequired));
     }
 
     #[test]
     fn rejects_closed_session() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
-        let session =
-            session_new(d.path(), &tp("work"), SessionType::Single, "x", "me", &[]).unwrap();
+        let session = session_new(
+            d.path(),
+            &sym,
+            &tp("work"),
+            SessionType::Single,
+            "x",
+            "me",
+            &[],
+        )
+        .unwrap();
         // Mark closed by editing exom.json directly.
         let disk = session.to_disk_path(d.path());
         let mut meta = exom::read_meta(&disk).unwrap();
         meta.session.as_mut().unwrap().closed_at = Some("2026-04-11T00:00:00Z".into());
         exom::write_meta(&disk, &meta).unwrap();
-        let err = precheck_write(d.path(), &session, "main", "me").unwrap_err();
+        let err = precheck_write(d.path(), &sym, &session, "main", "me").unwrap_err();
         assert!(matches!(err, WriteError::SessionClosed));
     }
 
     #[test]
     fn tofu_claims_branch_on_first_write() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
         // Create a branch "agent_a" via create_branch.
-        create_branch(d.path(), &tp("work::main"), "agent_a").unwrap();
+        create_branch(d.path(), &sym, &tp("work::main"), "agent_a").unwrap();
         // First write claims it for alice.
-        assert!(precheck_write(d.path(), &tp("work::main"), "agent_a", "alice").is_ok());
+        assert!(precheck_write(d.path(), &sym, &tp("work::main"), "agent_a", "alice").is_ok());
         // Same actor writes again — succeeds (idempotent).
-        assert!(precheck_write(d.path(), &tp("work::main"), "agent_a", "alice").is_ok());
+        assert!(precheck_write(d.path(), &sym, &tp("work::main"), "agent_a", "alice").is_ok());
         // Different actor tries same branch — rejected.
-        let err = precheck_write(d.path(), &tp("work::main"), "agent_a", "bob").unwrap_err();
+        let err =
+            precheck_write(d.path(), &sym, &tp("work::main"), "agent_a", "bob").unwrap_err();
         assert!(matches!(err, WriteError::BranchOwned(_)));
     }
 
     #[test]
     fn precheck_rejects_nonexistent_branch() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
-        let err = precheck_write(d.path(), &tp("work::main"), "nonexistent", "alice").unwrap_err();
+        let err = precheck_write(d.path(), &sym, &tp("work::main"), "nonexistent", "alice")
+            .unwrap_err();
         assert!(matches!(err, WriteError::BranchMissing(_)));
     }
 
     #[test]
     fn precheck_allows_main_branch_without_explicit_create() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
         // "main" branch should exist implicitly for any exom.
-        assert!(precheck_write(d.path(), &tp("work::main"), "main", "alice").is_ok());
+        assert!(precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice").is_ok());
     }
 
     #[test]
     fn session_join_claims_agent_branch() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
         let session = session_new(
             d.path(),
+            &sym,
             &tp("proj"),
             SessionType::Multi,
             "collab",
@@ -2081,24 +2043,28 @@ mod tofu_tests {
         )
         .unwrap();
         // agent_a joins and claims their branch.
-        let branch = session_join(d.path(), &session, "agent_a").unwrap();
+        let branch = session_join(d.path(), &sym, &session, "agent_a").unwrap();
         assert_eq!(branch, "agent_a");
         // Joining again is idempotent.
-        assert!(session_join(d.path(), &session, "agent_a").is_ok());
+        assert!(session_join(d.path(), &sym, &session, "agent_a").is_ok());
         // A different actor cannot claim the same (already-owned) branch.
-        let err = precheck_write(d.path(), &session, "agent_a", "bob").unwrap_err();
+        let err = precheck_write(d.path(), &sym, &session, "agent_a", "bob").unwrap_err();
         assert!(matches!(err, WriteError::BranchOwned(_)));
         // Fabricated actor not in the session's pre-created branches is rejected.
-        let err = session_join(d.path(), &session, "impostor").unwrap_err();
+        let err = session_join(d.path(), &sym, &session, "impostor").unwrap_err();
         assert!(matches!(err, WriteError::BranchMissing(_)));
     }
 
     #[test]
     fn session_new_precreates_agent_branches() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
+        let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
         let session = session_new(
             d.path(),
+            &sym,
             &tp("proj"),
             SessionType::Multi,
             "multi",
@@ -2107,7 +2073,7 @@ mod tofu_tests {
         )
         .unwrap();
         let disk = session.to_disk_path(d.path());
-        let branches = load_branches_jsonl(&disk).unwrap();
+        let branches = crate::storage::load_branches_from_disk(&disk, &sym).unwrap();
         let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
         assert!(names.contains(&"main"), "main branch missing");
         assert!(names.contains(&"sub_a"), "sub_a branch missing");
@@ -2735,9 +2701,9 @@ mod tests {
     }
 
     #[test]
-    fn typed_fact_value_roundtrips_through_jsonl() {
-        // The JSONL sidecars are the source of truth — they must encode the
-        // typed variant via `#[serde(untagged)]` and reload cleanly.
+    fn typed_fact_value_serde_roundtrip() {
+        // `Fact` is serialized to Postgres / the HTTP API via serde — it must
+        // encode the typed variant via `#[serde(untagged)]` and reload cleanly.
         let fact = Fact {
             fact_id: "f1".into(),
             predicate: "weight".into(),
