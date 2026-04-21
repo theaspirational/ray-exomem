@@ -252,6 +252,8 @@ impl Brain {
     pub fn open_exom(exom_dir: &Path, sym_path: &Path) -> Result<Self> {
         use crate::storage;
 
+        storage::recover_splay_dirs(exom_dir);
+
         let mut brain = Brain::new();
         brain.data_dir = Some(exom_dir.to_path_buf());
         brain.sym_path = Some(sym_path.to_path_buf());
