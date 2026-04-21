@@ -170,7 +170,7 @@ pub fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
 // Splayed table I/O
 // ---------------------------------------------------------------------------
 
-pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
+fn splay_save_raw(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create splay dir {}", dir.display()))?;
     let c_dir = path_to_cstring(dir)?;
@@ -184,6 +184,62 @@ pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Atomic splay write: write to dir.new/, then swap directories.
+///
+/// On crash:
+///   - dir.new/ exists, dir/ exists  → incomplete write, discard dir.new/
+///   - dir.old/ exists, dir/ missing → swap interrupted, restore dir.old/
+///   - dir.old/ exists, dir/ exists  → cleanup interrupted, remove dir.old/
+pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
+    let new_dir = dir.with_extension("new");
+    let old_dir = dir.with_extension("old");
+
+    // Clean up any leftover temp dir from a prior crash
+    if new_dir.exists() {
+        let _ = std::fs::remove_dir_all(&new_dir);
+    }
+
+    // Write all columns to the staging directory
+    splay_save_raw(table, &new_dir, sym_path)?;
+
+    // Atomic swap: old ← current, current ← new, remove old
+    if dir.exists() {
+        std::fs::rename(dir, &old_dir)
+            .with_context(|| format!("rename {} → {}", dir.display(), old_dir.display()))?;
+    }
+    std::fs::rename(&new_dir, dir)
+        .with_context(|| format!("rename {} → {}", new_dir.display(), dir.display()))?;
+    if old_dir.exists() {
+        let _ = std::fs::remove_dir_all(&old_dir);
+    }
+    Ok(())
+}
+
+/// Recover from interrupted atomic splay swaps on startup.
+/// Call once per exom directory before loading tables.
+pub fn recover_splay_dirs(exom_dir: &Path) {
+    for name in &["tx", "fact", "observation", "belief", "branch"] {
+        let dir = exom_dir.join(name);
+        let new_dir = dir.with_extension("new");
+        let old_dir = dir.with_extension("old");
+
+        // Incomplete write — discard staging dir
+        if new_dir.exists() {
+            let _ = std::fs::remove_dir_all(&new_dir);
+        }
+
+        // Swap interrupted — restore from backup
+        if old_dir.exists() && !dir.exists() {
+            let _ = std::fs::rename(&old_dir, &dir);
+        }
+
+        // Cleanup interrupted — remove stale backup
+        if old_dir.exists() && dir.exists() {
+            let _ = std::fs::remove_dir_all(&old_dir);
+        }
+    }
 }
 
 pub fn load_table(dir: &Path, sym_path: &Path) -> Result<RayObj> {
