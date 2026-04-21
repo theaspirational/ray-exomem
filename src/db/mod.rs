@@ -6,7 +6,6 @@ use crate::auth::UserRole;
 use crate::brain::{Belief, Branch, Fact, Observation, Tx};
 
 pub mod jsonl_auth;
-pub mod jsonl_exom;
 
 #[cfg(feature = "postgres")]
 pub mod pg_auth;

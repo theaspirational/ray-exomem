@@ -4,11 +4,9 @@
 //! plus RAII wrappers and symbol table helpers.
 
 use std::ffi::CString;
-use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 
 use crate::brain::{Belief, BeliefStatus, Brain, Branch, Fact, Observation, Tx, TxAction};
@@ -120,50 +118,6 @@ pub fn sym_load(path: &Path) -> Result<bool> {
         return Ok(false);
     }
     bail!("ray_sym_load failed (error code {})", err)
-}
-
-// ---------------------------------------------------------------------------
-// JSONL sidecar persistence
-// ---------------------------------------------------------------------------
-
-/// Write items as one-JSON-object-per-line. Uses atomic rename so readers
-/// never see a partial file.
-pub fn save_jsonl<T: Serialize>(items: &[T], path: &Path) -> Result<()> {
-    let tmp = path.with_extension("jsonl.tmp");
-    let mut f = std::fs::File::create(&tmp)
-        .with_context(|| format!("failed to create {}", tmp.display()))?;
-    for item in items {
-        serde_json::to_writer(&mut f, item)
-            .with_context(|| format!("failed to serialize to {}", tmp.display()))?;
-        f.write_all(b"\n")?;
-    }
-    f.flush()?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
-}
-
-/// Load items from a JSONL file. Returns an empty vec if the file doesn't exist.
-pub fn load_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let f =
-        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = std::io::BufReader::new(f);
-    let mut items = Vec::new();
-    for (i, line) in reader.lines().enumerate() {
-        let line =
-            line.with_context(|| format!("failed to read line {} of {}", i + 1, path.display()))?;
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let item: T = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse line {} of {}", i + 1, path.display()))?;
-        items.push(item);
-    }
-    Ok(items)
 }
 
 // ---------------------------------------------------------------------------
@@ -1850,7 +1804,7 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
 // ---------------------------------------------------------------------------
 
 pub fn build_branch_table(branches: &[Branch]) -> RayObj {
-    let mut b = TableBuilder::new(5);
+    let mut b = TableBuilder::new(6);
 
     let ids: Vec<&str> = branches.iter().map(|b| b.branch_id.as_str()).collect();
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
@@ -1863,11 +1817,13 @@ pub fn build_branch_table(branches: &[Branch]) -> RayObj {
         .iter()
         .map(|b| if b.archived { 1 } else { 0 })
         .collect();
+    let claimed: Vec<Option<&str>> = branches.iter().map(|b| b.claimed_by.as_deref()).collect();
     b.add_sym_col("branch_id", &ids);
     b.add_sym_col("name", &names);
     b.add_sym_col_nullable("parent_branch_id", &parents);
     b.add_i64_col("created_tx_id", &created, None);
     b.add_i64_col("archived", &archived, None);
+    b.add_sym_col_nullable("claimed_by", &claimed);
 
     b.finish()
 }
@@ -1886,6 +1842,11 @@ pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
     } else {
         vec![0i64; nrows as usize]
     };
+    let claimed_col = if ncols >= 6 {
+        read_sym_nullable_col(tbl, 5, nrows)?
+    } else {
+        vec![None; nrows as usize]
+    };
 
     let mut branches = Vec::with_capacity(nrows as usize);
     for i in 0..nrows as usize {
@@ -1895,10 +1856,42 @@ pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
             parent_branch_id: parents[i].clone(),
             created_tx_id: created[i] as u64,
             archived: archived_col[i] != 0,
-            claimed_by: None, // splay tables don't store this; JSONL is the source of truth
+            claimed_by: claimed_col[i].clone(),
         });
     }
     Ok(branches)
+}
+
+/// Load just the branch splay table for `exom_disk`, or return an empty vec
+/// when the branch table hasn't been materialised yet.
+///
+/// Used by `precheck_write`, `session_new`, and `session_join` to consult
+/// branch ownership without instantiating a full `Brain`.
+pub fn load_branches_from_disk(exom_disk: &Path, sym_path: &Path) -> Result<Vec<Branch>> {
+    let dir = exom_disk.join("branch");
+    if !table_exists(&dir) {
+        return Ok(Vec::new());
+    }
+    let tbl = load_table(&dir, sym_path)?;
+    load_branches(&tbl)
+}
+
+/// Write the branch splay table for `exom_disk` via the atomic swap protocol
+/// and persist any newly-interned symbols.
+pub fn save_branches_to_disk(
+    exom_disk: &Path,
+    sym_path: &Path,
+    branches: &[Branch],
+) -> Result<()> {
+    std::fs::create_dir_all(exom_disk).with_context(|| {
+        format!("failed to create exom dir {}", exom_disk.display())
+    })?;
+    recover_splay_dirs(exom_disk);
+    let dir = exom_disk.join("branch");
+    let tbl = build_branch_table(branches);
+    save_table(&tbl, &dir, sym_path)?;
+    sym_save(sym_path)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

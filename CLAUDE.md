@@ -70,7 +70,7 @@ Gotchas specific to this setup:
 - In authenticated UI mode, mutation actor attribution should fall back to the logged-in email. Do not require a separate `ray-exomem-actor` localStorage value for basic writes.
 - JSONL auth replay must preserve `user.active` / `last_login` on repeated `user` entries. A naive replay that resets them on login makes deactivation appear to succeed in the UI while leaving the account effectively active.
 - The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These require rayforce2 at `feature/datalog-aggregates` HEAD ≥ `862846e` (head-const projection + auto-registered env-bound EDBs). If the sibling `../rayforce2` checkout is on `master` or pre-`862846e`, bootstrap rule registration fails with unstratifiable-negation / missing-relation errors. Either switch the sibling to `feature/datalog-aggregates` or wait for upstream merge.
-- Fact values are typed at the API/JSONL/brain layer via `FactValue { I64 | Str | Sym }` (`src/fact_value.rs`). Splay emits parallel `facts_i64` / `facts_str` / `facts_sym` EDBs so Datalog rule bodies can run cmp/agg against numeric columns natively. Old JSONL with bare-string values loads as `FactValue::Str`; only typed asserts populate `facts_i64`. Bootstrap seeds numeric profile predicates (weight_kg, height_cm, age) as `FactValue::I64` — if a pre-typed-values exom still has them as `Str`, the derivation rules won't fire until those facts are re-asserted typed.
+- Fact values are typed at the API/brain layer via `FactValue { I64 | Str | Sym }` (`src/fact_value.rs`). Splay emits parallel `facts_i64` / `facts_str` / `facts_sym` EDBs so Datalog rule bodies can run cmp/agg against numeric columns natively. Only typed asserts populate `facts_i64`. Bootstrap seeds numeric profile predicates (weight_kg, height_cm, age) as `FactValue::I64` — if a pre-typed-values exom still has them as `Str`, the derivation rules won't fire until those facts are re-asserted typed.
 
 ## Current agent-facing workflow
 
@@ -99,7 +99,7 @@ ray-exomem query --exom main --json
 
 - Mutations go through `brain.rs`, not directly through the C engine.
 - Queries are lowered/re-written before eval so exom-scoped rules are injected correctly.
-- JSONL sidecars are the source of truth; splay tables are the cache.
+- Splay tables under each `tree/<exom-path>/` directory are the source of truth on disk. There are no JSONL sidecars for facts/txs/observations/beliefs/branches; `auth.jsonl` is a separate subsystem and still exists.
 - After state changes, runtime bindings must be refreshed.
 
 ## Files worth knowing

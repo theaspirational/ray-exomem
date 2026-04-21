@@ -329,7 +329,7 @@ enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to JSONL without it.
+        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to local splay tables without it.
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
     },
@@ -396,7 +396,7 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         allowed_domains: Option<Vec<String>>,
 
-        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to JSONL without it.
+        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to local splay tables without it.
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
     },
@@ -3495,6 +3495,7 @@ fn main() {
             json: inspect_json,
         } => {
             let tree_root = ray_exomem::storage::tree_root();
+            let sym_path = ray_exomem::storage::data_dir().join("sym");
             let opts = ray_exomem::tree::WalkOptions {
                 depth: Some(depth),
                 include_archived: archived,
@@ -3510,7 +3511,7 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    match ray_exomem::tree::walk(&tree_root, &tp, &opts) {
+                    match ray_exomem::tree::walk(&tree_root, &sym_path, &tp, &opts) {
                         Ok(n) => n,
                         Err(e) => {
                             eprintln!("error: {}", e);
@@ -3518,7 +3519,7 @@ fn main() {
                         }
                     }
                 }
-                None => match ray_exomem::tree::walk_root(&tree_root, &opts) {
+                None => match ray_exomem::tree::walk_root(&tree_root, &sym_path, &opts) {
                     Ok(n) => n,
                     Err(e) => {
                         eprintln!("error: {}", e);
