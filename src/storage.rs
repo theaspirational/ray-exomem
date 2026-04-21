@@ -189,8 +189,9 @@ pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
 pub fn load_table(dir: &Path, sym_path: &Path) -> Result<RayObj> {
     let c_dir = path_to_cstring(dir)?;
     let c_sym = path_to_cstring(sym_path)?;
-    let ptr = unsafe { ffi::ray_splay_load(c_dir.as_ptr(), c_sym.as_ptr()) };
-    RayObj::from_raw(ptr).with_context(|| format!("ray_splay_load failed for {}", dir.display()))
+    let ptr = unsafe { ffi::ray_read_splayed(c_dir.as_ptr(), c_sym.as_ptr()) };
+    RayObj::from_raw(ptr)
+        .with_context(|| format!("ray_read_splayed (mmap) failed for {}", dir.display()))
 }
 
 pub fn table_exists(dir: &Path) -> bool {

@@ -26,6 +26,24 @@ impl RayforceEngine {
         Ok(Self { runtime })
     }
 
+    /// Create a runtime that loads the symbol table before registering
+    /// builtins, so persisted symbol IDs keep their slots across restarts.
+    pub fn new_with_sym(sym_path: &Path) -> Result<Self> {
+        let c_sym = CString::new(sym_path.to_str().unwrap_or(""))
+            .context("sym_path contains interior NUL")?;
+        let runtime = unsafe { ffi::ray_runtime_create_with_sym(c_sym.as_ptr()) };
+        if runtime.is_null() {
+            return Err(anyhow!("rayforce2 runtime initialization failed"));
+        }
+
+        unsafe {
+            ffi::ray_fmt_set_precision(6);
+            ffi::ray_fmt_set_width(120);
+        }
+
+        Ok(Self { runtime })
+    }
+
     pub fn version(&self) -> String {
         unsafe {
             let ptr = ffi::ray_version_string();

@@ -47,6 +47,7 @@ extern "C" {
     // -----------------------------------------------------------------------
 
     pub fn ray_runtime_create(argc: c_int, argv: *mut *mut c_char) -> *mut ray_runtime_t;
+    pub fn ray_runtime_create_with_sym(sym_path: *const c_char) -> *mut ray_runtime_t;
     pub fn ray_runtime_destroy(rt: *mut ray_runtime_t);
 
     // -----------------------------------------------------------------------
@@ -152,6 +153,7 @@ extern "C" {
         sym_path: *const c_char,
     ) -> ray_err_t;
     pub fn ray_splay_load(dir: *const c_char, sym_path: *const c_char) -> *mut ray_t;
+    pub fn ray_read_splayed(dir: *const c_char, sym_path: *const c_char) -> *mut ray_t;
 
     // -----------------------------------------------------------------------
     // Column I/O

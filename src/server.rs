@@ -106,25 +106,35 @@ impl AppState {
 
     /// Build AppState by loading a data directory (same logic as web::serve).
     pub fn from_data_dir(data_dir: Option<PathBuf>) -> anyhow::Result<Arc<Self>> {
-        let engine = RayforceEngine::new()?;
         let mut exoms: HashMap<String, ExomState> = HashMap::new();
-        let (tree_root, sym_path) = match data_dir {
+        let (engine, tree_root, sym_path) = match data_dir {
             Some(ref root) => {
                 let sym = root.join("sym");
-                if !storage::sym_load(&sym)? {
-                    eprintln!(
-                        "[ray-exomem] WARNING: symbol table incompatible (binary upgrade?). \
-                         Recovering from JSONL sidecars: {}",
-                        root.display()
-                    );
-                    if sym.exists() {
-                        let _ = std::fs::remove_file(&sym);
+                // Load sym INSIDE ray_runtime_create, before builtins intern
+                // their names. This keeps persisted symbol IDs stable across
+                // binary upgrades — builtins get appended after, not before.
+                let engine = if sym.exists() {
+                    match RayforceEngine::new_with_sym(&sym) {
+                        Ok(e) => e,
+                        Err(_) => {
+                            eprintln!(
+                                "[ray-exomem] WARNING: symbol table incompatible. \
+                                 Recovering from JSONL sidecars: {}",
+                                root.display()
+                            );
+                            if sym.exists() {
+                                let _ = std::fs::remove_file(&sym);
+                            }
+                            let sym_lk = root.join("sym.lk");
+                            if sym_lk.exists() {
+                                let _ = std::fs::remove_file(&sym_lk);
+                            }
+                            RayforceEngine::new()?
+                        }
                     }
-                    let sym_lk = root.join("sym.lk");
-                    if sym_lk.exists() {
-                        let _ = std::fs::remove_file(&sym_lk);
-                    }
-                }
+                } else {
+                    RayforceEngine::new()?
+                };
                 let tree_dir = root.join("tree");
                 std::fs::create_dir_all(&tree_dir).ok();
                 load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
@@ -133,9 +143,10 @@ impl AppState {
                     let _ = crate::scaffold::new_bare_exom(&tree_dir, &default_path);
                     load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
                 }
-                (Some(tree_dir), Some(sym))
+                (engine, Some(tree_dir), Some(sym))
             }
             None => {
+                let engine = RayforceEngine::new()?;
                 exoms.insert(
                     DEFAULT_EXOM.to_string(),
                     ExomState {
@@ -146,7 +157,7 @@ impl AppState {
                         exom_disk: None,
                     },
                 );
-                (None, None)
+                (engine, None, None)
             }
         };
 
