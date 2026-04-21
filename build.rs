@@ -105,6 +105,10 @@ fn main() {
             if !cloned.join("Makefile").exists() {
                 eprintln!("[build.rs] cloning rayforce2...");
                 let _ = std::fs::remove_dir_all(&cloned);
+                // Track feature/datalog-aggregates until PR#7 merges to master:
+                // that branch carries ray_runtime_create_with_sym, the mmap
+                // splay reader, and the head-const / auto-EDB projection the
+                // bootstrap rules depend on.
                 let status = Command::new("git")
                     .args([
                         "clone",
@@ -112,7 +116,7 @@ fn main() {
                         "1",
                         "https://github.com/RayforceDB/rayforce2.git",
                         "--branch",
-                        "master",
+                        "feature/datalog-aggregates",
                         cloned.to_str().unwrap(),
                     ])
                     .status()
