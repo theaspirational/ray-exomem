@@ -329,7 +329,7 @@ enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to local splay tables without it.
+        /// PostgreSQL connection URL. When set, auth (users, sessions, API keys, shares) is stored in Postgres instead of auth.jsonl. Exom data always lives in local splay tables.
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
     },
@@ -396,7 +396,7 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         allowed_domains: Option<Vec<String>>,
 
-        /// PostgreSQL connection URL. When set, uses Postgres for persistence. Falls back to local splay tables without it.
+        /// PostgreSQL connection URL. When set, auth (users, sessions, API keys, shares) is stored in Postgres instead of auth.jsonl. Exom data always lives in local splay tables.
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
     },
@@ -1531,15 +1531,6 @@ fn main() {
             #[cfg(not(feature = "postgres"))]
             let _postgres_pool: Option<()> = None;
 
-            #[cfg(feature = "postgres")]
-            if let Some(ref pool) = postgres_pool {
-                let s = std::sync::Arc::get_mut(&mut state)
-                    .expect("state Arc refcount should be 1 at init");
-                s.exom_db = Some(std::sync::Arc::new(ray_exomem::db::pg_exom::PgExomDb::new(
-                    pool.clone(),
-                )));
-            }
-
             // Wire auth provider + store if --auth-provider is set.
             if let Some(ref provider_name) = auth_provider {
                 let domains = allowed_domains.unwrap_or_default();
@@ -1753,10 +1744,8 @@ fn main() {
             let c = ray_exomem::client::Client::new(Some(&addr));
             let h = ctx_headers(&actor, &session, &model);
             let fact_id = fact_id.unwrap_or_else(|| predicate.clone());
-            let uses_structured_assert =
-                should_use_structured_assert(confidence, &source, &valid_from, &valid_to);
             let confidence_value = confidence.unwrap_or(1.0);
-            let provenance = source.unwrap_or_else(|| "cli".to_string());
+            let provenance = source.clone().unwrap_or_else(|| "cli".to_string());
             if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
@@ -1781,6 +1770,14 @@ fn main() {
             let value_json = serde_json::to_value(&fv).unwrap_or_else(|_| {
                 serde_json::Value::String(fv.display())
             });
+            // Force the structured /api/actions/assert-fact path whenever the
+            // fact value is anything other than a plain string — only that
+            // endpoint preserves the typed FactValue variant end-to-end. The
+            // legacy raw (assert-fact ...) Rayfall form always serializes the
+            // value as a string literal, which silently drops typing.
+            let typed_value = !matches!(fv, ray_exomem::fact_value::FactValue::Str(_));
+            let uses_structured_assert = typed_value
+                || should_use_structured_assert(confidence, &source, &valid_from, &valid_to);
             if uses_structured_assert {
                 match assert_fact_json(
                     &c,

@@ -19,7 +19,7 @@
 		error = null;
 		try {
 			const p = data.path?.trim() || undefined;
-			const loaded = await fetchTree(p, { depth: 1, branches: true, archived: true });
+			const loaded = await fetchTree(p, { depth: 2, branches: true, archived: true });
 			node = loaded;
 			if (loaded.kind === 'exom') {
 				app.switchExom(loaded.path);

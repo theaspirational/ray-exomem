@@ -67,12 +67,6 @@ fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 }
 
 async fn purge_user_namespace(state: &AppState, email: &str) -> Result<usize, ApiError> {
-    if let Some(ref exom_db) = state.exom_db {
-        exom_db.delete_exoms_with_prefix(email).await.map_err(|e| {
-            ApiError::new("namespace_delete_failed", e.to_string()).with_status(500)
-        })?;
-    }
-
     if let Some(ref tree_root) = state.tree_root {
         let disk = tree_root.join(email);
         if disk.exists() {
