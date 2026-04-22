@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -78,7 +78,6 @@ pub struct AppState {
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
     pub bind_addr: Option<String>,
-    pub exom_db: Option<Arc<dyn crate::db::ExomDb>>,
 }
 
 impl AppState {
@@ -87,7 +86,6 @@ impl AppState {
         exoms: HashMap<String, ExomState>,
         tree_root: Option<PathBuf>,
         sym_path: Option<PathBuf>,
-        exom_db: Option<Arc<dyn crate::db::ExomDb>>,
     ) -> Self {
         let (sse_tx, _) = broadcast::channel(512);
         Self {
@@ -100,7 +98,6 @@ impl AppState {
             auth_store: None,
             auth_provider: None,
             bind_addr: None,
-            exom_db,
         }
     }
 
@@ -171,39 +168,8 @@ impl AppState {
         }
 
         Ok(Arc::new(AppState::new(
-            engine, exoms, tree_root, sym_path, None,
+            engine, exoms, tree_root, sym_path,
         )))
-    }
-
-    /// Re-load exom data from ExomDb when available. Call after initial disk loading.
-    pub async fn reload_exoms_from_db(&self) {
-        let Some(ref exom_db) = self.exom_db else {
-            return;
-        };
-        let Some(ref tree_root) = self.tree_root else {
-            return;
-        };
-        let Some(ref sym_path) = self.sym_path else {
-            return;
-        };
-
-        let keys: Vec<String> = {
-            let exoms = self.exoms.lock().unwrap();
-            exoms.keys().cloned().collect()
-        };
-
-        for key in keys {
-            let disk = tree_root.join(&key);
-            match load_exom_preferring_db(Some(exom_db), &disk, sym_path, &key).await {
-                Ok(es) => {
-                    let mut exoms = self.exoms.lock().unwrap();
-                    exoms.insert(key.clone(), es);
-                    let datoms = &exoms.get(&key).expect("just inserted").datoms;
-                    let _ = self.engine.bind_named_db(storage::sym_intern(&key), datoms);
-                }
-                Err(e) => eprintln!("[ray-exomem] WARNING: DB reload for '{}': {}", key, e),
-            }
-        }
     }
 }
 
@@ -266,116 +232,6 @@ fn load_exom_from_tree_path_inner(
     slash_key: &str,
 ) -> anyhow::Result<ExomState> {
     load_exom_from_tree_path(exom_disk, sym_path, slash_key)
-}
-
-/// Load an exom, preferring Postgres data when ExomDb is available and has data.
-/// Falls back to the on-disk splay tables otherwise.
-async fn load_exom_preferring_db(
-    exom_db: Option<&Arc<dyn crate::db::ExomDb>>,
-    exom_disk: &std::path::Path,
-    sym_path: &std::path::Path,
-    slash_key: &str,
-) -> anyhow::Result<ExomState> {
-    if let Some(db) = exom_db {
-        let txs = db.load_transactions(slash_key).await?;
-        if !txs.is_empty() {
-            let mut brain =
-                Brain::open_exom_from_db(db.as_ref(), slash_key, exom_disk, sym_path).await?;
-
-            let meta_p = exom_disk.join(crate::exom::META_FILENAME);
-            if meta_p.exists() {
-                if let Ok(meta) = crate::exom::read_meta(exom_disk) {
-                    if brain
-                        .branches()
-                        .iter()
-                        .any(|b| b.branch_id == meta.current_branch && !b.archived)
-                    {
-                        let _ = brain.switch_branch(&meta.current_branch);
-                    }
-                }
-            }
-            let datoms = storage::build_datoms_table(&brain)?;
-            let typed_facts = storage::build_typed_fact_tables(&brain)?;
-            let rules_p = exom_disk.join("rules.ray");
-            let rules = if rules_p.exists() {
-                let src = std::fs::read_to_string(&rules_p)?;
-                let mut out = Vec::new();
-                for line in src.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                    out.push(crate::rules::parse_rule_line(
-                        line,
-                        context::MutationContext::default(),
-                        String::new(),
-                    )?);
-                }
-                out
-            } else {
-                Vec::new()
-            };
-            let schema_p = exom_disk.join(system_schema::SCHEMA_FILENAME);
-            let ontology = system_schema::build_exom_ontology(slash_key, &brain, &rules);
-            let _ = system_schema::save_exom_ontology(&schema_p, &ontology);
-            return Ok(ExomState {
-                brain,
-                datoms,
-                typed_facts,
-                rules,
-                exom_disk: Some(exom_disk.to_path_buf()),
-            });
-        }
-    }
-    load_exom_from_tree_path(exom_disk, sym_path, slash_key)
-}
-
-/// Same tree walk as [`load_tree_exoms_into`], but uses [`load_exom_preferring_db`].
-#[allow(dead_code)]
-async fn load_tree_exoms_into_async(
-    tree_root: &Path,
-    sym_path: &Path,
-    exom_db: Option<&Arc<dyn crate::db::ExomDb>>,
-    out: &mut HashMap<String, ExomState>,
-) {
-    fn collect_exom_paths(tree_root: &Path, current: &Path, paths: &mut Vec<(PathBuf, String)>) {
-        let Ok(rd) = std::fs::read_dir(current) else {
-            return;
-        };
-        for entry in rd.flatten() {
-            let Ok(ft) = entry.file_type() else {
-                continue;
-            };
-            if !ft.is_dir() {
-                continue;
-            }
-            let disk = entry.path();
-            let rel = disk.strip_prefix(tree_root).unwrap_or(&disk);
-            let slash_key = rel
-                .components()
-                .filter_map(|c| c.as_os_str().to_str())
-                .collect::<Vec<_>>()
-                .join("/");
-            if slash_key.is_empty() {
-                continue;
-            }
-            if disk.join(crate::exom::META_FILENAME).exists() {
-                paths.push((disk, slash_key));
-                continue;
-            }
-            collect_exom_paths(tree_root, &disk, paths);
-        }
-    }
-    let mut paths = Vec::new();
-    collect_exom_paths(tree_root, tree_root, &mut paths);
-    for (disk, slash_key) in paths {
-        eprintln!("[ray-exomem] loading tree exom '{}'", slash_key);
-        match load_exom_preferring_db(exom_db, &disk, sym_path, &slash_key).await {
-            Ok(es) => {
-                out.insert(slash_key, es);
-            }
-            Err(e) => eprintln!(
-                "[ray-exomem] WARNING: failed to load '{}': {}",
-                slash_key, e
-            ),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -535,8 +391,6 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
             });
         }
     }
-
-    state.reload_exoms_from_db().await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -750,76 +604,12 @@ pub fn mutate_exom<T>(
     Ok(out)
 }
 
-/// After sync splay rebuild (`mutate_exom`), persist the exom snapshot to Postgres when configured.
-/// Best-effort: logs a warning on failure and does not fail the HTTP mutation.
-async fn exom_db_save_brain_snapshot(state: &AppState, exom_name: &str) {
-    let Some(ref db) = state.exom_db else {
-        return;
-    };
-    let path = exom_name.to_string();
-    let snapshot = {
-        let exoms = state.exoms.lock().unwrap();
-        let Some(es) = exoms.get(exom_name) else {
-            return;
-        };
-        (
-            es.brain.transactions().to_vec(),
-            es.brain.all_facts().to_vec(),
-            es.brain.observations().to_vec(),
-            es.brain.all_beliefs().to_vec(),
-            es.brain.branches().to_vec(),
-        )
-    };
-    let db = db.clone();
-    let (txs, facts, observations, beliefs, branches) = snapshot;
-    if let Err(e) = async {
-        db.save_transactions(&path, &txs).await?;
-        db.save_facts(&path, &facts).await?;
-        db.save_observations(&path, &observations).await?;
-        db.save_beliefs(&path, &beliefs).await?;
-        db.save_branches(&path, &branches).await?;
-        anyhow::Ok(())
-    }
-    .await
-    {
-        eprintln!("[ray-exomem] warning: ExomDb snapshot failed for {path}: {e}");
-    }
-}
-
-/// Sync the splay-backed state on disk under `disk` to Postgres. Used for session
-/// exoms that are not yet loaded into `AppState` (e.g. right after `session_new`).
-async fn exom_db_sync_from_disk(
-    db: &Arc<dyn crate::db::ExomDb>,
-    exom_slash: &str,
-    disk: &std::path::Path,
-    sym_path: &std::path::Path,
-) -> anyhow::Result<()> {
-    let brain = Brain::open_exom(disk, sym_path)?;
-    db.save_transactions(exom_slash, brain.transactions()).await?;
-    db.save_facts(exom_slash, brain.all_facts()).await?;
-    db.save_observations(exom_slash, brain.observations()).await?;
-    db.save_beliefs(exom_slash, brain.all_beliefs()).await?;
-    db.save_branches(exom_slash, brain.branches()).await?;
-    Ok(())
-}
-
-/// After in-memory mutation + splay rebuild, mirror the new state to Postgres
-/// when `ExomDb` is configured. No-op otherwise — splay is the on-disk source
-/// of truth.
-async fn persist_exom_storage(state: &AppState, exom_name: &str) {
-    if state.exom_db.is_some() {
-        exom_db_save_brain_snapshot(state, exom_name).await;
-    }
-}
-
 pub async fn mutate_exom_async<T>(
     state: &AppState,
     exom_name: &str,
     f: impl FnOnce(&mut ExomState) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    let result = mutate_exom(state, exom_name, f)?;
-    persist_exom_storage(state, exom_name).await;
-    Ok(result)
+    mutate_exom(state, exom_name, f)
 }
 
 fn emit_tree_changed(state: &AppState) {
@@ -1361,16 +1151,6 @@ async fn api_session_new(
     ) {
         Ok(session_path) => {
             emit_tree_changed(&state);
-            if let Some(ref db) = state.exom_db {
-                let disk = session_path.to_disk_path(&tree_root);
-                let slash = session_path.to_slash_string();
-                let db = db.clone();
-                if let Err(e) =
-                    exom_db_sync_from_disk(&db, &slash, &disk, &sym_path).await
-                {
-                    eprintln!("[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}");
-                }
-            }
             Json(serde_json::json!({
                 "ok": true,
                 "session_path": session_path.to_slash_string(),
@@ -1414,16 +1194,6 @@ async fn api_session_join(
     let sym_path = server_sym_path(&state);
     match brain::session_join(&tree_root, &sym_path, &session_path, &actor) {
         Ok(branch) => {
-            if let Some(ref db) = state.exom_db {
-                let disk = session_path.to_disk_path(&tree_root);
-                let slash = session_path.to_slash_string();
-                let db = db.clone();
-                if let Err(e) =
-                    exom_db_sync_from_disk(&db, &slash, &disk, &sym_path).await
-                {
-                    eprintln!("[ray-exomem] warning: ExomDb session sync failed for {slash}: {e}");
-                }
-            }
             Json(serde_json::json!({
                 "ok": true,
                 "session_path": session_path.to_slash_string(),
@@ -2157,13 +1927,7 @@ async fn api_eval_inner(
                     let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
                     Ok(())
                 })();
-                match r {
-                    Ok(()) => {
-                        persist_exom_storage(&state, &exom).await;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
+                r
             }
             EvalForm::Canonical(CanonicalForm::RetractFact(mutation)) => {
                 let exom = mutation.exom.clone();
@@ -2186,13 +1950,7 @@ async fn api_eval_inner(
                     let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
                     Ok(())
                 })();
-                match r {
-                    Ok(()) => {
-                        persist_exom_storage(&state, &exom).await;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
+                r
             }
             EvalForm::Canonical(CanonicalForm::Rule(rule)) => {
                 let full = rule.emit();
@@ -2224,13 +1982,7 @@ async fn api_eval_inner(
                     ));
                     Ok(())
                 })();
-                match r {
-                    Ok(()) => {
-                        persist_exom_storage(&state, &exom_name).await;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
+                r
             }
             EvalForm::Canonical(CanonicalForm::Query(query)) => {
                 let exoms = state.exoms.lock().unwrap();
@@ -3535,9 +3287,15 @@ async fn api_factory_reset(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     if let Some(ref _auth_store) = state.auth_store {
-        if let Some(ref user) = maybe_user.0 {
-            if !user.is_admin() {
-                return ApiError::new("forbidden", "factory-reset requires admin access")
+        match maybe_user.0 {
+            Some(ref user) if user.is_top_admin() => {}
+            Some(_) => {
+                return ApiError::new("forbidden", "factory-reset requires top-admin access")
+                    .with_status(403)
+                    .into_response();
+            }
+            None => {
+                return ApiError::new("forbidden", "factory-reset requires top-admin access")
                     .with_status(403)
                     .into_response();
             }
@@ -3556,23 +3314,85 @@ async fn api_factory_reset(
     let old_names: Vec<String> = exoms.keys().cloned().collect();
     exoms.clear();
 
+    // Nuke persisted splay state on disk before declaring success. Without
+    // this the next lazy-load or daemon restart resurrects the "deleted"
+    // exoms from disk, silently contradicting the response.
+    if let Some(ref tree_root) = state.tree_root {
+        if tree_root.exists() {
+            let entries = match std::fs::read_dir(tree_root) {
+                Ok(rd) => rd,
+                Err(e) => {
+                    return ApiError::new("factory_reset_failed", e.to_string())
+                        .with_status(500)
+                        .into_response();
+                }
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let remove = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+                if let Err(e) = remove {
+                    return ApiError::new(
+                        "factory_reset_failed",
+                        format!("remove {}: {}", p.display(), e),
+                    )
+                    .with_status(500)
+                    .into_response();
+                }
+            }
+        }
+    }
+
     let default_exom = DEFAULT_EXOM;
-    let new_es = ExomState {
-        brain: Brain::new(),
-        datoms: match storage::build_datoms_table(&Brain::new()) {
-            Ok(d) => d,
-            Err(e) => {
-                return ApiError::new("error", e.to_string()).into_response();
+    // If persistence is configured, re-scaffold the default exom on disk and
+    // load it back so its in-memory brain is wired to the freshly-cleared
+    // splay tree. Matches what the daemon produces on a cold start against
+    // an empty data dir. Fall back to an in-memory-only ExomState otherwise.
+    let new_es = match (state.tree_root.as_ref(), state.sym_path.as_ref()) {
+        (Some(tree_root), Some(sym_path)) => {
+            let default_path: crate::path::TreePath = match default_exom.parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    return ApiError::new("factory_reset_failed", e.to_string())
+                        .with_status(500)
+                        .into_response();
+                }
+            };
+            if let Err(e) = crate::scaffold::new_bare_exom(tree_root, &default_path) {
+                return ApiError::new("factory_reset_failed", e.to_string())
+                    .with_status(500)
+                    .into_response();
             }
-        },
-        typed_facts: match storage::build_typed_fact_tables(&Brain::new()) {
-            Ok(t) => t,
-            Err(e) => {
-                return ApiError::new("error", e.to_string()).into_response();
+            let disk = tree_root.join(default_exom);
+            match load_exom_from_tree_path(&disk, sym_path, default_exom) {
+                Ok(es) => es,
+                Err(e) => {
+                    return ApiError::new("factory_reset_failed", e.to_string())
+                        .with_status(500)
+                        .into_response();
+                }
             }
+        }
+        _ => ExomState {
+            brain: Brain::new(),
+            datoms: match storage::build_datoms_table(&Brain::new()) {
+                Ok(d) => d,
+                Err(e) => {
+                    return ApiError::new("error", e.to_string()).into_response();
+                }
+            },
+            typed_facts: match storage::build_typed_fact_tables(&Brain::new()) {
+                Ok(t) => t,
+                Err(e) => {
+                    return ApiError::new("error", e.to_string()).into_response();
+                }
+            },
+            rules: Vec::new(),
+            exom_disk: None,
         },
-        rules: Vec::new(),
-        exom_disk: None,
     };
     exoms.insert(default_exom.to_string(), new_es);
 

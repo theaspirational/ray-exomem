@@ -296,61 +296,6 @@ impl Brain {
         Ok(brain)
     }
 
-    /// Load brain state from an [`ExomDb`](crate::db::ExomDb) backend (e.g. Postgres).
-    /// Rebuilds splay tables and sym for rayforce2 query.
-    pub async fn open_exom_from_db(
-        exom_db: &dyn crate::db::ExomDb,
-        exom_path: &str,
-        exom_dir: &Path,
-        sym_path: &Path,
-    ) -> Result<Self> {
-        let mut brain = Brain::new();
-        brain.data_dir = Some(exom_dir.to_path_buf());
-        brain.sym_path = Some(sym_path.to_path_buf());
-
-        brain.transactions = exom_db.load_transactions(exom_path).await?;
-        if let Some(last) = brain.transactions.last() {
-            brain.next_tx = last.tx_id + 1;
-        }
-        brain.tx_branch_index = brain
-            .transactions
-            .iter()
-            .map(|tx| (tx.tx_id, tx.branch_id.clone()))
-            .collect();
-
-        brain.facts = exom_db.load_facts(exom_path).await?;
-        brain.observations = exom_db.load_observations(exom_path).await?;
-        brain.beliefs = exom_db.load_beliefs(exom_path).await?;
-        brain.branches = exom_db.load_branches(exom_path).await?;
-
-        // Ensure "main" branch exists
-        if !brain.branches.iter().any(|b| b.branch_id == "main") {
-            brain.branches.insert(
-                0,
-                Branch {
-                    branch_id: "main".into(),
-                    name: "main".into(),
-                    parent_branch_id: None,
-                    created_tx_id: 0,
-                    archived: false,
-                    claimed_by: None,
-                },
-            );
-        }
-
-        // Rebuild splay tables + sym from loaded data
-        brain.save()?;
-
-        let n_facts = brain.facts.len();
-        let n_txs = brain.transactions.len();
-        eprintln!(
-            "[ray-exomem] loaded {} facts, {} transactions from ExomDb",
-            n_facts, n_txs
-        );
-
-        Ok(brain)
-    }
-
     /// Replace all brain state wholesale (used by lossless JSON import).
     pub fn replace_state(
         &mut self,

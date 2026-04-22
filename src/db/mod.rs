@@ -3,14 +3,11 @@
 use async_trait::async_trait;
 
 use crate::auth::UserRole;
-use crate::brain::{Belief, Branch, Fact, Observation, Tx};
 
 pub mod jsonl_auth;
 
 #[cfg(feature = "postgres")]
 pub mod pg_auth;
-#[cfg(feature = "postgres")]
-pub mod pg_exom;
 
 // ---------------------------------------------------------------------------
 // Row types
@@ -135,43 +132,3 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<sqlx::PgPool> {
     Ok(pool)
 }
 
-#[async_trait]
-pub trait ExomDb: Send + Sync {
-    async fn load_transactions(&self, exom_path: &str) -> anyhow::Result<Vec<Tx>>;
-
-    async fn save_transactions(&self, exom_path: &str, txs: &[Tx]) -> anyhow::Result<()>;
-
-    async fn append_transaction(&self, exom_path: &str, tx: &Tx) -> anyhow::Result<()>;
-
-    async fn load_facts(&self, exom_path: &str) -> anyhow::Result<Vec<Fact>>;
-
-    async fn save_facts(&self, exom_path: &str, facts: &[Fact]) -> anyhow::Result<()>;
-
-    async fn load_observations(&self, exom_path: &str) -> anyhow::Result<Vec<Observation>>;
-
-    async fn save_observations(
-        &self,
-        exom_path: &str,
-        observations: &[Observation],
-    ) -> anyhow::Result<()>;
-
-    async fn load_beliefs(&self, exom_path: &str) -> anyhow::Result<Vec<Belief>>;
-
-    async fn save_beliefs(&self, exom_path: &str, beliefs: &[Belief]) -> anyhow::Result<()>;
-
-    async fn load_branches(&self, exom_path: &str) -> anyhow::Result<Vec<Branch>>;
-
-    async fn save_branches(&self, exom_path: &str, branches: &[Branch]) -> anyhow::Result<()>;
-
-    async fn write_mutation(
-        &self,
-        exom_path: &str,
-        tx: &Tx,
-        facts: Option<&[Fact]>,
-        observations: Option<&[Observation]>,
-        beliefs: Option<&[Belief]>,
-        branches: Option<&[Branch]>,
-    ) -> anyhow::Result<()>;
-
-    async fn delete_exoms_with_prefix(&self, prefix: &str) -> anyhow::Result<u64>;
-}

@@ -19,7 +19,7 @@ When adding or modifying any db/rayfall interactions test them against the runni
 
 `ray-exomem` is a persistent memory daemon for LLM agents.
 
-- Storage model: exoms, facts, observations, beliefs, transactions, branches
+- Storage model: tree of folders and exoms; facts, observations, beliefs, transactions, branches
 - Query model: Rayfall / Datalog
 - Runtime: Rust daemon + rayforce2 via FFI + embedded Svelte UI
 
@@ -58,7 +58,7 @@ Components:
 Gotchas specific to this setup:
 
 - `cloudflared tunnel route dns <name> <host>` can silently target whichever tunnel appears first in `~/.cloudflared/config.yml`. Always pass `--config ~/.cloudflared/devmem.yml` (and `--overwrite-dns` when re-routing) so the CNAME points at the intended tunnel.
-- Fresh Postgres means the default `main` exom doesn't exist yet, so `/api/status` (no `?exom=`) returns 500 `exom not found` until one is created. Use `?exom=work/main` or any existing exom to smoke-test.
+- Fresh persistent state auto-creates a bare `main` exom on startup, so `/api/status` without `?exom=` should succeed. Authenticated login may additionally provision user-scoped exoms such as `{email}/main`.
 - When changing auth/postgres flags, fully stop the daemon (`ray-exomem stop`) before restarting — the new `serve` invocation will not take over a daemonised instance bound to the same port.
 
 ## Important gotchas
@@ -67,6 +67,7 @@ Gotchas specific to this setup:
 - If `rayforce2` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
 - The Svelte 5 UI is embedded in the binary at build time.
 - `ray-exomem daemon` forks. Use `serve` if you want logs in the terminal.
+- The repo is mid-migration from the old flat-exom flow to the tree/session model. Prefer `ray-exomem inspect`, `init`, `exom-new`, `session ...`, and `GET /api/tree`. `/api/exoms` and `POST /api/actions/start-session` are removed, and the legacy `start-session` / `exoms` CLI helpers should not be treated as the primary path.
 - In authenticated UI mode, mutation actor attribution should fall back to the logged-in email. Do not require a separate `ray-exomem-actor` localStorage value for basic writes.
 - JSONL auth replay must preserve `user.active` / `last_login` on repeated `user` entries. A naive replay that resets them on login makes deactivation appear to succeed in the UI while leaving the account effectively active.
 - The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These require rayforce2 at `feature/datalog-aggregates` HEAD ≥ `862846e` (head-const projection + auto-registered env-bound EDBs). If the sibling `../rayforce2` checkout is on `master` or pre-`862846e`, bootstrap rule registration fails with unstratifiable-negation / missing-relation errors. Either switch the sibling to `feature/datalog-aggregates` or wait for upstream merge.
@@ -75,11 +76,14 @@ Gotchas specific to this setup:
 ## Current agent-facing workflow
 
 ```bash
-ray-exomem doctor --exom main --json
-ray-exomem start-session --exom main --actor cli --json
-ray-exomem query --exom main --json
+ray-exomem daemon
+ray-exomem inspect
+ray-exomem init work::ath::lynx::orsl
+ray-exomem session new work::ath::lynx::orsl --name landing-page --multi --actor orchestrator --agents agent-a,agent-b
+ray-exomem query --exom work::ath::lynx::orsl::main --json
 ```
 
+- Prefer tree paths (`work::ath::lynx::orsl::main`) over the old flat `main` mental model.
 - Prefer `query --json` for reads.
 - Use `expand-query` when debugging query lowering or injected rules.
 - `assert <predicate> <value>` uses the structured assert path when `--source`, `--confidence`, `--valid-from`, or `--valid-to` is provided.
@@ -88,6 +92,10 @@ ray-exomem query --exom main --json
 
 ## Key API surfaces
 
+- `GET /api/tree` — canonical tree/discovery path; use instead of `/api/exoms`
+- `POST /api/actions/init` — scaffold `<path>/main` plus `<path>/sessions/`
+- `POST /api/actions/exom-new` — create a bare exom at a tree path
+- `POST /api/actions/session-new` — create a session exom under a project
 - `POST /api/query` — canonical read path for one Rayfall `(query ...)`
 - `POST /api/actions/assert-fact` — structured assert / replace by `fact_id`
 - `POST /api/actions/eval` — advanced mixed Rayfall execution
@@ -100,13 +108,19 @@ ray-exomem query --exom main --json
 - Mutations go through `brain.rs`, not directly through the C engine.
 - Queries are lowered/re-written before eval so exom-scoped rules are injected correctly.
 - Splay tables under each `tree/<exom-path>/` directory are the source of truth on disk. There are no JSONL sidecars for facts/txs/observations/beliefs/branches; `auth.jsonl` is a separate subsystem and still exists.
+- The daemon nests API routes under `/ray-exomem/api`, with a small `/api/status` compatibility shim at the root.
+- A fresh persistent data dir auto-creates bare `tree/main`; projects and sessions are additional tree nodes layered on top.
 - After state changes, runtime bindings must be refreshed.
 
 ## Files worth knowing
 
 - `src/main.rs` — CLI and daemon lifecycle
-- `src/web.rs` — HTTP API, query/eval routing, SSE
+- `src/server.rs` — HTTP API, query/eval routing, tree routes, SSE, UI hosting
 - `src/brain.rs` — core memory model and mutations
+- `src/scaffold.rs` — project scaffolding and bare-exom creation
+- `src/tree.rs` — folder/exom classification and tree walking
+- `src/path.rs` — tree path parsing/validation (`::` and `/`)
+- `src/auth/routes.rs` — auth/login flows and current bootstrap seeding
 - `src/storage.rs` — persistence and decoded query-table handling
 - `src/rayfall_ast.rs` — Rayfall parsing/lowering
 - `src/system_schema.rs` — builtin views and ontology/schema generation
