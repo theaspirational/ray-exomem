@@ -103,32 +103,50 @@ fn main() {
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
             let cloned = out_dir.join("rayforce2");
             if !cloned.join("Makefile").exists() {
-                eprintln!("[build.rs] cloning rayforce2...");
+                eprintln!("[build.rs] fetching rayforce2 PR #7...");
                 let _ = std::fs::remove_dir_all(&cloned);
-                // Track feature/datalog-aggregates until PR#7 merges to master:
-                // that branch carries ray_runtime_create_with_sym, the mmap
-                // splay reader, and the head-const / auto-EDB projection the
-                // bootstrap rules depend on.
-                let status = Command::new("git")
+                std::fs::create_dir_all(&cloned).expect("failed to create rayforce2 clone dir");
+                // Track the GitHub PR head ref instead of an upstream branch
+                // name. PR #7 points at theaspirational:feature/datalog-aggregates,
+                // which still exists as a PR head even though the matching
+                // branch name no longer exists on RayforceDB/rayforce2.
+                run("git", &["init"], &cloned, "rayforce2 init");
+                run(
+                    "git",
+                    &[
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://github.com/RayforceDB/rayforce2.git",
+                    ],
+                    &cloned,
+                    "rayforce2 remote add",
+                );
+                let fetch_status = Command::new("git")
                     .args([
-                        "clone",
+                        "fetch",
                         "--depth",
                         "1",
-                        "https://github.com/RayforceDB/rayforce2.git",
-                        "--branch",
-                        "feature/datalog-aggregates",
-                        cloned.to_str().unwrap(),
+                        "origin",
+                        "refs/pull/7/head",
                     ])
+                    .current_dir(&cloned)
                     .status()
-                    .expect("failed to run git clone — is git installed?");
-                if !status.success() {
+                    .expect("failed to run git fetch — is git installed?");
+                if !fetch_status.success() {
                     panic!(
-                        "rayforce2 not found at ../rayforce2 and git clone failed.\n\
+                        "rayforce2 not found at ../rayforce2 and fetching RayforceDB/rayforce2 PR #7 failed.\n\
                          Either:\n  \
                          - Check out rayforce2 alongside this repo, or\n  \
                          - Set RAYFORCE2_DIR=/path/to/rayforce2"
                     );
                 }
+                run(
+                    "git",
+                    &["checkout", "--detach", "FETCH_HEAD"],
+                    &cloned,
+                    "rayforce2 checkout PR #7",
+                );
             }
             cloned
         });
