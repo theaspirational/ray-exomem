@@ -1,14 +1,26 @@
 //! MCP (Model Context Protocol) JSON-RPC server.
 //!
-//! Exposes ray-exomem capabilities as MCP tools over a single POST /mcp
-//! endpoint using the JSON-RPC 2.0 transport.
+//! Exposes ray-exomem capabilities over the Streamable HTTP transport on
+//! `/mcp`. This server is stateless, but it still provides the GET/POST/DELETE
+//! surface many MCP clients expect.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
+    Json,
+};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::IntervalStream;
 
-use crate::auth::User;
+use crate::auth::{middleware::MaybeUser, User};
 use crate::server::AppState;
 
 // ---------------------------------------------------------------------------
@@ -73,7 +85,10 @@ pub async fn mcp_handler(
     let id = req.id.clone();
     let result = match req.method.as_str() {
         "initialize" => handle_initialize(),
+        "notifications/initialized" => Ok(serde_json::json!({})),
         "tools/list" => Ok(handle_tools_list()),
+        "resources/list" => Ok(serde_json::json!({ "resources": [] })),
+        "prompts/list" => Ok(serde_json::json!({ "prompts": [] })),
         "tools/call" => handle_tool_call(&state, req.params).await,
         _ => Err(JsonRpcError {
             code: -32601,
@@ -84,7 +99,35 @@ pub async fn mcp_handler(
         Ok(value) => JsonRpcResponse::ok(id, value),
         Err(error) => JsonRpcResponse::err(id, error),
     };
-    Json(resp)
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static("2024-11-05"),
+    );
+    (headers, Json(resp)).into_response()
+}
+
+pub async fn mcp_stream_handler(
+    _state: State<Arc<AppState>>,
+    _maybe_user: MaybeUser,
+) -> impl IntoResponse {
+    let events = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
+        .map(|_| Ok::<Event, std::convert::Infallible>(Event::default().comment("keepalive")));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static("2024-11-05"),
+    );
+    (headers, Sse::new(events)).into_response()
+}
+
+pub async fn mcp_delete_handler(_maybe_user: MaybeUser) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static("2024-11-05"),
+    );
+    (StatusCode::NO_CONTENT, headers).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +137,11 @@ pub async fn mcp_handler(
 fn handle_initialize() -> Result<serde_json::Value, JsonRpcError> {
     Ok(serde_json::json!({
         "protocolVersion": "2024-11-05",
-        "capabilities": { "tools": {} },
+        "capabilities": {
+            "tools": {},
+            "resources": {},
+            "prompts": {}
+        },
         "serverInfo": {
             "name": "ray-exomem",
             "version": crate::frontend_version()

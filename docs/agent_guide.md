@@ -3,248 +3,345 @@
 Ray-exomem persists memory as a tree of folders and exoms.
 
 ```
-Tree:        work/ath/lynx/orsl/main              (the project's main exom)
+Tree:        work/ath/lynx/orsl/main              (project main exom)
              work/ath/lynx/orsl/sessions/<id>     (per-session exoms)
 CLI paths:   work::ath::lynx::orsl::main          (`::` == `/`)
-Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)
-Writes:      always require --actor <name>
+UI / API:    http://127.0.0.1:9780/ray-exomem/
+Writes:      pass --actor <name> on mutating commands
 ```
 
 ---
 
-## 1. Model — folders vs exoms
+## 1. Model
 
 There are exactly two node kinds in the tree:
 
-- **Folder** — pure grouping. Holds child folders and child exoms. Has no facts, no branches, and no metadata beyond its name.
-- **Exom** — a leaf that holds facts and branches. Cannot contain other nodes.
+- **Folder** — grouping only. Holds child folders and child exoms. No facts or branches.
+- **Exom** — a leaf knowledge base. Holds facts, rules, branches, observations, beliefs, and transactions.
 
-A directory is an exom if and only if it contains an `exom.json` file. Otherwise it is a folder.
+A directory is an exom if and only if it contains `exom.json`.
 
-**Nesting rule:** Exoms are leaves. You cannot place any node inside an existing exom. Any scaffold operation (`init`, `exom new`, `session new`) that would place a segment under an existing exom is rejected with `cannot_nest_inside_exom`.
+Rules worth remembering:
 
-**Fixed schema:** Ray-exomem ships one schema. You do not define your own.
-
-- `init <path>` — creates any missing folder segments along `<path>`, then creates `main` (an exom) and `sessions/` (a folder) inside the leaf. Idempotent. Projects nest freely.
-- `exom new <path>` — creates a bare exom at the given path. Escape hatch for memory spaces that do not need the `main`/`sessions` layout.
-
----
-
-## 2. Addressing — `::` vs `/`, `--exom`, `--branch`, `--actor`
-
-- **CLI separator:** `::` between segments. Example: `work::ath::lynx::orsl::main`.
-- **Disk / HTTP / UI separator:** `/`. Example: `work/ath/lynx/orsl/main`.
-- **Unified address flag:** `--exom <path>`. No `--project`, no `--session` on the addressing side. Paths must end at an exom, except on `inspect` and `init` which accept folder paths.
-- **Branch:** `--branch <name>`. Optional, defaults to `main`.
-- **Actor:** `--actor <name>`. Required on every write.
-
-**Segment syntax:** `[_A-Za-z0-9-][_A-Za-z0-9.-]*` — alphanumerics, underscore, hyphen, dot. No slashes, no `::`, no whitespace inside a segment.
-
-**Reserved segment:** `sessions`. Can only exist as a folder created by `init`. `exom new <path>::sessions` is rejected.
+- Exoms are leaves. You cannot nest anything inside an existing exom.
+- `init <path>` scaffolds a project by creating `<path>/main` plus `<path>/sessions/`.
+- `exom-new <path>` creates a bare exom with no `main`/`sessions` scaffold.
+- A fresh persistent store auto-creates a bare `main` exom at `~/.ray-exomem/tree/main`.
 
 ---
 
-## 3. Starting work — `init`, `exom new`
+## 2. Paths And Command Modes
 
-```
-# Scaffold a project at work/ath/lynx/orsl
+### Paths
+
+- CLI paths use `::`: `work::ath::lynx::orsl::main`
+- Disk, UI, and HTTP paths use `/`: `work/ath/lynx/orsl/main`
+- `--exom <path>` must point at a leaf exom path
+- `--branch <name>` is available on branch/coord commands and on some writes such as `assert`, `retract`, `observe`, and `eval`
+- `query` does **not** currently accept `--branch`
+
+### Command modes
+
+There are two important execution modes:
+
+- **Offline / local tree commands**: `inspect`, `init`, `exom-new`
+  These read or write the local data dir directly.
+- **Daemon-backed commands**: `status`, `query`, `eval`, `assert`, `retract`, `branch`, `session`, `watch`, and most API-backed workflows
+  These require `ray-exomem daemon` or `ray-exomem serve`.
+
+CLI transport is mixed right now:
+
+- Newer tree/session commands route through the global `--daemon-url`
+- Older commands still use `--addr 127.0.0.1:9780`
+
+---
+
+## 3. Starting Work
+
+```bash
+# See the local tree
+ray-exomem inspect
+
+# Scaffold a project
 ray-exomem init work::ath::lynx::orsl
 
-# The above creates:
-#   ~/.ray-exomem/tree/work/ath/lynx/orsl/main/   (exom)
-#   ~/.ray-exomem/tree/work/ath/lynx/orsl/sessions/   (folder)
+# That creates:
+#   ~/.ray-exomem/tree/work/ath/lynx/orsl/main/
+#   ~/.ray-exomem/tree/work/ath/lynx/orsl/sessions/
 
-# Create a bare exom (no scaffolding)
-ray-exomem exom new work::scratch
+# Create a bare exom instead of a full project
+ray-exomem exom-new work::scratch
 
-# Verify
-ray-exomem inspect work::ath::lynx::orsl
+# Inspect a subtree
+ray-exomem inspect work::ath::lynx::orsl --depth 3
 ```
 
-Projects nest freely: `init work::ath` and `init work::ath::lynx::orsl` coexist. Each is a full project with its own `main` exom and `sessions/` folder.
+Projects nest freely. `init work::ath` and `init work::ath::lynx::orsl` can coexist.
 
 ---
 
-## 4. Sessions — id format, multi vs single, lifecycle
+## 4. Sessions
 
 ### Session id format
 
-Directory name: `<YYYYMMDDTHHMMSSZ>_<multi|single>_agent_<label>`
+Session exoms live under:
 
-Example: `20260411T143215Z_multi_agent_landing-page`
-
-The session id (directory name) is **immutable**. To change the display label, mutate `session/label` via assert-fact.
-
-### Creating a session
-
+```text
+<project>/sessions/<YYYYMMDDTHHMMSSZ>_<multi|single>_agent_<label>
 ```
+
+Example:
+
+```text
+work/ath/lynx/orsl/sessions/20260411T143215Z_multi_agent_landing-page
+```
+
+The session id directory is immutable. Use the display label, not the directory name, when you want a human-facing rename.
+
+### Create a session
+
+```bash
 ray-exomem session new work::ath::lynx::orsl \
-    --multi --name landing-page \
-    --actor orchestrator \
-    --agents agent_a,agent_b
+  --multi \
+  --name landing-page \
+  --actor orchestrator \
+  --agents agent_a,agent_b
 ```
 
-This creates:
-- `sessions/20260411T143215Z_multi_agent_landing-page/` (session exom)
-- Branches `main` (orchestrator), `agent_a`, `agent_b` pre-allocated.
+This creates a session exom under `.../sessions/...` and pre-creates:
 
-For a single-agent session (no parallel branches needed):
+- branch `main` for the orchestrator
+- branch `agent_a`
+- branch `agent_b`
 
-```
-ray-exomem session new work::scratch \
-    --single --name exploration \
-    --actor solo
+Single-agent session:
+
+```bash
+ray-exomem session new work::ath::lynx::orsl \
+  --single \
+  --name exploration \
+  --actor solo
 ```
 
 ### Session lifecycle
 
+```bash
+# Change the display label
+ray-exomem session rename \
+  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --label new-label \
+  --actor orchestrator
+
+# Close the session (future writes rejected)
+ray-exomem session close \
+  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --actor orchestrator
+
+# Archive the session (hidden from default inspect/tree views)
+ray-exomem session archive \
+  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --actor orchestrator
 ```
-# Rename the display label (does NOT rename the directory)
-ray-exomem assert session/label "new label" \
-    --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
-    --actor orchestrator
 
-# Close the session (all writes rejected after this)
-ray-exomem session close work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page
+There is no dedicated reopen/unarchive command today. Reversal means retracting
+`session/closed_at` or `session/archived_at` through the normal mutation path.
 
-# Archive the session (hidden from default inspect)
-ray-exomem session archive work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page
+### Join a pre-allocated session branch
+
+```bash
+ray-exomem session join \
+  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --actor agent_a
 ```
 
-Both close and archive are reversible by retracting `session/closed_at` or `session/archived_at`.
+That claims the branch named `agent_a`. The orchestrator already owns `main`
+after `session new` and should not call `session join`.
+
+### Practical caveat
+
+Prefer listing all participant branches up front with `session new --agents ...`.
+The mid-session `session add-agent` flow is still settling, so avoid depending
+on it in automation until it is cleaned up.
 
 ---
 
-## 5. Branching rules — orchestrator allocates, TOFU, read-any-write-own
+## 5. Branching And Ownership
 
-1. **Orchestrator allocates branches.** `session new --agents a,b,c` pre-creates branches `a`, `b`, `c`. The orchestrator always claims `main` (TOFU on session create).
-2. **Non-orchestrator agents cannot create new branches.** Only the orchestrator can add agents mid-session via `session add-agent`.
-3. **TOFU ownership.** First write from `<actor>` to an unclaimed branch claims it. Subsequent writes from a different actor are rejected with `branch_owned`.
-4. **Read any branch, write only your own.** Reads never require an actor.
-5. **Session close.** `session/closed_at` non-null ⇒ all writes rejected. Reads continue to work.
-6. **Single-agent sessions.** One `main` branch by default. The agent can create extra branches for exploration via `branch-create`.
+Branch rules:
 
+1. Session creation pre-allocates branches.
+2. The orchestrator gets `main`.
+3. Non-orchestrator participants get branches named after their actor ids.
+4. First writer claims an unclaimed branch (TOFU).
+5. Later writes from a different actor are rejected with `branch_owned`.
+6. Closed sessions reject all writes.
+
+Useful commands:
+
+```bash
+# List branches on an exom
+ray-exomem branch list --exom work::ath::lynx::orsl::main
+
+# Diff a branch against main
+ray-exomem branch diff agent_a \
+  --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --base main
 ```
-# Write to your branch
+
+Important limitation:
+
+- `ray-exomem query` does not currently support `--branch`
+- If you need branch-specific reads from the CLI, you must either:
+  switch the current branch explicitly first, or
+  use the HTTP API directly for branch-scoped facts
+
+The API supports branch-scoped fact reads via:
+
+```text
+GET /ray-exomem/api/facts?exom=<path>&branch=<branch>
+```
+
+---
+
+## 6. Reading And Writing
+
+### Simple reads
+
+```bash
+# Default logical fact listing
+ray-exomem query \
+  --exom work::ath::lynx::orsl::main \
+  --json
+
+# Explicit Rayfall query using the derived fact-row view
+ray-exomem query \
+  --exom work::ath::lynx::orsl::main \
+  --request '(query work/ath/lynx/orsl/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
+  --json
+
+# Fact history and explanation
+ray-exomem history project/status --exom work::ath::lynx::orsl::main --json
+ray-exomem why project/status --exom work::ath::lynx::orsl::main --json
+```
+
+### Writes
+
+```bash
+# Assert a fact
+ray-exomem assert project/status active \
+  --exom work::ath::lynx::orsl::main \
+  --actor orchestrator \
+  --source kickoff-notes
+
+# Assert on a branch
 ray-exomem assert task/status done \
-    --exom work::ath::sessions::20260411T143215Z_multi_agent_landing-page \
-    --branch agent_a \
-    --actor agent_a
+  --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --branch agent_a \
+  --actor agent_a
 
-# Read a peer's branch
-ray-exomem query \
-    --exom work::ath::sessions::20260411T143215Z_multi_agent_landing-page \
-    --branch agent_b \
-    '(query (find ?f ?p ?v) (where (?f fact/predicate ?p) (?f fact/value ?v)))'
+# Retract by stable fact id
+ray-exomem retract project/status \
+  --exom work::ath::lynx::orsl::main \
+  --actor orchestrator
 ```
 
----
+### Eval and file input
 
-## 6. Multi-line commands — always render with `\`; use `@file.ray` or stdin
+`eval` is not the same as `query` here:
 
-Always write CLI commands with `\` continuations for readability. For non-trivial rayfall bodies, use `@file.ray` or stdin (`-`).
+- `eval` uses a literal source argument or `--file <path>`
+- `query` and `expand-query` accept `@file` or `-`
 
-```
-# Inline rayfall
+Examples:
+
+```bash
+# Eval from a file
 ray-exomem eval \
-    --exom work::main \
-    --actor orchestrator \
-    '(assert-fact task/status "ready")'
+  --exom work::ath::lynx::orsl::main \
+  --actor orchestrator \
+  --file queries/seed.ray
 
-# From a file
-ray-exomem eval \
-    --exom work::main \
-    --actor orchestrator \
-    @queries/seed.ray
-
-# From stdin
+# Eval from stdin
 cat queries/seed.ray | ray-exomem eval \
-    --exom work::main \
-    --actor orchestrator \
-    -
-```
+  --exom work::ath::lynx::orsl::main \
+  --actor orchestrator \
+  --file -
 
----
-
-## 7. Reading peer branches — examples with `--branch`
-
-```
-# List all branches in an exom
-ray-exomem branch list --exom work::main
-
-# Read facts on a peer branch
+# Query from a file
 ray-exomem query \
-    --exom work::sessions::20260411T143215Z_multi_agent_landing-page \
-    --branch agent_b \
-    '(query (find ?f ?p ?v) (where (?f fact/predicate ?p) (?f fact/value ?v)))'
-
-# Read history of a specific fact across all branches
-ray-exomem history fact/abc123 \
-    --exom work::main
+  --exom work::ath::lynx::orsl::main \
+  --request @queries/list-facts.ray \
+  --json
 ```
 
 ---
 
-## 8. Common errors — error taxonomy with suggested fixes
+## 7. Common Errors
 
 | Code | Cause | Fix |
 |---|---|---|
-| `no_such_exom` | Path does not point to an exom | `ray-exomem init <path>` or `ray-exomem exom new <path>` |
-| `branch_owned` | Branch already claimed by another actor | Write to a branch you own, or ask orchestrator to allocate one |
-| `session_closed` | `session/closed_at` is set | Retract `session/closed_at` to reopen |
-| `branch_not_in_exom` | Branch was never allocated | Ask orchestrator: `ray-exomem session add-agent <path> --agent <name>` |
-| `actor_required` | `--actor` missing on a write | Pass `--actor <name>` |
-| `reserved_segment` | Segment `sessions` used as exom name | Pick a different segment name |
-| `folder_path_on_exom_command` | Path points to a folder, not an exom | Point `--exom` at a leaf exom path |
-| `session_id_immutable` | Tried to rename a session directory | Use `session/label` to change the display label |
-| `cannot_nest_inside_exom` | Path traverses an existing exom | Pick a path that does not cross an existing exom |
+| `bad_path` | Invalid path syntax or reserved segment usage | Fix the path; for exoms use `ray-exomem exom-new <path>` |
+| `cannot_nest_inside_exom` | Path crosses an existing exom | Choose a path that does not traverse an exom leaf |
+| `already_exists_different` | A folder/exom already exists at that location with the wrong kind | Pick a new path or remove the conflicting node |
+| `no_such_exom` | `--exom` does not point to an existing exom | `ray-exomem init <project>` or `ray-exomem exom-new <path>` |
+| `actor_required` | Missing actor on a write or session join | Pass `--actor <name>` |
+| `branch_not_in_exom` | Branch was never allocated in that exom | Pre-allocate it during `session new --agents ...` |
+| `branch_owned` | Another actor already claimed the branch | Write to your own branch |
+| `session_closed` | Session was closed | Retract `session/closed_at` to reopen |
+| `not_orchestrator` | Non-orchestrator tried to create a session branch directly | Only the session initiator may allocate branches |
+| `session_id_immutable` | Tried to rename a session directory | Use `session rename` / `session/label` instead |
+| `namespace_root_immutable` | Tried to rename a user namespace root in authenticated mode | Rename a descendant instead |
 
 ---
 
-## 9. Cheat sheet — canonical examples for every major verb
+## 8. Cheat Sheet
 
-```
-# --- Scaffolding ---
-ray-exomem init work::ath::lynx::orsl
-ray-exomem exom new work::scratch
-
-# --- Sessions ---
-ray-exomem session new work::ath::lynx::orsl \
-    --multi --name sprint-42 \
-    --actor orchestrator \
-    --agents agent_a,agent_b
-
-ray-exomem session join \
-    work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
-    --actor agent_a
-
-ray-exomem session close \
-    work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42
-
-# --- Reads ---
-ray-exomem inspect work --depth 3
-ray-exomem query --exom work::main \
-    '(query (find ?f ?p ?v) (where (?f fact/predicate ?p) (?f fact/value ?v)))'
-ray-exomem history fact/abc123 --exom work::main
-ray-exomem why fact/abc123 --exom work::main
-
-# --- Writes ---
-ray-exomem assert task/status ready \
-    --exom work::main \
-    --actor orchestrator
-ray-exomem retract fact/abc123 \
-    --exom work::main \
-    --actor orchestrator
-
-# --- Branches ---
-ray-exomem branch list --exom work::main
-ray-exomem branch switch main --exom work::main --actor orchestrator
-
+```bash
 # --- Daemon ---
 ray-exomem daemon
 ray-exomem stop
-ray-exomem doctor --exom work::main
 
-# --- Guide ---
+# --- Tree ---
+ray-exomem inspect
+ray-exomem init work::ath::lynx::orsl
+ray-exomem exom-new work::scratch
+
+# --- Sessions ---
+ray-exomem session new work::ath::lynx::orsl \
+  --multi \
+  --name sprint-42 \
+  --actor orchestrator \
+  --agents agent_a,agent_b
+
+ray-exomem session join \
+  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
+  --actor agent_a
+
+ray-exomem session rename \
+  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
+  --label sprint-42b \
+  --actor orchestrator
+
+# --- Reads ---
+ray-exomem query --exom work::ath::lynx::orsl::main --json
+ray-exomem history project/status --exom work::ath::lynx::orsl::main --json
+ray-exomem why project/status --exom work::ath::lynx::orsl::main --json
+
+# --- Writes ---
+ray-exomem assert project/status active \
+  --exom work::ath::lynx::orsl::main \
+  --actor orchestrator
+
+ray-exomem retract project/status \
+  --exom work::ath::lynx::orsl::main \
+  --actor orchestrator
+
+# --- Branches ---
+ray-exomem branch list --exom work::ath::lynx::orsl::main
+ray-exomem branch diff agent_a \
+  --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
+  --base main
+
+# --- Reference ---
 ray-exomem guide
 ```

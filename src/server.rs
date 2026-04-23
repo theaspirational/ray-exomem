@@ -401,7 +401,12 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
         // Nested under /ray-exomem/api
         .nest("/ray-exomem/api", api_router())
         // MCP JSON-RPC endpoint
-        .route("/mcp", post(crate::mcp::mcp_handler))
+        .route(
+            "/mcp",
+            get(crate::mcp::mcp_stream_handler)
+                .post(crate::mcp::mcp_handler)
+                .delete(crate::mcp::mcp_delete_handler),
+        )
         // Auth routes
         .nest("/auth", crate::auth::routes::auth_router())
         .nest("/auth/admin", crate::auth::admin::admin_router())
@@ -1590,20 +1595,173 @@ pub fn expand_query(
     expand_canonical_query(exoms, engine, source.to_string(), &query)
 }
 
+/// Body-position operators that aren't relation references. Logical
+/// compounds descend into their children; comparison and `between` are
+/// terminal (their args are values, not predicate names).
+fn is_logical_body_op(name: &str) -> bool {
+    matches!(name, "and" | "or" | "not")
+}
+
+fn is_cmp_body_op(name: &str) -> bool {
+    matches!(name, "<" | "<=" | ">" | ">=" | "=" | "!=" | "between")
+}
+
+/// Aggregate forms: `(sum ?v pred [col] [by ?k key_col ...])`. The
+/// second argument is the source relation and gets validated; everything
+/// else is a var or column index.
+fn is_aggregate_body_op(name: &str) -> bool {
+    matches!(name, "count" | "sum" | "min" | "max" | "avg")
+}
+
+/// Compute the relation names a rule body in this exom may reference
+/// without being treated as a typo: the three typed-EDBs, the exom's own
+/// datoms table, all builtin view IDBs, and any user-defined rule heads.
+fn known_relations_for_exom(exom: &str, rules: &[ParsedRule]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    names.insert(storage::FACTS_I64_ENV.to_string());
+    names.insert(storage::FACTS_STR_ENV.to_string());
+    names.insert(storage::FACTS_SYM_ENV.to_string());
+    names.insert(exom.to_string());
+    for builtin in system_schema::builtin_views(exom) {
+        names.insert(builtin.name);
+    }
+    for r in rules {
+        names.insert(r.head_predicate.clone());
+    }
+    names
+}
+
+/// Walk the `(where ...)` clause of a canonical query and reject any
+/// body atom whose leading symbol isn't a known relation, a logical
+/// compound, a comparison, or an aggregate. Rayforce2 historically
+/// silently produced an empty table when a rule body referenced an
+/// unknown EDB; this surfaces the mistake as a 400 with a "did you
+/// mean" hint before ever reaching the engine.
+fn validate_query_body(
+    query: &CanonicalQuery,
+    known: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    for clause in &query.clauses {
+        let Some(items) = clause.as_list() else {
+            continue;
+        };
+        let Some(head) = items.first().and_then(|e| e.as_symbol()) else {
+            continue;
+        };
+        if head == "where" {
+            for atom in &items[1..] {
+                validate_body_atom(atom, known)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_body_atom(
+    atom: &rayfall_ast::Expr,
+    known: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    let Some(items) = atom.as_list() else {
+        return Ok(());
+    };
+    let Some(first) = items.first() else {
+        return Ok(());
+    };
+    let Some(sym) = first.as_symbol() else {
+        return Ok(());
+    };
+    if sym.starts_with('?') {
+        return Ok(());
+    }
+    if is_logical_body_op(sym) {
+        for child in &items[1..] {
+            validate_body_atom(child, known)?;
+        }
+        return Ok(());
+    }
+    if is_cmp_body_op(sym) {
+        return Ok(());
+    }
+    if is_aggregate_body_op(sym) {
+        if let Some(pred) = items.get(2).and_then(|e| e.as_symbol()) {
+            if !pred.starts_with('?') && !known.contains(pred) {
+                return Err(unknown_relation_error(pred, known));
+            }
+        }
+        return Ok(());
+    }
+    if !known.contains(sym) {
+        return Err(unknown_relation_error(sym, known));
+    }
+    Ok(())
+}
+
+fn unknown_relation_error(unknown: &str, known: &BTreeSet<String>) -> anyhow::Error {
+    let suggestion = known
+        .iter()
+        .find(|k| {
+            k.as_str() == unknown
+                || k.starts_with(unknown)
+                || unknown.starts_with(k.as_str())
+                || k.contains(unknown)
+                || unknown.contains(k.as_str())
+        })
+        .cloned();
+    match suggestion {
+        Some(hint) if hint != unknown => anyhow::anyhow!(
+            "unknown relation '{unknown}' in query body (did you mean '{hint}'?)"
+        ),
+        _ => anyhow::anyhow!(
+            "unknown relation '{unknown}' in query body; \
+             bind it as an EDB, define a rule with head '{unknown}', \
+             or pick from: {}",
+            known
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Bind typed-fact tables and evaluate a prepared query, returning the
+/// decoded output. Rejects non-TABLE engine returns instead of silently
+/// formatting them as scalars: a `(query ...)` form that doesn't
+/// produce a table means rayforce2 failed mid-eval, and the caller
+/// should see that as an error.
+///
+/// Caller MUST hold `state.exoms.lock()` since `bind_typed_facts_for_exom`
+/// mutates globally-shared env bindings.
+fn execute_prepared_query(
+    engine: &crate::backend::RayforceEngine,
+    exoms: &HashMap<String, ExomState>,
+    expanded: &ExpandedQuery,
+) -> anyhow::Result<(String, Option<serde_json::Value>)> {
+    bind_typed_facts_for_exom(engine, exoms, &expanded.exom_name)?;
+    let raw = engine.eval_raw(&expanded.expanded_query)?;
+    let obj_type = unsafe { ffi::ray_obj_type(raw.as_ptr()) };
+    if obj_type != ffi::RAY_TABLE {
+        anyhow::bail!(
+            "query evaluator returned a non-table result (ray obj type {obj_type}); \
+             this usually means the rule failed to compile or evaluate inside rayforce2"
+        );
+    }
+    let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+    Ok((storage::format_decoded_query_table(&decoded), Some(decoded)))
+}
+
 fn eval_query_form(
     exoms: &HashMap<String, ExomState>,
     engine: &crate::backend::RayforceEngine,
     query: &CanonicalQuery,
 ) -> anyhow::Result<(String, Option<serde_json::Value>)> {
     let expanded = expand_canonical_query(exoms, engine, query.emit(), query)?;
-    bind_typed_facts_for_exom(engine, exoms, &expanded.exom_name)?;
-    let raw = engine.eval_raw(&expanded.expanded_query)?;
-    if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE {
-        let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
-        Ok((storage::format_decoded_query_table(&decoded), Some(decoded)))
-    } else {
-        Ok((engine.format_obj(&raw)?, None))
-    }
+    let es = exoms
+        .get(&expanded.exom_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", expanded.exom_name))?;
+    let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
+    validate_query_body(query, &known)?;
+    execute_prepared_query(engine, exoms, &expanded)
 }
 
 fn query_relation_rows(
@@ -1620,12 +1778,8 @@ fn query_relation_rows(
     );
     let query = lower_query_request(&source, None, "schema relation sample")?;
     let expanded = expand_canonical_query(exoms, engine, source, &query)?;
-    bind_typed_facts_for_exom(engine, exoms, &expanded.exom_name)?;
-    let raw = engine.eval_raw(&expanded.expanded_query)?;
-    if unsafe { ffi::ray_obj_type(raw.as_ptr()) } != ffi::RAY_TABLE {
-        return Ok(Vec::new());
-    }
-    let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+    let (_, decoded) = execute_prepared_query(engine, exoms, &expanded)?;
+    let decoded = decoded.unwrap_or(serde_json::Value::Null);
     Ok(decoded["rows"]
         .as_array()
         .cloned()
@@ -1703,39 +1857,28 @@ async fn api_query_post(
                 .into_response();
         }
     };
-    if let Err(e) = bind_typed_facts_for_exom(&state.engine, &exoms, &expanded.exom_name) {
+    let es = match exoms.get(&expanded.exom_name) {
+        Some(es) => es,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("unknown exom '{}'", expanded.exom_name)
+                })),
+            )
+                .into_response();
+        }
+    };
+    let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
+    if let Err(err) = validate_query_body(&query, &known) {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to bind typed facts: {e}")})),
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.to_string()})),
         )
             .into_response();
     }
-    match state.engine.eval_raw(&expanded.expanded_query) {
-        Ok(raw) => {
-            let (output, decoded) = if unsafe { ffi::ray_obj_type(raw.as_ptr()) } == ffi::RAY_TABLE
-            {
-                match storage::decode_query_table(&raw, &expanded.normalized_query) {
-                    Ok(d) => (storage::format_decoded_query_table(&d), Some(d)),
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": e.to_string()})),
-                        )
-                            .into_response();
-                    }
-                }
-            } else {
-                match state.engine.format_obj(&raw) {
-                    Ok(s) => (s, None),
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": e.to_string()})),
-                        )
-                            .into_response();
-                    }
-                }
-            };
+    match execute_prepared_query(&state.engine, &exoms, &expanded) {
+        Ok((output, decoded)) => {
             let mut payload = serde_json::json!({
                 "ok": true,
                 "output": output,
@@ -4053,4 +4196,87 @@ async fn api_start_session_gone() -> impl IntoResponse {
     )
     .with_status(410)
     .into_response()
+}
+
+#[cfg(test)]
+mod query_validation_tests {
+    use super::*;
+
+    fn parse_query(source: &str) -> CanonicalQuery {
+        lower_query_request(source, None, "test").expect("parse")
+    }
+
+    fn known() -> BTreeSet<String> {
+        known_relations_for_exom("main", &[])
+    }
+
+    #[test]
+    fn accepts_builtin_edb() {
+        let q = parse_query("(query main (find ?p ?v) (where (facts_i64 ?e ?p ?v)))");
+        validate_query_body(&q, &known()).expect("facts_i64 is a bound EDB");
+    }
+
+    #[test]
+    fn accepts_eav_form() {
+        let q = parse_query(
+            "(query main (find ?f ?p) (where (?f 'fact/predicate ?p)))",
+        );
+        validate_query_body(&q, &known()).expect("EAV atoms with variable leads should pass");
+    }
+
+    #[test]
+    fn accepts_builtin_view_idb() {
+        let q = parse_query("(query main (find ?f ?p ?v) (where (fact-row ?f ?p ?v)))");
+        validate_query_body(&q, &known()).expect("fact-row is a builtin view");
+    }
+
+    #[test]
+    fn accepts_nested_logical_and_cmp() {
+        let q = parse_query(
+            "(query main (find ?v) (where (and (facts_i64 ?e ?p ?v) (> ?v 5))))",
+        );
+        validate_query_body(&q, &known()).expect("and/cmp should descend and pass");
+    }
+
+    #[test]
+    fn accepts_aggregate_over_known_relation() {
+        let q = parse_query("(query main (find ?s) (where (sum ?s facts_i64 2)))");
+        validate_query_body(&q, &known()).expect("agg over known relation");
+    }
+
+    #[test]
+    fn rejects_typo_in_relation_name() {
+        let q = parse_query("(query main (find ?v) (where (facts_164 ?e ?p ?v)))");
+        let err = validate_query_body(&q, &known()).expect_err("typo should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("facts_164"), "error should mention the typo: {msg}");
+        assert!(msg.contains("facts_i64"), "should suggest the fix: {msg}");
+    }
+
+    #[test]
+    fn rejects_unknown_relation_in_aggregate() {
+        let q = parse_query("(query main (find ?s) (where (sum ?s bogus_rel 2)))");
+        let err = validate_query_body(&q, &known()).expect_err("unknown agg source");
+        assert!(err.to_string().contains("bogus_rel"));
+    }
+
+    #[test]
+    fn rejects_unknown_relation() {
+        let q = parse_query("(query main (find ?v) (where (no_such_relation ?e ?p ?v)))");
+        let err = validate_query_body(&q, &known()).expect_err("unknown relation");
+        assert!(err.to_string().contains("no_such_relation"));
+    }
+
+    #[test]
+    fn known_relations_includes_user_rule_heads() {
+        let parsed = crate::rules::parse_rule_line(
+            "(rule main (heavy ?f ?w) (facts_i64 ?f 'weight_kg ?w) (> ?w 60))",
+            MutationContext::default(),
+            "test".to_string(),
+        )
+        .expect("parse user rule");
+        let known = known_relations_for_exom("main", std::slice::from_ref(&parsed));
+        let q = parse_query("(query main (find ?f ?w) (where (heavy ?f ?w)))");
+        validate_query_body(&q, &known).expect("user rule head should be accepted");
+    }
 }

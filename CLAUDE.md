@@ -15,6 +15,19 @@ When creating any artifacts during chat session, save them in archive/<date>_<se
 
 When adding or modifying any db/rayfall interactions test them against the running ray-exomem daemon.
 
+### Live-test loop (mandatory for db/rayfall/server changes)
+
+Unit tests (`cargo test`) are not a substitute for this — the bug classes that matter here (engine error surfacing, EDB auto-register, sym-table load, typed-fact binding) only show up against a live daemon. After making changes touching `src/server.rs`, `src/brain.rs`, `src/storage.rs`, `src/backend.rs`, `src/auth/**`, or rayforce2 FFI, always:
+
+1. **Rebuild** — `cargo build --release --bin ray-exomem` (not just `cargo test`; `cargo test --lib --release` compiles a test binary, not the daemon binary).
+2. **Kill the old daemon** — `pgrep -lf "ray-exomem serve" | awk '{print $1}' | xargs -r kill`. Note: `ray-exomem stop` only finds daemons started via `ray-exomem daemon`; the dev-workflow `serve` invocation needs `kill` by PID.
+3. **Redeploy** — `ln -f target/release/ray-exomem ~/.local/bin/ray-exomem` (must be `ln -f`, not `cp` — see the macOS `com.apple.provenance` gotcha below).
+4. **Relaunch with env** — `set -a; source .env; set +a; nohup ~/.local/bin/ray-exomem serve --bind 127.0.0.1:9780 --auth-provider google --google-client-id "$GOOGLE_CLIENT_ID" --allowed-domains "$ALLOWED_DOMAINS" --database-url "$DATABASE_URL" > /tmp/ray-exomem.log 2>&1 &`.
+5. **Verify liveness** — `curl -s http://127.0.0.1:9780/ray-exomem/api/status` should return `ok: true`.
+6. **Exercise the change** — hit the specific endpoint/query the change affects via `curl`, confirm the expected HTTP status and error shape. Logs tail at `/tmp/ray-exomem.log`.
+
+The `server.build.identity` in `/api/status` is cached across rebuilds when `HEAD` hasn't moved; rely on binary mtime / size for "did the new code ship", not on the build-identity string.
+
 ## What this is
 
 `ray-exomem` is a persistent memory daemon for LLM agents.
