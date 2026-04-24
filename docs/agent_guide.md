@@ -252,6 +252,9 @@ ray-exomem retract project/status \
 - `eval` uses a literal source argument or `--file <path>`
 - `query` and `expand-query` accept `@file` or `-`
 
+Multi-line commands are preferred for readability. Use shell continuations for
+long CLI calls, and use `@file`, `--file`, or stdin for non-trivial Rayfall.
+
 Examples:
 
 ```bash

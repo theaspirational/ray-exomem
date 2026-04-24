@@ -38,15 +38,20 @@ fn export_json(base_url: &str, session: &str, exom: &str) -> serde_json::Value {
     .expect("export-json body should be json")
 }
 
-fn schema_relation_values(base_url: &str, session: &str, exom: &str, relation: &str) -> Vec<String> {
+fn schema_relation_values(
+    base_url: &str,
+    session: &str,
+    exom: &str,
+    relation: &str,
+) -> Vec<String> {
     let resp = ureq::get(&format!(
         "{base_url}/ray-exomem/api/schema?include_samples=true&sample_limit=20&exom={}&relation={}",
         encode_query_value(exom),
         encode_query_value(relation),
     ))
-        .set("Cookie", &format!("ray_exomem_session={session}"))
-        .call()
-        .expect("schema relation request should succeed");
+    .set("Cookie", &format!("ray_exomem_session={session}"))
+    .call()
+    .expect("schema relation request should succeed");
     let body: serde_json::Value = resp.into_json().expect("schema body should be json");
     body["relations"]
         .as_array()
@@ -60,7 +65,11 @@ fn schema_relation_values(base_url: &str, session: &str, exom: &str, relation: &
                 .cloned()
                 .unwrap_or_default()
         })
-        .filter_map(|row| row.get(0).and_then(|value| value.as_str()).map(str::to_string))
+        .filter_map(|row| {
+            row.get(0)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -307,33 +316,47 @@ fn login_bootstraps_user_namespace_and_owned_status() {
     assert!(
         daemon
             .tree_root()
-            .join("alice@co.com/personal/health/main/exom.json")
+            .join("alice@co.com/main/exom.json")
             .exists(),
-        "health project should be scaffolded on login"
+        "user brain dashboard should be scaffolded on login"
     );
     assert!(
-        daemon.tree_root().join("alice@co.com/work/main/exom.json").exists(),
+        daemon
+            .tree_root()
+            .join("alice@co.com/work/main/exom.json")
+            .exists(),
         "work/main should be scaffolded on login"
     );
     assert!(
         daemon
             .tree_root()
-            .join("alice@co.com/work/example/main/exom.json")
+            .join("alice@co.com/work/platform/memory-daemon/main/exom.json")
             .exists(),
-        "work/example/main should be scaffolded on login"
+        "memory-daemon project should be scaffolded on login"
+    );
+    assert!(
+        daemon
+            .tree_root()
+            .join("alice@co.com/work/platform/native-ui/main/exom.json")
+            .exists(),
+        "native-ui project should be scaffolded on login"
     );
 
     let owned_status = auth_get_raw(
         &daemon.base_url,
-        "/ray-exomem/api/status?exom=alice%40co.com%2Fwork%2Fmain",
+        "/ray-exomem/api/status?exom=alice%40co.com%2Fmain",
         &alice_session,
     )
-    .expect("owner should access status for their work/main");
+    .expect("owner should access status for their brain dashboard");
     assert_eq!(owned_status.status(), 200);
     let body: serde_json::Value = owned_status.into_json().unwrap();
-    assert_eq!(body["exom"], "alice@co.com/work/main");
+    assert_eq!(body["exom"], "alice@co.com/main");
 
-    match auth_get_raw(&daemon.base_url, "/ray-exomem/api/status?exom=main", &alice_session) {
+    match auth_get_raw(
+        &daemon.base_url,
+        "/ray-exomem/api/status?exom=main",
+        &alice_session,
+    ) {
         Err(ureq::Error::Status(403, _)) => {}
         Ok(resp) => panic!("expected 403 for legacy bare main, got {}", resp.status()),
         Err(err) => panic!("unexpected transport error: {err}"),
@@ -347,179 +370,163 @@ fn login_bootstrap_is_idempotent_and_preserves_existing_content() {
     let _admin_session = daemon.mock_login("admin@co.com", "Admin");
     let alice_session = daemon.mock_login("alice@co.com", "Alice");
 
-    let health_before = export_json(
-        &daemon.base_url,
-        &alice_session,
-        "alice@co.com/personal/health/main",
+    let dashboard_before = export_json(&daemon.base_url, &alice_session, "alice@co.com/main");
+    assert!(
+        dashboard_before["facts"].as_array().unwrap().len() >= 80,
+        "dashboard seed should be rich enough to exercise native facts/graph/history"
     );
-    assert_eq!(health_before["facts"].as_array().unwrap().len(), 6);
-    // Plan B2 + B3 declarative derivations: 5 water-band rules (small,
-    // large×2, medium×2), 3 step-band rules (high, medium, gentle),
-    // 6 recommended-* composition rules = 14 total. See
-    // `auth/routes.rs::health_bootstrap_rules` for the canonical set.
-    assert_eq!(health_before["rules"].as_array().unwrap().len(), 14);
+    assert_eq!(
+        dashboard_before["observations"].as_array().unwrap().len(),
+        7
+    );
+    assert_eq!(dashboard_before["beliefs"].as_array().unwrap().len(), 6);
+    assert_eq!(dashboard_before["branches"].as_array().unwrap().len(), 4);
+    assert_eq!(dashboard_before["rules"].as_array().unwrap().len(), 6);
 
     assert_fact_with_id(
         &daemon.base_url,
         &alice_session,
-        "alice@co.com/work/main",
+        "alice@co.com/main",
         "workspace/custom_note",
         "workspace/custom_note",
         "preserve me",
     );
-    let work_before = export_json(&daemon.base_url, &alice_session, "alice@co.com/work/main");
-    assert_eq!(work_before["facts"].as_array().unwrap().len(), 4);
-    assert!(work_before["rules"].as_array().unwrap().is_empty());
+    let after_custom = export_json(&daemon.base_url, &alice_session, "alice@co.com/main");
+    assert_eq!(
+        after_custom["facts"].as_array().unwrap().len(),
+        dashboard_before["facts"].as_array().unwrap().len() + 1
+    );
 
     let alice_second_session = daemon.mock_login("alice@co.com", "Alice");
-    let work_after = export_json(
-        &daemon.base_url,
-        &alice_second_session,
-        "alice@co.com/work/main",
+    let dashboard_after = export_json(&daemon.base_url, &alice_second_session, "alice@co.com/main");
+    assert_eq!(
+        dashboard_after["facts"].as_array().unwrap().len(),
+        after_custom["facts"].as_array().unwrap().len()
     );
     assert_eq!(
-        work_after["facts"].as_array().unwrap().len(),
-        work_before["facts"].as_array().unwrap().len()
+        dashboard_after["rules"].as_array().unwrap().len(),
+        after_custom["rules"].as_array().unwrap().len()
     );
-    assert_eq!(
-        work_after["rules"].as_array().unwrap().len(),
-        work_before["rules"].as_array().unwrap().len()
-    );
-    assert!(work_after["facts"].as_array().unwrap().iter().any(|fact| {
-        fact["fact_id"] == "workspace/custom_note" && fact["value"] == "preserve me"
-    }));
-
-    let health_after = export_json(
-        &daemon.base_url,
-        &alice_second_session,
-        "alice@co.com/personal/health/main",
-    );
-    assert_eq!(
-        health_after["facts"].as_array().unwrap().len(),
-        health_before["facts"].as_array().unwrap().len()
-    );
-    assert_eq!(
-        health_after["rules"].as_array().unwrap().len(),
-        health_before["rules"].as_array().unwrap().len()
-    );
+    assert!(dashboard_after["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|fact| {
+            fact["fact_id"] == "workspace/custom_note" && fact["value"] == "preserve me"
+        }));
 }
 
-// Plan B2 + B3: declarative health-band rules over `facts_i64`. The rules
-// live in `auth/routes.rs::health_bootstrap_rules` and are exercised
-// directly against the rayforce2 engine in
-// `tests/typed_facts_e2e.rs::plan_verbatim_*`. This test additionally
-// verifies the rules survive the full HTTP + expand-query pipeline.
-//
-// KNOWN LIMITATION (rayforce2): when a mutation happens between two
-// queries in the SAME engine, the second query may return the UNION of
-// the pre- and post-mutation derived rows instead of only the current
-// ones. The bug appears only for multi-stratum rule sets where a
-// constant-head IDB (here `health/water-band` / `health/step-band`) is
-// consumed by a downstream rule (here `health/recommended-*`). Isolated
-// numeric threshold changes via the HTTP mutation endpoint are the
-// cleanest reproducer. We exercise only the INITIAL static-profile case
-// here; the threshold-sweep variants previously part of this test await
-// the rayforce2 fix.
 #[test]
-fn health_bootstrap_derivations_follow_thresholds() {
+fn brain_bootstrap_derivations_identify_operational_memory() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
 
     let _admin_session = daemon.mock_login("admin@co.com", "Admin");
     let alice_session = daemon.mock_login("alice@co.com", "Alice");
-    let health_exom = "alice@co.com/personal/health/main";
+    let dashboard_exom = "alice@co.com/main";
     let expanded = expand_query(
         &daemon.base_url,
         &alice_session,
-        "(query alice@co.com/personal/health/main (find ?value) (where (health/recommended-water-ml ?value)))",
+        "(query alice@co.com/main (find ?id) (where (high_priority ?id)))",
     );
     assert!(
         expanded["expanded_query"]
             .as_str()
             .unwrap()
-            .contains(r#"(health/water-band "medium")"#),
-        "expanded query should inline the `(health/water-band \"medium\")` rule body"
+            .contains(r#"(facts_i64 ?id 'project/priority ?p)"#),
+        "expanded query should inline the project priority rule body"
     );
 
-    assert_eq!(
-        schema_relation_values(
-            &daemon.base_url,
-            &alice_session,
-            health_exom,
-            "health/recommended-water-ml",
-        ),
-        vec!["2500".to_string()],
-        "default profile (75kg, 175cm, age 30) should derive recommended-water-ml 2500 (medium band)"
+    let high_priority = schema_relation_values(
+        &daemon.base_url,
+        &alice_session,
+        dashboard_exom,
+        "high_priority",
     );
-    assert_eq!(
-        schema_relation_values(
-            &daemon.base_url,
-            &alice_session,
-            health_exom,
-            "health/recommended-steps-per-day",
-        ),
-        vec!["9000".to_string()],
-        "default profile (age 30) should derive recommended-steps-per-day 9000 (medium step band)"
+    assert!(
+        high_priority.contains(&"project/ray-exomem#priority".to_string()),
+        "ray-exomem should derive as high priority: {high_priority:?}"
     );
-    assert_eq!(
-        schema_relation_values(
-            &daemon.base_url,
-            &alice_session,
-            health_exom,
-            "health/water-band",
-        ),
-        vec!["medium".to_string()],
+    assert!(
+        high_priority.contains(&"project/native-ui#priority".to_string()),
+        "native UI should derive as high priority: {high_priority:?}"
     );
-    assert_eq!(
+
+    assert!(
         schema_relation_values(
             &daemon.base_url,
             &alice_session,
-            health_exom,
-            "health/step-band",
-        ),
-        vec!["medium".to_string()],
+            dashboard_exom,
+            "stale_open_question",
+        )
+        .contains(&"question/branch-merge#age".to_string()),
+        "old open branch question should derive as stale"
+    );
+    assert!(
+        schema_relation_values(
+            &daemon.base_url,
+            &alice_session,
+            dashboard_exom,
+            "decision_review_due",
+        )
+        .contains(&"decision/valid-time#review".to_string()),
+        "valid-time decision should derive as due for review"
     );
 }
 
 #[test]
-fn health_schema_samples_include_native_helpers_and_recommendations() {
+fn brain_schema_and_graph_samples_include_native_seed_layers() {
     let daemon = TestDaemonBuilder::new().with_auth().start();
 
     let _admin_session = daemon.mock_login("admin@co.com", "Admin");
     let alice_session = daemon.mock_login("alice@co.com", "Alice");
-    let schema = schema_with_samples(
-        &daemon.base_url,
-        &alice_session,
-        "alice@co.com/personal/health/main",
+    let exom = "alice@co.com/main";
+    let schema = schema_with_samples(&daemon.base_url, &alice_session, exom);
+
+    assert!(
+        find_relation(&schema, "project/priority")["cardinality"]
+            .as_u64()
+            .unwrap()
+            >= 5
+    );
+    assert!(
+        find_relation(&schema, "observation")["cardinality"]
+            .as_u64()
+            .unwrap()
+            >= 7
+    );
+    assert!(
+        find_relation(&schema, "belief")["cardinality"]
+            .as_u64()
+            .unwrap()
+            >= 5
     );
 
-    assert_eq!(
-        find_relation(&schema, "health/water-band")["sample_tuples"],
-        json!([["medium"]])
-    );
-    assert_eq!(
-        find_relation(&schema, "health/step-band")["sample_tuples"],
-        json!([["medium"]])
-    );
-    assert_eq!(
-        find_relation(&schema, "health/recommended-water-ml")["sample_tuples"],
-        json!([["2500"]])
-    );
-    assert_eq!(
-        find_relation(&schema, "health/recommended-steps-per-day")["sample_tuples"],
-        json!([["9000"]])
-    );
+    let high_priority = find_relation(&schema, "high_priority")["sample_tuples"]
+        .as_array()
+        .unwrap();
     assert!(
-        schema["ontology"]["user_predicates"]
-            .as_array()
-            .unwrap()
+        high_priority
             .iter()
-            .any(|value| value == "health/water-band")
+            .any(|row| row.get(0).and_then(|v| v.as_str()) == Some("project/ray-exomem#priority")),
+        "schema should sample derived high-priority rows: {schema}"
     );
-    assert!(
-        schema["ontology"]["user_predicates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "health/step-band")
-    );
+
+    let graph_resp = auth_get_raw(
+        &daemon.base_url,
+        "/ray-exomem/api/relation-graph?exom=alice%40co.com%2Fmain",
+        &alice_session,
+    )
+    .expect("relation graph should succeed");
+    assert_eq!(graph_resp.status(), 200);
+    let graph: serde_json::Value = graph_resp.into_json().unwrap();
+    assert!(graph["summary"]["node_count"].as_u64().unwrap() > 30);
+    assert!(graph["summary"]["edge_count"].as_u64().unwrap() > 70);
+    assert!(graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| { node["id"] == "project/ray-exomem" }));
+    assert!(graph["edges"].as_array().unwrap().iter().any(|edge| {
+        edge["source"] == "project/ray-exomem" && edge["predicate"] == "project/status"
+    }));
 }

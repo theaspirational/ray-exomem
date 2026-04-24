@@ -291,7 +291,7 @@ export async function fetchEntityFacts(
 		if (!rel.sample_tuples) continue;
 		for (const tuple of rel.sample_tuples) {
 			const terms = tuple.map(String);
-			if (terms.some((t) => t === entity)) {
+			if (terms.some((t) => t === entity || t.startsWith(`${entity}#`))) {
 				facts.push({
 					predicate: rel.name,
 					terms,

@@ -2,9 +2,11 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
+	import { auth } from '$lib/auth.svelte';
 
 	onMount(() => {
-		void goto(`${base}/tree/`, { replaceState: true });
+		const defaultPath = auth.user?.email ? `${auth.user.email}/main` : '';
+		void goto(`${base}/tree/${defaultPath}`, { replaceState: true });
 	});
 </script>
 

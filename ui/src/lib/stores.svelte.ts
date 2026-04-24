@@ -22,7 +22,7 @@ class AppState {
 	}
 
 	defaultExomForUser(email: string): string {
-		return `${email}/work/main`;
+		return `${email}/main`;
 	}
 
 	ensureAuthenticatedDefaultExom(email: string | null) {

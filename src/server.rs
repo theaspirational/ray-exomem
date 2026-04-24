@@ -4012,6 +4012,46 @@ async fn api_provenance(
 // GET /relation-graph
 // ---------------------------------------------------------------------------
 
+fn relation_graph_subject(fact_id: &str) -> String {
+    fact_id
+        .split_once('#')
+        .map(|(entity, _)| entity)
+        .unwrap_or(fact_id)
+        .to_string()
+}
+
+fn relation_graph_label(id: &str) -> String {
+    let raw = id
+        .rsplit(['/', ':', '#'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(id);
+    if raw.len() > 48 {
+        format!("{}...", &raw[..45])
+    } else {
+        raw.to_string()
+    }
+}
+
+fn value_looks_like_entity(value: &str) -> bool {
+    if value.starts_with("repo:") || value.starts_with("doc:") || value.starts_with("command:") {
+        return true;
+    }
+    value.contains('/') && !value.contains(char::is_whitespace)
+}
+
+fn relation_graph_target(fact: &crate::brain::Fact) -> (String, String) {
+    let display = fact.value.display();
+    if value_looks_like_entity(&display) {
+        (display.clone(), relation_graph_label(&display))
+    } else {
+        (
+            format!("{}={display}", fact.predicate),
+            relation_graph_label(&display),
+        )
+    }
+}
+
 async fn api_relation_graph(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
@@ -4034,17 +4074,39 @@ async fn api_relation_graph(
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
     let facts = es.brain.current_facts();
-    let mut preds: HashMap<&str, usize> = HashMap::new();
-    for f in &facts {
-        *preds.entry(&f.predicate).or_default() += 1;
+    let mut nodes: HashMap<String, (String, usize)> = HashMap::new();
+    let mut edges = Vec::new();
+    for fact in &facts {
+        let source = relation_graph_subject(&fact.fact_id);
+        let (target, target_label) = relation_graph_target(fact);
+        if source == target {
+            continue;
+        }
+        nodes
+            .entry(source.clone())
+            .and_modify(|(_, degree)| *degree += 1)
+            .or_insert_with(|| (relation_graph_label(&source), 1));
+        nodes
+            .entry(target.clone())
+            .and_modify(|(_, degree)| *degree += 1)
+            .or_insert((target_label, 1));
+        edges.push(serde_json::json!({
+            "source": source,
+            "target": target,
+            "label": fact.predicate,
+            "predicate": fact.predicate,
+            "kind": "base",
+        }));
     }
-    let nodes: Vec<_> = preds
-        .iter()
-        .map(|(pred, count)| serde_json::json!({"id": *pred, "label": *pred, "degree": count}))
+    let edge_count = edges.len();
+    let nodes: Vec<_> = nodes
+        .into_iter()
+        .map(|(id, (label, degree))| serde_json::json!({"id": id, "label": label, "degree": degree}))
         .collect();
+    let node_count = nodes.len();
     Json(serde_json::json!({
-        "nodes": nodes, "edges": [],
-        "summary": {"node_count": nodes.len(), "edge_count": 0}
+        "nodes": nodes, "edges": edges,
+        "summary": {"node_count": node_count, "edge_count": edge_count}
     }))
     .into_response()
 }
