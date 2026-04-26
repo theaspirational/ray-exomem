@@ -82,13 +82,13 @@ mod tests {
     #[test]
     fn init_creates_main_and_sessions() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::ath::lynx::orsl")).unwrap();
+        init_project(d.path(), &tp("work::team::project::repo")).unwrap();
         assert_eq!(
-            classify(&d.path().join("work/ath/lynx/orsl/main")),
+            classify(&d.path().join("work/team/project/repo/main")),
             NodeKind::Exom
         );
         assert_eq!(
-            classify(&d.path().join("work/ath/lynx/orsl/sessions")),
+            classify(&d.path().join("work/team/project/repo/sessions")),
             NodeKind::Folder
         );
     }
@@ -96,18 +96,18 @@ mod tests {
     #[test]
     fn init_is_idempotent() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::ath")).unwrap();
-        init_project(d.path(), &tp("work::ath")).unwrap();
+        init_project(d.path(), &tp("work::team")).unwrap();
+        init_project(d.path(), &tp("work::team")).unwrap();
     }
 
     #[test]
     fn projects_nest_freely() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::ath::lynx::orsl")).unwrap();
-        init_project(d.path(), &tp("work::ath")).unwrap();
-        assert_eq!(classify(&d.path().join("work/ath/main")), NodeKind::Exom);
+        init_project(d.path(), &tp("work::team::project::repo")).unwrap();
+        init_project(d.path(), &tp("work::team")).unwrap();
+        assert_eq!(classify(&d.path().join("work/team/main")), NodeKind::Exom);
         assert_eq!(
-            classify(&d.path().join("work/ath/lynx/orsl/main")),
+            classify(&d.path().join("work/team/project/repo/main")),
             NodeKind::Exom
         );
     }

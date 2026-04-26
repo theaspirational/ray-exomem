@@ -83,7 +83,9 @@ Gotchas specific to this setup:
 - The repo is mid-migration from the old flat-exom flow to the tree/session model. Prefer `ray-exomem inspect`, `init`, `exom-new`, `session ...`, and `GET /api/tree`. `/api/exoms` and `POST /api/actions/start-session` are removed, and the legacy `start-session` / `exoms` CLI helpers should not be treated as the primary path.
 - In authenticated UI mode, mutation actor attribution should fall back to the logged-in email. Do not require a separate `ray-exomem-actor` localStorage value for basic writes.
 - JSONL auth replay must preserve `user.active` / `last_login` on repeated `user` entries. A naive replay that resets them on login makes deactivation appear to succeed in the UI while leaving the account effectively active.
-- The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These require rayforce2 at `feature/datalog-aggregates` HEAD ≥ `862846e` (head-const projection + auto-registered env-bound EDBs). If the sibling `../rayforce2` checkout is on `master` or pre-`862846e`, bootstrap rule registration fails with unstratifiable-negation / missing-relation errors. Either switch the sibling to `feature/datalog-aggregates` or wait for upstream merge.
+- The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These require rayforce2 master ≥ `dda2b98` (PR #7 merged: head-const projection + auto-registered env-bound EDBs). If the sibling `../rayforce2` checkout is on a commit older than `dda2b98`, bootstrap rule registration fails with unstratifiable-negation / missing-relation errors.
+- The runtime uses `ray_runtime_create_with_sym_err` so persisted user symbol IDs keep their slots across binary upgrades — builtins are appended afterwards, not interleaved. This is the correct design. **Caveat:** if a rayforce2 update changes the _shape_ of an existing builtin's interning (e.g. master commit `7db37e4` made `.sys.gc` a dotted sym backed by a `.sys` dict where it used to be a flat interned name), the old sym file's flat-interned `.sys.gc` slot will conflict with the new dotted registration path and queries fail with `RAY_ERROR code=domain` (empty msg — see the `__VM` shadowing bug below). Startup runs a canonical health probe (`engine_health_probe` in `src/server.rs`) to surface this loudly instead of failing silently at first query time. **Do not wipe `~/.ray-exomem/sym` as a reflex** — that strands every persisted RAY_SYM column on disk (fact ids, predicates, etc.) because splay tables encode sym IDs by slot. The forward path is either (a) file an upstream issue asking for a sym-compat contract across such refactors, or (b) implement the rewrite-on-startup migration spec'd in `archive/2026-04-24_sym-rewrite-migration/design.md`.
+- rayforce2 has duplicate `static _Thread_local ray_vm_t *__VM = NULL;` declarations in both `src/core/runtime.c` and `src/lang/eval.c` — they shadow each other instead of sharing storage. As a result, `ray_error_msg()` (which reads runtime.c's `__VM`) returns NULL on any thread that didn't call `ray_runtime_create`, including every tokio worker thread. The eval's RAY_ERROR object still carries the 8-byte ASCII code in `sdata` (read via `ray_err_code`, see `src/backend.rs::eval_raw`), so we get the label but lose the explanatory string. Worth filing upstream.
 - Fact values are typed at the API/brain layer via `FactValue { I64 | Str | Sym }` (`src/fact_value.rs`). Splay emits parallel `facts_i64` / `facts_str` / `facts_sym` EDBs so Datalog rule bodies can run cmp/agg against numeric columns natively. Only typed asserts populate `facts_i64`. Bootstrap seeds numeric profile predicates (weight_kg, height_cm, age) as `FactValue::I64` — if a pre-typed-values exom still has them as `Str`, the derivation rules won't fire until those facts are re-asserted typed.
 
 ## Current agent-facing workflow
@@ -91,12 +93,12 @@ Gotchas specific to this setup:
 ```bash
 ray-exomem daemon
 ray-exomem inspect
-ray-exomem init work::ath::lynx::orsl
-ray-exomem session new work::ath::lynx::orsl --name landing-page --multi --actor orchestrator --agents agent-a,agent-b
-ray-exomem query --exom work::ath::lynx::orsl::main --json
+ray-exomem init work::team::project::repo
+ray-exomem session new work::team::project::repo --name landing-page --multi --actor orchestrator --agents agent-a,agent-b
+ray-exomem query --exom work::team::project::repo::main --json
 ```
 
-- Prefer tree paths (`work::ath::lynx::orsl::main`) over the old flat `main` mental model.
+- Prefer tree paths (`work::team::project::repo::main`) over the old flat `main` mental model.
 - Prefer `query --json` for reads.
 - Use `expand-query` when debugging query lowering or injected rules.
 - `assert <predicate> <value>` uses the structured assert path when `--source`, `--confidence`, `--valid-from`, or `--valid-to` is provided.

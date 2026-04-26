@@ -264,9 +264,9 @@ enum SessionCmd {
     version = env!("CARGO_PKG_VERSION"),
     about = "Native rayforce2 exomemory front-end — Rayfall list-style syntax only",
     long_about = "ray-exomem persists memory as a tree of folders and exoms.\n\n\
-                  Tree:        work/ath/lynx/orsl/main              (the project's main exom)\n\
-                               work/ath/lynx/orsl/sessions/<id>     (per-session exoms)\n\
-                  CLI paths:   work::ath::lynx::orsl::main          (`::`  ==  `/`)\n\
+                  Tree:        work/team/project/repo/main          (the project's main exom)\n\
+                               work/team/project/repo/sessions/<id> (per-session exoms)\n\
+                  CLI paths:   work::team::project::repo::main      (`::`  ==  `/`)\n\
                   Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)\n\
                   Writes:      always require --actor <name>\n\
                   Full agent workflow:   ray-exomem guide\n\n\
@@ -714,7 +714,7 @@ enum Commands {
 
     /// Scaffold a project (main exom + sessions/) at the given tree path.
     Init {
-        /// Tree path, e.g. work::ath::lynx::orsl or work/ath/lynx/orsl.
+        /// Tree path, e.g. work::team::project::repo or work/team/project/repo.
         path: String,
     },
 
@@ -1502,7 +1502,7 @@ fn main() {
             let mut state = match ray_exomem::server::AppState::from_data_dir(resolved_data_dir) {
                 Ok(s) => s,
                 Err(err) => {
-                    eprintln!("error: {}", err);
+                    eprintln!("error: {:#}", err);
                     std::process::exit(1);
                 }
             };

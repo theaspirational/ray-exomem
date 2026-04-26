@@ -254,16 +254,16 @@ mod tests {
 
     #[test]
     fn parses_double_colon() {
-        let p: TreePath = "work::ath::lynx::orsl::main".parse().unwrap();
-        assert_eq!(p.segments(), &["work","ath","lynx","orsl","main"]);
-        assert_eq!(p.to_cli_string(), "work::ath::lynx::orsl::main");
-        assert_eq!(p.to_slash_string(), "work/ath/lynx/orsl/main");
+        let p: TreePath = "work::team::project::repo::main".parse().unwrap();
+        assert_eq!(p.segments(), &["work","team","project","repo","main"]);
+        assert_eq!(p.to_cli_string(), "work::team::project::repo::main");
+        assert_eq!(p.to_slash_string(), "work/team/project/repo/main");
     }
 
     #[test]
     fn parses_slash() {
-        let p: TreePath = "work/ath/lynx".parse().unwrap();
-        assert_eq!(p.segments(), &["work","ath","lynx"]);
+        let p: TreePath = "work/team/project".parse().unwrap();
+        assert_eq!(p.segments(), &["work","team","project"]);
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("work/ath")).unwrap();
         fs::write(d.path().join("work/ath/exom.json"), "{}").unwrap();
-        let p: TreePath = "work::ath::lynx".parse().unwrap();
+        let p: TreePath = "work::team::project".parse().unwrap();
         assert!(check_no_exom_ancestor(d.path(), &p).is_err());
     }
 
@@ -762,9 +762,9 @@ mod tests {
     #[test]
     fn init_creates_main_and_sessions() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::ath::lynx::orsl")).unwrap();
-        assert_eq!(classify(&d.path().join("work/ath/lynx/orsl/main")), NodeKind::Exom);
-        assert_eq!(classify(&d.path().join("work/ath/lynx/orsl/sessions")), NodeKind::Folder);
+        init_project(d.path(), &tp("work::team::project::repo")).unwrap();
+        assert_eq!(classify(&d.path().join("work/team/project/repo/main")), NodeKind::Exom);
+        assert_eq!(classify(&d.path().join("work/team/project/repo/sessions")), NodeKind::Folder);
     }
 
     #[test]
@@ -777,10 +777,10 @@ mod tests {
     #[test]
     fn projects_nest_freely() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::ath::lynx::orsl")).unwrap();
+        init_project(d.path(), &tp("work::team::project::repo")).unwrap();
         init_project(d.path(), &tp("work::ath")).unwrap();
         assert_eq!(classify(&d.path().join("work/ath/main")), NodeKind::Exom);
-        assert_eq!(classify(&d.path().join("work/ath/lynx/orsl/main")), NodeKind::Exom);
+        assert_eq!(classify(&d.path().join("work/team/project/repo/main")), NodeKind::Exom);
     }
 
     #[test]
@@ -936,7 +936,7 @@ Append to the `tests` module:
 #[test]
 fn walks_a_scaffolded_project() {
     let d = tempdir().unwrap();
-    crate::scaffold::init_project(d.path(), &"work::ath::lynx::orsl".parse().unwrap()).unwrap();
+    crate::scaffold::init_project(d.path(), &"work::team::project::repo".parse().unwrap()).unwrap();
     let root: crate::path::TreePath = "work".parse().unwrap();
     let node = walk(d.path(), &root, &WalkOptions {
         depth: Some(5),
@@ -1977,10 +1977,10 @@ fn run(d: &TestDaemon, args: &[&str]) -> std::process::Output {
 #[test]
 fn init_creates_project_on_disk() {
     let d = TestDaemon::start();
-    let out = run(&d, &["init", "work::ath::lynx::orsl"]);
+    let out = run(&d, &["init", "work::team::project::repo"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(d.tree_root().join("work/ath/lynx/orsl/main/exom.json").exists());
-    assert!(d.tree_root().join("work/ath/lynx/orsl/sessions").is_dir());
+    assert!(d.tree_root().join("work/team/project/repo/main/exom.json").exists());
+    assert!(d.tree_root().join("work/team/project/repo/sessions").is_dir());
 }
 ```
 
@@ -2085,7 +2085,7 @@ Render example:
 ```
 work/
 └── ath/
-    └── lynx/
+    └── team/
         └── orsl/
             ├── main              (exom, 142 facts, branch: main)
             └── sessions/
@@ -2099,7 +2099,7 @@ work/
 #[test]
 fn inspect_prints_tree() {
     let d = TestDaemon::start();
-    run(&d, &["init", "work::ath::lynx::orsl"]);
+    run(&d, &["init", "work::team::project::repo"]);
     let out = run(&d, &["inspect", "work", "--depth", "4"]);
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("orsl/"));
@@ -2135,9 +2135,9 @@ Command::Guide => {
 #[command(
     name = "ray-exomem",
     long_about = "Ray-exomem persists memory as a tree of folders and exoms.\n\
-  Tree:        work/ath/lynx/orsl/main              (the project's main exom)\n\
-               work/ath/lynx/orsl/sessions/<id>     (per-session exoms)\n\
-  CLI paths:   work::ath::lynx::orsl::main          (`::` == `/`)\n\
+  Tree:        work/team/project/repo/main              (the project's main exom)\n\
+               work/team/project/repo/sessions/<id>     (per-session exoms)\n\
+  CLI paths:   work::team::project::repo::main          (`::` == `/`)\n\
   Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)\n\
   Writes:      always require --actor <name>\n\
   Full agent workflow:   ray-exomem guide\n"
@@ -2760,12 +2760,12 @@ fn full_nested_exoms_flow() {
 
     // 1. Init a nested project.
     ureq::post(&format!("{}/api/actions/init", d.base_url))
-        .send_json(json!({"path": "work::ath::lynx::orsl"})).unwrap();
+        .send_json(json!({"path": "work::team::project::repo"})).unwrap();
 
     // 2. Start a multi-agent session.
     let s: serde_json::Value = ureq::post(&format!("{}/api/actions/session-new", d.base_url))
         .send_json(json!({
-            "project_path": "work::ath::lynx::orsl",
+            "project_path": "work::team::project::repo",
             "type": "multi",
             "label": "landing",
             "actor": "orchestrator",
@@ -2825,12 +2825,12 @@ fn full_nested_exoms_flow() {
 
     // 7. Rename the mid-tree folder; verify tree reflects new path.
     ureq::post(&format!("{}/api/actions/rename", d.base_url))
-        .send_json(json!({"path":"work::ath::lynx","new_segment":"lynx2"})).unwrap();
+        .send_json(json!({"path":"work::team::project","new_segment":"team2"})).unwrap();
     let tree: serde_json::Value = ureq::get(&format!("{}/api/tree?path=work/ath", d.base_url))
         .call().unwrap().into_json().unwrap();
     let s = serde_json::to_string(&tree).unwrap();
-    assert!(s.contains("lynx2"));
-    assert!(!s.contains("\"name\":\"lynx\""));
+    assert!(s.contains("team2"));
+    assert!(!s.contains("\"name\":\"team\""));
 }
 ```
 
@@ -2865,8 +2865,8 @@ cargo build --release
 ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
 rm -rf ~/.ray-exomem
 ray-exomem daemon
-ray-exomem init work::ath::lynx::orsl
-ray-exomem session new work::ath::lynx::orsl \
+ray-exomem init work::team::project::repo
+ray-exomem session new work::team::project::repo \
   --multi --name landing --actor orchestrator \
   --agents agent_a,agent_b
 ray-exomem inspect work --depth 4 --branches

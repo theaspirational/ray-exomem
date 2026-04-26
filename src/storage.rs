@@ -140,6 +140,43 @@ fn splay_save_raw(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Like `save_table` but passes NULL for the sym path, so
+/// `ray_splay_save` does NOT call `ray_sym_save` internally. Needed by
+/// the sym-rewrite migration: during the rewrite the on-disk sym file
+/// is intentionally stale relative to the in-memory sym table, which
+/// would trip `ray_sym_save`'s divergence check.
+pub fn save_table_skip_sym(table: &RayObj, dir: &Path) -> Result<()> {
+    let new_dir = dir.with_extension("new");
+    let old_dir = dir.with_extension("old");
+
+    if new_dir.exists() {
+        let _ = std::fs::remove_dir_all(&new_dir);
+    }
+
+    std::fs::create_dir_all(&new_dir)
+        .with_context(|| format!("failed to create splay dir {}", new_dir.display()))?;
+    let c_dir = path_to_cstring(&new_dir)?;
+    let err = unsafe { ffi::ray_splay_save(table.as_ptr(), c_dir.as_ptr(), std::ptr::null()) };
+    if err != ffi::RAY_OK {
+        bail!(
+            "ray_splay_save (no-sym) failed for {} (error code {})",
+            new_dir.display(),
+            err
+        );
+    }
+
+    if dir.exists() {
+        std::fs::rename(dir, &old_dir)
+            .with_context(|| format!("rename {} → {}", dir.display(), old_dir.display()))?;
+    }
+    std::fs::rename(&new_dir, dir)
+        .with_context(|| format!("rename {} → {}", new_dir.display(), dir.display()))?;
+    if old_dir.exists() {
+        let _ = std::fs::remove_dir_all(&old_dir);
+    }
+    Ok(())
+}
+
 /// Atomic splay write: write to dir.new/, then swap directories.
 ///
 /// On crash:
@@ -200,8 +237,44 @@ pub fn load_table(dir: &Path, sym_path: &Path) -> Result<RayObj> {
     let c_dir = path_to_cstring(dir)?;
     let c_sym = path_to_cstring(sym_path)?;
     let ptr = unsafe { ffi::ray_read_splayed(c_dir.as_ptr(), c_sym.as_ptr()) };
+    wrap_splay_result(ptr, dir)
+}
+
+/// Load a splay using the CURRENT in-memory sym table, skipping
+/// `ray_sym_load`. Required by the sym-rewrite migration: the on-disk
+/// sym file is intentionally out of sync with in-memory during the
+/// rewrite, so triggering a merge-check would fail.
+pub fn load_table_skip_sym(dir: &Path) -> Result<RayObj> {
+    let c_dir = path_to_cstring(dir)?;
+    let ptr = unsafe { ffi::ray_read_splayed(c_dir.as_ptr(), std::ptr::null()) };
+    wrap_splay_result(ptr, dir)
+}
+
+fn wrap_splay_result(ptr: *mut ffi::ray_t, dir: &Path) -> Result<RayObj> {
+    if ptr.is_null() {
+        bail!("ray_read_splayed returned null for {}", dir.display());
+    }
+    // A RAY_ERROR object slipping through as a valid result silently
+    // produces empty ncols/nrows later — surface it here instead.
+    let ty = unsafe { ffi::ray_obj_type(ptr) };
+    if ty == ffi::RAY_ERROR {
+        let code_ptr = unsafe { ffi::ray_err_code(ptr) };
+        let code = if code_ptr.is_null() {
+            "(unknown)".to_string()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(code_ptr) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        unsafe { ffi::ray_release(ptr) };
+        bail!(
+            "ray_read_splayed returned RAY_ERROR ({}) for {}",
+            code,
+            dir.display()
+        );
+    }
     RayObj::from_raw(ptr)
-        .with_context(|| format!("ray_read_splayed (mmap) failed for {}", dir.display()))
+        .with_context(|| format!("ray_read_splayed (mmap) wrapping failed for {}", dir.display()))
 }
 
 pub fn table_exists(dir: &Path) -> bool {

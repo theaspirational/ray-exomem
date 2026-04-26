@@ -398,9 +398,9 @@ mod tests {
     #[test]
     fn ancestor_exom_blocks_nesting() {
         let d = tempdir().unwrap();
-        fs::create_dir_all(d.path().join("work/ath")).unwrap();
-        fs::write(d.path().join("work/ath/exom.json"), "{}").unwrap();
-        let p: TreePath = "work::ath::lynx".parse().unwrap();
+        fs::create_dir_all(d.path().join("work/team")).unwrap();
+        fs::write(d.path().join("work/team/exom.json"), "{}").unwrap();
+        let p: TreePath = "work::team::project".parse().unwrap();
         assert!(check_no_exom_ancestor(d.path(), &p).is_err());
     }
 
@@ -417,7 +417,7 @@ mod tests {
     fn walks_a_scaffolded_project() {
         let d = tempdir().unwrap();
         let sym = d.path().join("sym");
-        crate::scaffold::init_project(d.path(), &"work::ath::lynx::orsl".parse().unwrap()).unwrap();
+        crate::scaffold::init_project(d.path(), &"work::team::project::repo".parse().unwrap()).unwrap();
         let root: crate::path::TreePath = "work".parse().unwrap();
         let node = walk(
             d.path(),

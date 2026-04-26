@@ -6,7 +6,7 @@
 
 ## 1. Summary
 
-Ray-exomem today stores memory as a flat namespace of exoms. This design replaces it with a tree of folders and exoms, shipped with one fixed schema (project with `main` + `sessions/`), and reworks the CLI, HTTP API, and UI around that tree. It introduces a unified path-based addressing model (`work::ath::lynx::orsl::main` on the CLI, `work/ath/lynx/orsl/main` on disk and in the UI), TOFU branch ownership for multi-agent sessions, and an agent-guidance surface (`--help` blurb plus a `ray-exomem guide` subcommand) that teaches the workflow on first contact.
+Ray-exomem today stores memory as a flat namespace of exoms. This design replaces it with a tree of folders and exoms, shipped with one fixed schema (project with `main` + `sessions/`), and reworks the CLI, HTTP API, and UI around that tree. It introduces a unified path-based addressing model (`work::team::project::repo::main` on the CLI, `work/team/project/repo/main` on disk and in the UI), TOFU branch ownership for multi-agent sessions, and an agent-guidance surface (`--help` blurb plus a `ray-exomem guide` subcommand) that teaches the workflow on first contact.
 
 ## 2. Goals
 
@@ -34,8 +34,8 @@ Ray-exomem today stores memory as a flat namespace of exoms. This design replace
 
 ### 4.2 Addressing
 
-- **CLI:** `::`-separated path. Example: `work::ath::lynx::orsl::main`.
-- **Disk and UI:** `/`-separated path. Example: `work/ath/lynx/orsl/main`.
+- **CLI:** `::`-separated path. Example: `work::team::project::repo::main`.
+- **Disk and UI:** `/`-separated path. Example: `work/team/project/repo/main`.
 - **One unified address flag:** `--exom <path>`. No `--project`, no `--session` on the addressing side. Paths must end at an exom, except on commands that accept folder paths (`inspect`, `init`).
 - **Branch is separate:** `--branch <name>`. Defaults to literal `main`. Not part of the path.
 - **Actor is separate:** `--actor <name>`. Required on every write.
@@ -50,7 +50,7 @@ Ray-exomem today stores memory as a flat namespace of exoms. This design replace
 
 Ray-exomem ships **one** schema. Users do not define their own.
 
-- `init <path>` — creates any missing folder segments along `<path>`, then creates `main` (exom) and `sessions/` (folder) inside the leaf. Idempotent. Safe at any depth. Projects nest freely: `init work::ath` and `init work::ath::lynx::orsl` coexist, each is a project, facts can live at multiple depths in the same chain.
+- `init <path>` — creates any missing folder segments along `<path>`, then creates `main` (exom) and `sessions/` (folder) inside the leaf. Idempotent. Safe at any depth. Projects nest freely: `init work::ath` and `init work::team::project::repo` coexist, each is a project, facts can live at multiple depths in the same chain.
 - `exom new <path>` — creates a bare exom at the given path with no scaffolding. Parent folders are auto-created. Escape hatch for arbitrary memory spaces that don't need `main`/`sessions`.
 
 ## 5. On-disk persistence layout
@@ -64,7 +64,7 @@ Ray-exomem ships **one** schema. Users do not define their own.
 └── tree/                            # renamed from today's `exoms/`
     └── work/                        # folder (no exom.json)
         └── ath/                     # folder
-            └── lynx/                # folder
+            └── team/                # folder
                 └── orsl/            # folder (also a project)
                     ├── main/        # exom (has exom.json + splay tables)
                     │   ├── exom.json
@@ -309,11 +309,11 @@ Triggered from the drawer right-click menu. Behaves differently based on node ki
 For folders and non-session exoms, the modal is:
 
 ```
-Rename "work/ath/lynx/orsl" → "work/ath/lynx/orsl2"
+Rename "work/team/project/repo" → "work/team/project/repo2"
 
 This will change 14 descendant paths:
-  work/ath/lynx/orsl/main                    → work/ath/lynx/orsl2/main
-  work/ath/lynx/orsl/sessions/20260411…      → work/ath/lynx/orsl2/sessions/20260411…
+  work/team/project/repo/main                    → work/team/project/repo2/main
+  work/team/project/repo/sessions/20260411…      → work/team/project/repo2/sessions/20260411…
   …
 
 ⚠ Running agents targeting the old path will fail on their next write.
@@ -372,9 +372,9 @@ The plan phase should schedule the Impeccable skills explicitly as plan steps, n
 ```
 Ray-exomem persists memory as a tree of folders and exoms.
 
-  Tree:        work/ath/lynx/orsl/main              (the project's main exom)
-               work/ath/lynx/orsl/sessions/<id>     (per-session exoms)
-  CLI paths:   work::ath::lynx::orsl::main          (`::` == `/`)
+  Tree:        work/team/project/repo/main              (the project's main exom)
+               work/team/project/repo/sessions/<id>     (per-session exoms)
+  CLI paths:   work::team::project::repo::main          (`::` == `/`)
   Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)
   Writes:      always require --actor <name>
   Full agent workflow:   ray-exomem guide
@@ -422,7 +422,7 @@ All server rejections return `{code, message, path?, actor?, branch?, suggestion
 - **Unit tests** (`cargo test`): path parsing (`::` ↔ `/`), folder-vs-exom detection, `init` idempotency, TOFU enforcement, session metadata mirroring, rename on folder/exom/session-label, reserved segment rejection.
 - **Integration tests against the running daemon**: every `/api/actions/*` endpoint, `/api/tree` with depth + activity, SSE `tree-changed` events, rayfall evaluation with the new per-path rule injection.
 - **Svelte UI** (`cd ui && npm run check && npm run build`): unchanged pipeline. Adds tests for the drawer tree, the three session view modes, and the rename modal.
-- **End-to-end flow** (manual + scripted): `init work::ath::lynx::orsl` → `session new` multi-agent → two agents write in parallel to their branches → read peer branch → `session close` → `inspect` → rename a mid-tree folder and verify the SSE event.
+- **End-to-end flow** (manual + scripted): `init work::team::project::repo` → `session new` multi-agent → two agents write in parallel to their branches → read peer branch → `session close` → `inspect` → rename a mid-tree folder and verify the SSE event.
 - **UI golden path + edge cases**: tree drawer expansion, focus view transitions (folder ↔ project-main ↔ session ↔ archived), rename confirmation modal with a running session in the list, guide rendering.
 
 ## 13. Files likely to change

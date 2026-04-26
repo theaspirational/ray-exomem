@@ -5,14 +5,20 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Ray Exomem — "Cartographer's Workbench"
+ * Ray Exomem — warm-dark palette (B + E aesthetic)
  *
- * Dark-first palette with warm undertones.
- * Semantic accents:
- *   --fact-base   : muted teal    (base/EDB facts)
- *   --fact-derived: muted lavender (derived/IDB facts)
- *   --rule        : warm gold     (inference rules)
- *   --contra      : muted coral   (contradictions)
+ * Page bg #19130e, panels #1a1716, cream body #e7e0d4, amber accent
+ * #d99c4a / #c98a2c. One-pixel borders, no glass/blur. Type splits:
+ *   sans  → chrome (buttons, labels, navigation)
+ *   serif → prose (entity summaries, observations, beliefs)
+ *   mono  → data (predicates, fact_ids, paths, queries, timestamps)
+ *
+ * Semantic data accents (kept distinct from the chrome amber):
+ *   --fact-base    : muted teal     (base/EDB facts)
+ *   --fact-derived : muted lavender (derived/IDB facts)
+ *   --rule-accent  : warm gold      (inference rules)
+ *   --contra       : muted coral    (contradictions)
+ *   --branch-active: green          (current-branch meaning color)
  */
 
 :root {
@@ -64,39 +70,45 @@
 }
 
 .dark {
-	--background: oklch(0.14 0.008 260);
-	--foreground: oklch(0.92 0.01 260);
-	--card: oklch(0.17 0.01 260);
-	--card-foreground: oklch(0.92 0.01 260);
-	--popover: oklch(0.17 0.01 260);
-	--popover-foreground: oklch(0.92 0.01 260);
-	--primary: oklch(0.7 0.1 185);
-	--primary-foreground: oklch(0.14 0.008 260);
-	--secondary: oklch(0.22 0.012 260);
-	--secondary-foreground: oklch(0.88 0.01 260);
-	--muted: oklch(0.22 0.01 260);
-	--muted-foreground: oklch(0.58 0.02 260);
-	--accent: oklch(0.22 0.015 260);
-	--accent-foreground: oklch(0.88 0.01 260);
-	--destructive: oklch(0.65 0.2 25);
-	--border: oklch(1 0 0 / 8%);
-	--input: oklch(1 0 0 / 10%);
-	--ring: oklch(0.5 0.08 185);
+	/* Warm-dark base */
+	--background: #19130e;
+	--foreground: #e7e0d4;
+	--card: #1a1716;
+	--card-foreground: #e7e0d4;
+	--popover: #1a1716;
+	--popover-foreground: #e7e0d4;
 
-	/* Semantic — darker bg, brighter accents */
-	--fact-base: oklch(0.7 0.12 185);
-	--fact-derived: oklch(0.68 0.12 290);
-	--rule-accent: oklch(0.75 0.13 75);
-	--contra: oklch(0.7 0.17 25);
+	/* Single accent: deep amber/ochre */
+	--primary: #d99c4a;
+	--primary-foreground: #19130e;
+	--secondary: #221c17;
+	--secondary-foreground: #e7e0d4;
+	--muted: #221c17;
+	--muted-foreground: oklch(0.66 0.018 75);
+	--accent: #c98a2c;
+	--accent-foreground: #19130e;
 
-	--sidebar: oklch(0.12 0.008 260);
-	--sidebar-foreground: oklch(0.92 0.01 260);
-	--sidebar-primary: oklch(0.7 0.1 185);
-	--sidebar-primary-foreground: oklch(0.14 0.008 260);
-	--sidebar-accent: oklch(0.18 0.01 260);
-	--sidebar-accent-foreground: oklch(0.92 0.01 260);
-	--sidebar-border: oklch(1 0 0 / 8%);
-	--sidebar-ring: oklch(0.5 0.08 185);
+	--destructive: oklch(0.66 0.18 28);
+	/* One-pixel borders with a faint warm tint */
+	--border: oklch(1 0.012 70 / 9%);
+	--input: oklch(1 0.012 70 / 11%);
+	--ring: #d99c4a;
+
+	/* Semantic data accents */
+	--fact-base: oklch(0.7 0.1 185);
+	--fact-derived: oklch(0.68 0.1 290);
+	--rule-accent: #d99c4a;
+	--contra: oklch(0.7 0.16 25);
+	--branch-active: oklch(0.72 0.16 145);
+
+	--sidebar: #15100c;
+	--sidebar-foreground: #e7e0d4;
+	--sidebar-primary: #d99c4a;
+	--sidebar-primary-foreground: #19130e;
+	--sidebar-accent: #221c17;
+	--sidebar-accent-foreground: #e7e0d4;
+	--sidebar-border: oklch(1 0.012 70 / 9%);
+	--sidebar-ring: #d99c4a;
 
 	--chart-1: oklch(0.809 0.105 251.813);
 	--chart-2: oklch(0.623 0.214 259.815);
@@ -112,6 +124,7 @@
 
 @theme inline {
 	--font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+	--font-serif: 'Source Serif 4', 'Source Serif Pro', ui-serif, Georgia, serif;
 	--font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', ui-monospace, monospace;
 	--color-sidebar-ring: var(--sidebar-ring);
 	--color-sidebar-border: var(--sidebar-border);
@@ -153,6 +166,7 @@
 	--color-fact-derived: var(--fact-derived);
 	--color-rule-accent: var(--rule-accent);
 	--color-contra: var(--contra);
+	--color-branch-active: var(--branch-active);
 	--radius-sm: calc(var(--radius) * 0.6);
 	--radius-md: calc(var(--radius) * 0.8);
 	--radius-lg: var(--radius);

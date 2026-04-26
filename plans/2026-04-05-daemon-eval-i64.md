@@ -252,6 +252,6 @@ Verify these cases:
 
 Resume directly in:
 
-- `/Users/aspirational/Documents/code/lynx/Teide/ray-exomem/src/web.rs`
+- `<workspace>/ray-exomem/src/web.rs`
 
 Complete the handler migration and add `api_eval` before touching anything else.

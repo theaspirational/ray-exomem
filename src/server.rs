@@ -107,37 +107,31 @@ impl AppState {
         let (engine, tree_root, sym_path) = match data_dir {
             Some(ref root) => {
                 let sym = root.join("sym");
-                // Load sym INSIDE ray_runtime_create, before builtins intern
-                // their names. This keeps persisted symbol IDs stable across
-                // binary upgrades — builtins get appended after, not before.
-                let engine = if sym.exists() {
-                    let (engine, sym_err) = RayforceEngine::new_with_sym(&sym)?;
-                    if sym_err != crate::ffi::RAY_OK {
-                        // Sym file was present but load failed. Drop it so the
-                        // next mutation can re-intern from the splay tables.
-                        // The runtime itself is live — new_with_sym succeeded
-                        // with an empty sym table, so we already have a
-                        // working engine with only builtins registered.
-                        eprintln!(
-                            "[ray-exomem] WARNING: symbol table load failed \
-                             (error code {}); clearing stale sym file at {}",
-                            sym_err,
-                            root.display()
-                        );
-                        if sym.exists() {
-                            let _ = std::fs::remove_file(&sym);
-                        }
-                        let sym_lk = root.join("sym.lk");
-                        if sym_lk.exists() {
-                            let _ = std::fs::remove_file(&sym_lk);
-                        }
-                    }
-                    engine
-                } else {
-                    RayforceEngine::new()?
-                };
+                // Always create the engine with fresh builtins at their
+                // canonical slots. If an old sym file exists, the
+                // rewrite below re-interns each persisted string and
+                // remaps on-disk splays through the shift. This
+                // decouples on-disk string identity from rayforce2's
+                // slot layout, so builtin-shape refactors upstream
+                // (e.g. commit 7db37e4 turning flat `.sys.gc` into a
+                // dotted sym) no longer require wiping the sym file.
+                // See archive/2026-04-24_sym-rewrite-migration/design.md.
+                let engine = RayforceEngine::new()?;
+
                 let tree_dir = root.join("tree");
                 std::fs::create_dir_all(&tree_dir).ok();
+
+                match crate::sym_rewrite::run_sym_rewrite(&sym, &tree_dir) {
+                    Ok(outcome) => log_sym_rewrite_outcome(&outcome),
+                    Err(e) => {
+                        return Err(e.context(
+                            "sym rewrite failed; refusing to boot with potentially \
+                             corrupt on-disk state. See diagnostic above and \
+                             archive/2026-04-24_sym-rewrite-migration/design.md",
+                        ));
+                    }
+                }
+
                 load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
                 if exoms.is_empty() {
                     let default_path: crate::path::TreePath = "main".parse().unwrap();
@@ -167,10 +161,116 @@ impl AppState {
             engine.bind_named_db(storage::sym_intern(name), &es.datoms)?;
         }
 
+        // Run a canonical smoke query against every loaded exom to surface
+        // sym/engine incompatibilities at startup instead of at first
+        // request. Non-fatal — the daemon still boots.
+        engine_health_probe(&engine, &exoms);
+
         Ok(Arc::new(AppState::new(
             engine, exoms, tree_root, sym_path,
         )))
     }
+}
+
+/// Surface the sym-rewrite outcome to stderr. `FreshBoot` and `FastPath`
+/// are the quiet cases — single line each, since nothing interesting
+/// happened. `Remapped` is the loud case: the on-disk layout shifted
+/// relative to the current binary (expected after a rayforce2 upgrade
+/// that changed builtin interning shape) and we just rewrote every
+/// splay. An operator seeing this on boot should know the migration
+/// fired so they can correlate it with the rayforce2 version change.
+fn log_sym_rewrite_outcome(outcome: &crate::sym_rewrite::RewriteOutcome) {
+    use crate::sym_rewrite::RewriteOutcome;
+    match outcome {
+        RewriteOutcome::FreshBoot => {
+            eprintln!("[ray-exomem] sym rewrite: fresh boot (no sym file yet)");
+        }
+        RewriteOutcome::FastPath { persisted } => {
+            eprintln!(
+                "[ray-exomem] sym rewrite: fast-path ({persisted} persisted strings, layout unchanged)"
+            );
+        }
+        RewriteOutcome::Remapped {
+            persisted,
+            splays_rewritten,
+        } => {
+            eprintln!();
+            eprintln!("[ray-exomem] ========================================================");
+            eprintln!("[ray-exomem] sym table was MIGRATED");
+            eprintln!("[ray-exomem]");
+            eprintln!(
+                "[ray-exomem] {persisted} persisted strings re-interned under the current"
+            );
+            eprintln!(
+                "[ray-exomem] binary's canonical layout; {splays_rewritten} on-disk splays"
+            );
+            eprintln!("[ray-exomem] rewritten through the old→new remap.");
+            eprintln!("[ray-exomem]");
+            eprintln!("[ray-exomem] This is expected after a rayforce2 upgrade that");
+            eprintln!("[ray-exomem] reshaped builtin interning (e.g. a builtin moving");
+            eprintln!("[ray-exomem] from flat to dotted sym). Data was preserved via");
+            eprintln!("[ray-exomem] the remap; next boot should hit the fast-path.");
+            eprintln!("[ray-exomem] ========================================================");
+            eprintln!();
+        }
+    }
+}
+
+/// Run the canonical typed-facts query against every loaded exom using the
+/// same expand + execute path the live HTTP handler uses. Any failure is
+/// logged loudly so an operator sees it at daemon start (in
+/// `/tmp/ray-exomem.log`) rather than at first request.
+///
+/// Typical failure mode post-rayforce2-upgrade: queries return
+/// `RAY_ERROR code=domain` with an empty msg because a persisted
+/// sym entry (often a dotted-name builtin like `.sys.gc`) collides
+/// with a reshaped builtin in the new binary. See CLAUDE.md
+/// "sym compatibility" bullet and the sym-rewrite migration spec.
+fn engine_health_probe(
+    engine: &crate::backend::RayforceEngine,
+    exoms: &HashMap<String, ExomState>,
+) {
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for name in exoms.keys() {
+        let source = format!(
+            "(query {} (find ?e ?a ?v) (where (facts_i64 ?e ?a ?v)))",
+            name
+        );
+        let result: anyhow::Result<()> = (|| {
+            let query = lower_query_request(&source, None, "startup health probe")?;
+            let expanded = expand_canonical_query(exoms, engine, source.clone(), &query)?;
+            execute_prepared_query(engine, exoms, &expanded)?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            failures.push((name.clone(), e.to_string()));
+        }
+    }
+    if failures.is_empty() {
+        return;
+    }
+
+    eprintln!();
+    eprintln!("[ray-exomem] ========================================================");
+    eprintln!("[ray-exomem] WARNING: engine health probe FAILED on startup");
+    eprintln!("[ray-exomem]");
+    eprintln!("[ray-exomem] The sym table or bound tables appear incompatible with");
+    eprintln!("[ray-exomem] the current rayforce2 build. This usually happens after");
+    eprintln!("[ray-exomem] an upstream change to builtin interning shape (e.g. a");
+    eprintln!("[ray-exomem] builtin moving from flat to dotted sym).");
+    eprintln!("[ray-exomem]");
+    eprintln!("[ray-exomem] Per-exom failures:");
+    for (name, err) in &failures {
+        eprintln!("[ray-exomem]   - {}: {}", name, err);
+    }
+    eprintln!("[ray-exomem]");
+    eprintln!("[ray-exomem] DO NOT wipe ~/.ray-exomem/sym as a reflex — every");
+    eprintln!("[ray-exomem] persisted RAY_SYM column (fact ids, predicates, etc.)");
+    eprintln!("[ray-exomem] encodes sym IDs by slot and would be stranded. See");
+    eprintln!("[ray-exomem] CLAUDE.md 'sym compatibility' bullet for the forward");
+    eprintln!("[ray-exomem] path (upstream issue or sym-rewrite migration).");
+    eprintln!("[ray-exomem] ========================================================");
+    eprintln!();
 }
 
 fn load_tree_exoms_into(
@@ -242,6 +342,7 @@ fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status", get(api_status))
         .route("/tree", get(api_tree))
+        .route("/welcome/summary", get(api_welcome_summary))
         .route("/guide", get(api_guide))
         .route("/exoms", get(api_exoms_gone).post(api_exoms_gone))
         .route("/actions/init", post(api_init))
@@ -707,6 +808,28 @@ fn namespace_path(namespace: &str) -> std::io::Result<crate::path::TreePath> {
     })
 }
 
+/// Top-level shared root visible to every authenticated user. See
+/// `auth::access::resolve_access` for the matching authorization rule.
+const PUBLIC_NAMESPACE: &str = "public";
+
+fn append_public_subtree(
+    tree_root: &std::path::Path,
+    sym_path: &std::path::Path,
+    children: &mut Vec<crate::tree::TreeNode>,
+    opts: &crate::tree::WalkOptions,
+) -> std::io::Result<()> {
+    let public_root: crate::path::TreePath = PUBLIC_NAMESPACE
+        .parse()
+        .expect("'public' is a valid TreePath segment");
+    children.push(crate::tree::walk_or_empty(
+        tree_root,
+        sym_path,
+        &public_root,
+        opts,
+    )?);
+    Ok(())
+}
+
 async fn build_tree_root_for_admin(
     state: &AppState,
     user: &User,
@@ -732,6 +855,8 @@ async fn build_tree_root_for_admin(
             opts,
         )?);
     }
+
+    append_public_subtree(&tree_root, &sym_path, &mut children, opts)?;
 
     Ok(crate::tree::TreeNode::Folder {
         name: String::new(),
@@ -788,6 +913,8 @@ async fn build_tree_root_for_user(
             )?);
         }
     }
+
+    append_public_subtree(&tree_root, &sym_path, &mut children, opts)?;
 
     Ok(crate::tree::TreeNode::Folder {
         name: String::new(),
@@ -1029,6 +1156,193 @@ async fn api_tree(
         Ok(node) => Json(node).into_response(),
         Err(e) => ApiError::new("io", e.to_string()).into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// /api/welcome/summary
+//
+// Single fan-in endpoint for the cold-visitor welcome page (see
+// archive/2026-04-25_ui-ux-redesign/brief.md). Returns:
+//   - totals: aggregate fact / exom / branch counts and the most-recent
+//     change across all bootstrap-seeded exoms.
+//   - featured: top entities by recency, fact-count tiebreak, with
+//     name / type / summary / docs_url pulled from the predicate
+//     registry.
+//   - latest: post-bootstrap transactions (tx_time within 30d of now).
+//   - seeded: the most-recent bootstrap-seed transactions, so the page
+//     is never empty on a fresh deployment.
+//
+// Auth-gated like the rest of the API. Iterates over
+// `bootstrap_seed_exom_paths()` so a daemon with no fixtures still
+// returns sensible empty arrays.
+// ---------------------------------------------------------------------------
+async fn api_welcome_summary(
+    State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
+) -> impl IntoResponse {
+    if state.auth_store.is_some() && maybe_user.0.is_none() {
+        return ApiError::new("unauthorized", "authentication required")
+            .with_status(401)
+            .into_response();
+    }
+
+    let seeded_paths = crate::auth::routes::bootstrap_seed_exom_paths();
+    let tree_root_val = state.tree_root.as_deref();
+    let sym_path_val = state.sym_path.as_deref();
+
+    let mut total_facts: usize = 0;
+    let mut total_branches: usize = 0;
+    let mut total_exoms: usize = 0;
+    let mut latest_change: Option<(String, String, String)> = None; // (tx_time, actor, note)
+
+    #[derive(Default)]
+    struct EntityAgg {
+        exom: String,
+        entity: String,
+        fact_count: usize,
+        last_tx_time: String,
+        name: Option<String>,
+        ty: Option<String>,
+        summary: Option<String>,
+        docs_url: Option<String>,
+    }
+    let mut entities: HashMap<String, EntityAgg> = HashMap::new();
+
+    let mut all_txs: Vec<(String, crate::brain::Tx)> = Vec::new();
+
+    {
+        let mut exoms = state.exoms.lock().unwrap();
+        for path in &seeded_paths {
+            if get_or_load_exom(&mut exoms, &state.engine, path, tree_root_val, sym_path_val)
+                .is_err()
+            {
+                continue;
+            }
+            let Some(es) = exoms.get(path) else { continue };
+            total_exoms += 1;
+            let brain = &es.brain;
+            let facts = brain.current_facts();
+            total_facts += facts.len();
+            total_branches += brain.branches().len();
+
+            for tx in brain.transactions() {
+                if latest_change
+                    .as_ref()
+                    .map(|(t, _, _)| tx.tx_time.as_str() > t.as_str())
+                    .unwrap_or(true)
+                {
+                    latest_change = Some((tx.tx_time.clone(), tx.actor.clone(), tx.note.clone()));
+                }
+                all_txs.push((path.clone(), tx.clone()));
+            }
+
+            for f in &facts {
+                let entity = match f.fact_id.find('#') {
+                    Some(idx) => f.fact_id[..idx].to_string(),
+                    None => f.fact_id.clone(),
+                };
+                let key = format!("{path}::{entity}");
+                let agg = entities.entry(key).or_insert_with(|| EntityAgg {
+                    exom: path.clone(),
+                    entity: entity.clone(),
+                    ..Default::default()
+                });
+                agg.fact_count += 1;
+
+                let tx_time = brain
+                    .transactions()
+                    .iter()
+                    .find(|t| t.tx_id == f.created_by_tx)
+                    .map(|t| t.tx_time.clone())
+                    .unwrap_or_default();
+                if tx_time > agg.last_tx_time {
+                    agg.last_tx_time = tx_time;
+                }
+
+                match f.predicate.as_str() {
+                    "entity/name" => agg.name = Some(value_string(&f.value)),
+                    "entity/type" => agg.ty = Some(value_string(&f.value)),
+                    "concept/summary" => agg.summary = Some(value_string(&f.value)),
+                    "concept/docs_url" | "concept/scalar_docs_url" => {
+                        agg.docs_url = Some(value_string(&f.value));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut featured: Vec<&EntityAgg> = entities.values().collect();
+    featured.sort_by(|a, b| {
+        b.last_tx_time
+            .cmp(&a.last_tx_time)
+            .then_with(|| b.fact_count.cmp(&a.fact_count))
+    });
+    let featured_json: Vec<serde_json::Value> = featured
+        .iter()
+        .filter(|e| e.name.is_some())
+        .take(6)
+        .map(|e| {
+            serde_json::json!({
+                "exom": e.exom,
+                "entity": e.entity,
+                "name": e.name,
+                "type": e.ty,
+                "summary": e.summary,
+                "docs_url": e.docs_url,
+                "fact_count": e.fact_count,
+                "last_tx_time": e.last_tx_time,
+            })
+        })
+        .collect();
+
+    // Split transactions on the 30-day watershed: anything older is
+    // treated as bootstrap seed activity, anything newer as live changes.
+    let now = chrono::Utc::now();
+    let watershed = (now - chrono::Duration::days(30)).to_rfc3339();
+    let mut latest: Vec<(String, &crate::brain::Tx)> =
+        all_txs.iter().filter(|(_, t)| t.tx_time > watershed).map(|(p, t)| (p.clone(), t)).collect();
+    latest.sort_by(|a, b| b.1.tx_time.cmp(&a.1.tx_time));
+
+    let mut seeded: Vec<(String, &crate::brain::Tx)> =
+        all_txs.iter().filter(|(_, t)| t.tx_time <= watershed).map(|(p, t)| (p.clone(), t)).collect();
+    seeded.sort_by(|a, b| b.1.tx_time.cmp(&a.1.tx_time));
+
+    let serialize_tx = |(exom, tx): &(String, &crate::brain::Tx)| {
+        serde_json::json!({
+            "exom": exom,
+            "tx_id": tx.tx_id,
+            "tx_time": tx.tx_time,
+            "actor": tx.actor,
+            "action": tx.action.to_string(),
+            "refs": tx.refs,
+            "note": tx.note,
+            "branch_id": tx.branch_id,
+        })
+    };
+
+    let totals = serde_json::json!({
+        "facts": total_facts,
+        "exoms": total_exoms,
+        "branches": total_branches,
+        "last_change": latest_change.as_ref().map(|(t, a, n)| serde_json::json!({
+            "tx_time": t,
+            "actor": a,
+            "note": n,
+        })).unwrap_or(serde_json::Value::Null),
+    });
+
+    Json(serde_json::json!({
+        "totals": totals,
+        "featured": featured_json,
+        "latest": latest.iter().take(10).map(serialize_tx).collect::<Vec<_>>(),
+        "seeded": seeded.iter().take(5).map(serialize_tx).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+fn value_string(v: &crate::fact_value::FactValue) -> String {
+    v.display()
 }
 
 async fn api_guide() -> impl IntoResponse {
@@ -3453,103 +3767,110 @@ async fn api_factory_reset(
             .unwrap_or("anonymous")
             .to_string()
     };
-    let mut exoms = state.exoms.lock().unwrap();
-    let old_names: Vec<String> = exoms.keys().cloned().collect();
-    exoms.clear();
+    // The brain/tree wipe and rebuild is fully sync. Wrap it in a closure so
+    // the std::sync::MutexGuard on `state.exoms` is released before we await
+    // the auth-store wipe below — otherwise the future would not be Send.
+    let default_exom = DEFAULT_EXOM;
+    let sync_result: Result<Vec<String>, ApiError> = (|| {
+        let mut exoms = state.exoms.lock().unwrap();
+        let old_names: Vec<String> = exoms.keys().cloned().collect();
+        exoms.clear();
 
-    // Nuke persisted splay state on disk before declaring success. Without
-    // this the next lazy-load or daemon restart resurrects the "deleted"
-    // exoms from disk, silently contradicting the response.
-    if let Some(ref tree_root) = state.tree_root {
-        if tree_root.exists() {
-            let entries = match std::fs::read_dir(tree_root) {
-                Ok(rd) => rd,
-                Err(e) => {
-                    return ApiError::new("factory_reset_failed", e.to_string())
+        // Nuke persisted splay state on disk before declaring success. Without
+        // this the next lazy-load or daemon restart resurrects the "deleted"
+        // exoms from disk, silently contradicting the response.
+        if let Some(ref tree_root) = state.tree_root {
+            if tree_root.exists() {
+                let entries = std::fs::read_dir(tree_root)
+                    .map_err(|e| ApiError::new("factory_reset_failed", e.to_string()).with_status(500))?;
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    let remove = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        std::fs::remove_dir_all(&p)
+                    } else {
+                        std::fs::remove_file(&p)
+                    };
+                    remove.map_err(|e| {
+                        ApiError::new(
+                            "factory_reset_failed",
+                            format!("remove {}: {}", p.display(), e),
+                        )
                         .with_status(500)
-                        .into_response();
-                }
-            };
-            for entry in entries.flatten() {
-                let p = entry.path();
-                let remove = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    std::fs::remove_dir_all(&p)
-                } else {
-                    std::fs::remove_file(&p)
-                };
-                if let Err(e) = remove {
-                    return ApiError::new(
-                        "factory_reset_failed",
-                        format!("remove {}: {}", p.display(), e),
-                    )
-                    .with_status(500)
-                    .into_response();
+                    })?;
                 }
             }
+        }
+
+        // If persistence is configured, re-scaffold the default exom on disk
+        // and load it back so its in-memory brain is wired to the freshly-
+        // cleared splay tree. Matches a cold-start against an empty data dir.
+        // Fall back to an in-memory-only ExomState otherwise.
+        let new_es = match (state.tree_root.as_ref(), state.sym_path.as_ref()) {
+            (Some(tree_root), Some(sym_path)) => {
+                let default_path: crate::path::TreePath = default_exom
+                    .parse()
+                    .map_err(|e: crate::path::PathError| {
+                        ApiError::new("factory_reset_failed", e.to_string()).with_status(500)
+                    })?;
+                crate::scaffold::new_bare_exom(tree_root, &default_path).map_err(|e| {
+                    ApiError::new("factory_reset_failed", e.to_string()).with_status(500)
+                })?;
+                let disk = tree_root.join(default_exom);
+                load_exom_from_tree_path(&disk, sym_path, default_exom).map_err(|e| {
+                    ApiError::new("factory_reset_failed", e.to_string()).with_status(500)
+                })?
+            }
+            _ => ExomState {
+                brain: Brain::new(),
+                datoms: storage::build_datoms_table(&Brain::new())
+                    .map_err(|e| ApiError::new("error", e.to_string()))?,
+                typed_facts: storage::build_typed_fact_tables(&Brain::new())
+                    .map_err(|e| ApiError::new("error", e.to_string()))?,
+                rules: Vec::new(),
+                exom_disk: None,
+            },
+        };
+        exoms.insert(default_exom.to_string(), new_es);
+
+        reconcile_engine(&state, &exoms);
+        Ok(old_names)
+    })();
+
+    let old_names = match sync_result {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    // Wipe user-derived auth state (users, sessions, api keys, shares) and
+    // log the caller out by clearing their session cookie. allowed_domains
+    // is preserved as policy config. Without this, a top-admin remained
+    // logged in after a factory reset, the SPA kept its old selected exom,
+    // and the next page load 400'd against an exom that no longer existed.
+    if let Some(ref auth_store) = state.auth_store {
+        if let Err(e) = auth_store.factory_reset_state().await {
+            return ApiError::new("factory_reset_failed", format!("auth wipe: {e}"))
+                .with_status(500)
+                .into_response();
         }
     }
 
-    let default_exom = DEFAULT_EXOM;
-    // If persistence is configured, re-scaffold the default exom on disk and
-    // load it back so its in-memory brain is wired to the freshly-cleared
-    // splay tree. Matches what the daemon produces on a cold start against
-    // an empty data dir. Fall back to an in-memory-only ExomState otherwise.
-    let new_es = match (state.tree_root.as_ref(), state.sym_path.as_ref()) {
-        (Some(tree_root), Some(sym_path)) => {
-            let default_path: crate::path::TreePath = match default_exom.parse() {
-                Ok(p) => p,
-                Err(e) => {
-                    return ApiError::new("factory_reset_failed", e.to_string())
-                        .with_status(500)
-                        .into_response();
-                }
-            };
-            if let Err(e) = crate::scaffold::new_bare_exom(tree_root, &default_path) {
-                return ApiError::new("factory_reset_failed", e.to_string())
-                    .with_status(500)
-                    .into_response();
-            }
-            let disk = tree_root.join(default_exom);
-            match load_exom_from_tree_path(&disk, sym_path, default_exom) {
-                Ok(es) => es,
-                Err(e) => {
-                    return ApiError::new("factory_reset_failed", e.to_string())
-                        .with_status(500)
-                        .into_response();
-                }
-            }
-        }
-        _ => ExomState {
-            brain: Brain::new(),
-            datoms: match storage::build_datoms_table(&Brain::new()) {
-                Ok(d) => d,
-                Err(e) => {
-                    return ApiError::new("error", e.to_string()).into_response();
-                }
-            },
-            typed_facts: match storage::build_typed_fact_tables(&Brain::new()) {
-                Ok(t) => t,
-                Err(e) => {
-                    return ApiError::new("error", e.to_string()).into_response();
-                }
-            },
-            rules: Vec::new(),
-            exom_disk: None,
-        },
-    };
-    exoms.insert(default_exom.to_string(), new_es);
-
-    reconcile_engine(&state, &exoms);
     let _ = state.sse_tx.send(format!(
         r#"{{"v":1,"kind":"memory","op":"factory_reset","exom":"*","actor":"{}"}}"#,
         actor
     ));
-    Json(serde_json::json!({
-        "ok": true,
-        "removed_exoms": old_names,
-        "state": "clean"
-    }))
-    .into_response()
+
+    let cookie = crate::auth::middleware::clear_session_cookie();
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({
+            "ok": true,
+            "removed_exoms": old_names,
+            "state": "clean",
+            "logged_out": true,
+        })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

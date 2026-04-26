@@ -1,17 +1,29 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import { invalidateAll } from '$app/navigation';
-	import { GitBranch, Loader2 } from '@lucide/svelte';
+	import { Loader2 } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
-	import DataRow from '$lib/components/DataRow.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import LoadingState from '$lib/components/LoadingState.svelte';
-	import StatCard from '$lib/components/StatCard.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import * as Tabs from '$lib/components/ui/tabs/index.js';
-	import { fetchBranches, unarchiveSessionExom, type BranchRow, type TreeExom } from '$lib/exomem.svelte';
-	import FactsManager from './FactsManager.svelte';
+	import { formatRelativeTime } from '$lib/formatRelativeTime';
+	import NotebookEntity from '$lib/Notebook/NotebookEntity.svelte';
+	import NotebookSection from '$lib/Notebook/NotebookSection.svelte';
+	import RightRailAnchors from '$lib/Notebook/RightRailAnchors.svelte';
+	import { entityForFactId } from '$lib/predicateRendering.svelte';
+	import {
+		exportBackupText,
+		fetchBranches,
+		fetchFactsList,
+		fetchRelationGraph,
+		parseFactsFromExport,
+		unarchiveSessionExom,
+		type BranchRow,
+		type TreeExom
+	} from '$lib/exomem.svelte';
+	import type { FactEntry } from '$lib/types';
 	import GraphPanel from './GraphPanel.svelte';
 	import RulesPanel from './RulesPanel.svelte';
 	import SessionFactsPanel from './SessionFactsPanel.svelte';
@@ -31,38 +43,196 @@
 		showUnarchive?: boolean;
 	} = $props();
 
-	let tab = $state('facts');
+	const railSections = [
+		{ id: 'facts', label: 'Facts' },
+		{ id: 'timeline', label: 'Timeline' },
+		{ id: 'branches', label: 'Branches' },
+		{ id: 'rules', label: 'Rules' },
+		{ id: 'connections', label: 'Connections' }
+	];
+
+	function factGroupKey(f: FactEntry): string {
+		if (f.factId) return f.factId;
+		return f.predicate + '::' + f.terms.join('::');
+	}
+
+	const lastSegment = $derived.by(() => {
+		const s = node.path.split('/').filter(Boolean);
+		return s[s.length - 1] ?? node.name;
+	});
+
+	const titleText = $derived(
+		lastSegment
+			.split(/[-_]+/)
+			.filter(Boolean)
+			.map((p) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+			.join(' ')
+	);
+
+	let flatFacts = $state<FactEntry[]>([]);
+	let factsLoading = $state(true);
+	let factsErr = $state<string | null>(null);
+	let factsRetry = $state(0);
+
+	const headerBlurb = $derived.by(() => {
+		for (const f of flatFacts) {
+			if (f.predicate === 'exom/summary' && f.terms[0]) return f.terms[0]!.trim();
+		}
+		for (const f of flatFacts) {
+			if (f.predicate === 'exom/description' && f.terms[0]) return f.terms[0]!.trim();
+		}
+		return null;
+	});
+
+	const bodyFacts = $derived(
+		flatFacts.filter(
+			(f) => f.predicate !== 'exom/summary' && f.predicate !== 'exom/description'
+		)
+	);
+
+	const entityGroups = $derived.by(() => {
+		const m = new Map<string, FactEntry[]>();
+		for (const f of bodyFacts) {
+			const g = entityForFactId(factGroupKey(f));
+			if (!m.has(g)) m.set(g, []);
+			m.get(g)!.push(f);
+		}
+		return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+	});
+
 	let branchesLoading = $state(false);
 	let branches = $state<BranchRow[]>([]);
 	let branchesErr = $state<string | null>(null);
-
-	let unarchiveBusy = $state(false);
 	let branchesRetry = $state(0);
 
+	let unarchiveBusy = $state(false);
+
+	let graphEdges = $state(0);
+	let graphLoaded = $state(false);
+	let listFactsMeta = $state<{ time: string; actor: string } | null>(null);
+
 	$effect(() => {
+		if (!browser) return;
 		node.path;
-		tab;
+		factsRetry;
+		let c = false;
+		factsLoading = true;
+		factsErr = null;
+		exportBackupText(node.path)
+			.then((t) => {
+				if (c) return;
+				flatFacts = parseFactsFromExport(t);
+			})
+			.catch((e: unknown) => {
+				if (c) return;
+				factsErr = e instanceof Error ? e.message : 'Failed to load facts';
+			})
+			.finally(() => {
+				if (c) return;
+				factsLoading = false;
+			});
+		return () => {
+			c = true;
+		};
+	});
+
+	$effect(() => {
+		if (!browser) return;
+		node.path;
 		branchesRetry;
-		if (tab !== 'branches') return;
-		let cancelled = false;
+		let c = false;
 		branchesLoading = true;
 		branchesErr = null;
 		fetchBranches(node.path)
 			.then((r) => {
-				if (!cancelled) branches = r;
+				if (!c) branches = r;
 			})
 			.catch((e: unknown) => {
-				if (!cancelled) branchesErr = e instanceof Error ? e.message : 'Failed to load branches';
+				if (!c) branchesErr = e instanceof Error ? e.message : 'Failed to load branches';
 			})
 			.finally(() => {
-				if (!cancelled) branchesLoading = false;
+				if (!c) branchesLoading = false;
 			});
 		return () => {
-			cancelled = true;
+			c = true;
 		};
 	});
 
-	function onUnarchive() {
+	$effect(() => {
+		if (!browser) return;
+		node.path;
+		let c = false;
+		graphLoaded = false;
+		fetchRelationGraph(node.path)
+			.then((g) => {
+				if (c) return;
+				graphEdges = g?.summary?.edge_count ?? 0;
+				graphLoaded = true;
+			})
+			.catch(() => {
+				if (c) return;
+				graphEdges = 0;
+				graphLoaded = true;
+			});
+		return () => {
+			c = true;
+		};
+	});
+
+	$effect(() => {
+		if (!browser) return;
+		node.path;
+		let c = false;
+		fetchFactsList(node.path)
+			.then((rows) => {
+				if (c) return;
+				let best: { time: string; actor: string } | null = null;
+				for (const r of rows) {
+					const t = r.tx_time ?? r.valid_from;
+					if (!t) continue;
+					if (!best || t > best.time) {
+						best = { time: t, actor: r.actor || '—' };
+					}
+				}
+				listFactsMeta = best;
+			})
+			.catch(() => {
+				if (c) return;
+				listFactsMeta = null;
+			});
+		return () => {
+			c = true;
+		};
+	});
+
+	const statsTail = $derived.by(() => {
+		const t = listFactsMeta?.time ?? node.last_tx ?? null;
+		if (!t) return '';
+		const rel = formatRelativeTime(t);
+		const act = listFactsMeta?.actor;
+		if (act && act !== '—') {
+			return `last change ${rel} by ${act}`;
+		}
+		return `last change ${rel}`;
+	});
+
+	function isBranchLoneMain(list: BranchRow[]): boolean {
+		if (list.length === 0) return true;
+		if (list.length > 1) return false;
+		return list[0].name === 'main' || list[0].is_current;
+	}
+
+	const kindLabel = $derived(
+		node.exom_kind === 'project-main'
+			? 'project-main'
+			: node.exom_kind === 'session'
+				? 'session'
+				: node.exom_kind === 'bare'
+					? 'bare'
+					: node.exom_kind
+	);
+
+		function onUnarchive() {
 		actorPrompt.run(async () => {
 			unarchiveBusy = true;
 			try {
@@ -76,21 +246,15 @@
 			}
 		});
 	}
-
-	const kindLabel = $derived(
-		node.exom_kind === 'project-main'
-			? 'project-main'
-			: node.exom_kind === 'session'
-				? 'session'
-				: node.exom_kind === 'bare'
-					? 'bare'
-					: node.exom_kind
-	);
 </script>
 
-<div class="flex flex-col gap-4" class:opacity-60={contentDimmed}>
-	<header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-		<div class="min-w-0 flex-1 space-y-3">
+<div
+	class="flex flex-col gap-4"
+	class:opacity-60={contentDimmed}
+	data-read-only={readOnly ? 'true' : undefined}
+>
+	<header class="space-y-3">
+		<div class="flex flex-wrap items-center justify-between gap-2">
 			<div class="flex flex-wrap items-center gap-2 text-xs">
 				<Badge variant="secondary" class="text-[10px] capitalize text-zinc-200">{kindLabel}</Badge>
 				{#if node.archived}
@@ -100,88 +264,124 @@
 					<Badge variant="outline" class="border-red-800/60 text-red-200">closed</Badge>
 				{/if}
 			</div>
-			<div class="grid gap-2 sm:grid-cols-2">
-				<StatCard label="Facts" value={node.fact_count} />
-				<StatCard label="Branch" value={node.current_branch} icon={GitBranch} />
-			</div>
+			{#if showUnarchive}
+				<Button
+					size="sm"
+					variant="secondary"
+					disabled={unarchiveBusy}
+					onclick={() => void onUnarchive()}
+				>
+					{#if unarchiveBusy}
+						<Loader2 class="mr-1 size-3 animate-spin" />
+					{/if}
+					Unarchive
+				</Button>
+			{/if}
 		</div>
-		{#if showUnarchive}
-			<Button
-				size="sm"
-				variant="secondary"
-				disabled={unarchiveBusy}
-				onclick={() => void onUnarchive()}
-			>
-				{#if unarchiveBusy}
-					<Loader2 class="mr-1 size-3 animate-spin" />
-				{/if}
-				Unarchive
-			</Button>
+
+		<div class="font-mono text-[11px] leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+			{node.path.split('/').filter(Boolean).join('/')}
+		</div>
+		<h1 class="font-serif text-3xl text-foreground">{titleText}</h1>
+		{#if headerBlurb}
+			<p class="font-serif text-sm leading-relaxed text-muted-foreground">{headerBlurb}</p>
 		{/if}
+		<p class="font-mono text-[12px] text-muted-foreground">
+			{node.fact_count} facts · {node.current_branch}
+			{#if statsTail}· {statsTail}{/if}
+		</p>
 	</header>
 
-	<Tabs.Root bind:value={tab} class="w-full">
-		<Tabs.List class="bg-zinc-950/80">
-			<Tabs.Trigger value="facts">Facts</Tabs.Trigger>
-			<Tabs.Trigger value="branches">Branches</Tabs.Trigger>
-			<Tabs.Trigger value="history">History</Tabs.Trigger>
-			<Tabs.Trigger value="graph">Graph</Tabs.Trigger>
-			<Tabs.Trigger value="rules">Rules</Tabs.Trigger>
-		</Tabs.List>
+	<main
+		class="flex flex-col gap-6 md:grid md:grid-cols-[1fr_minmax(140px,160px)] md:items-start"
+	>
+		<article class="order-2 min-w-0 space-y-0 md:order-1 md:col-start-1 md:row-start-1">
+			<NotebookSection id="facts" title="Facts">
+				{#if sessionModes}
+					<SessionFactsPanel exomPath={node.path} />
+				{:else if factsLoading}
+					<LoadingState message="Loading facts…" />
+				{:else if factsErr}
+					<ErrorState
+						message={factsErr}
+						onRetry={() => {
+							factsErr = null;
+							factsRetry++;
+						}}
+					/>
+				{:else if bodyFacts.length === 0}
+					<p class="font-serif text-sm text-muted-foreground">This exom has no facts yet.</p>
+				{:else}
+					<div class="space-y-4">
+						{#each entityGroups as [ek, fgs] (ek)}
+							<NotebookEntity entityKey={ek} facts={fgs} exomPath={node.path} />
+						{/each}
+					</div>
+				{/if}
+			</NotebookSection>
 
-		<Tabs.Content value="facts" class="mt-4">
-			{#if sessionModes}
-				<SessionFactsPanel exomPath={node.path} />
-			{:else if tab === 'facts'}
-				<FactsManager exomPath={node.path} />
-			{/if}
-		</Tabs.Content>
+			<NotebookSection id="timeline" title="Timeline">
+				<TimelinePanel exomPath={node.path} notebookMode />
+			</NotebookSection>
 
-		<Tabs.Content value="branches" class="mt-4 space-y-3">
-			{#if branchesLoading}
-				<LoadingState message="Loading branches…" />
-			{:else if branchesErr}
-				<ErrorState
-					message={branchesErr}
-					onRetry={() => {
-						branchesErr = null;
-						branchesRetry++;
-					}}
-				/>
-			{:else if branches.length === 0}
-				<p class="text-sm text-zinc-500">No branches</p>
-			{:else}
-				<div class="space-y-2">
-					{#each branches as b (b.branch_id)}
-						<DataRow
-							icon={GitBranch}
-							label={b.name}
-							badges={[
-								...(b.is_current ? [{ text: 'current', variant: 'default' as const }] : []),
-								...(b.archived ? [{ text: 'archived', variant: 'outline' as const }] : []),
-								...(b.claimed_by ? [{ text: b.claimed_by, variant: 'secondary' as const }] : [])
-							]}
-							trailing={`${b.fact_count} facts`}
-						/>
-					{/each}
-				</div>
-			{/if}
-		</Tabs.Content>
+			<NotebookSection id="branches" title="Branches">
+				{#if branchesLoading}
+					<LoadingState message="Loading branches…" />
+				{:else if branchesErr}
+					<ErrorState
+						message={branchesErr}
+						onRetry={() => {
+							branchesErr = null;
+							branchesRetry++;
+						}}
+					/>
+				{:else if isBranchLoneMain(branches)}
+					<p class="font-serif text-sm text-muted-foreground">
+						Only <code class="font-mono text-foreground/90">main</code>. Branch from any fact id to
+						explore alternatives.
+					</p>
+				{:else}
+					<ul class="space-y-1.5 font-mono text-sm text-foreground/90">
+						{#each branches as b (b.branch_id)}
+							<li class="flex flex-wrap items-baseline gap-2 [overflow-wrap:anywhere]">
+								<span
+									class="inline-block w-2 shrink-0 text-center {b.is_current
+										? 'text-branch-active'
+										: 'text-transparent'}"
+									aria-hidden="true"
+									>●</span
+								>
+								<span>{b.name}</span>
+								<span class="text-muted-foreground">
+									{b.fact_count} facts{#if b.claimed_by} · {b.claimed_by}{/if}
+								</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</NotebookSection>
 
-		<Tabs.Content value="history" class="mt-4">
-			{#if tab === 'history'}
-				<TimelinePanel exomPath={node.path} />
-			{/if}
-		</Tabs.Content>
-		<Tabs.Content value="graph" class="mt-4">
-			{#if tab === 'graph'}
-				<GraphPanel exomPath={node.path} />
-			{/if}
-		</Tabs.Content>
-		<Tabs.Content value="rules" class="mt-4">
-			{#if tab === 'rules'}
+			<NotebookSection id="rules" title="Rules">
 				<RulesPanel exomPath={node.path} />
-			{/if}
-		</Tabs.Content>
-	</Tabs.Root>
+			</NotebookSection>
+
+			<NotebookSection id="connections" title="Connections">
+				{#if graphLoaded && graphEdges === 0}
+					<p class="mb-3 font-serif text-sm text-muted-foreground">
+						No outgoing relations yet — predicates like <code class="font-mono text-foreground/80"
+							>operates_on</code
+						>, <code class="font-mono text-foreground/80">lowers_to</code>, or any value pointing at
+						another fact id will appear here.
+					</p>
+				{/if}
+				<GraphPanel exomPath={node.path} />
+			</NotebookSection>
+		</article>
+
+		<aside
+			class="order-1 w-full self-start max-md:max-w-md md:order-2 md:col-start-2 md:row-start-1 md:sticky md:top-4"
+		>
+			<RightRailAnchors sections={railSections} />
+		</aside>
+	</main>
 </div>

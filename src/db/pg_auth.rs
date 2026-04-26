@@ -400,6 +400,16 @@ impl AuthDb for PgAuthDb {
         Ok(())
     }
 
+    async fn factory_reset(&self) -> anyhow::Result<()> {
+        // Sessions reference users; api_keys reference users; shares reference
+        // users. CASCADE handles them in one shot. Allowed_domains is the
+        // policy config, not user state, and survives.
+        sqlx::query("TRUNCATE TABLE users, sessions, api_keys, shares CASCADE")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn list_domains(&self) -> anyhow::Result<Vec<String>> {
         let rows = sqlx::query("SELECT domain FROM allowed_domains ORDER BY domain")
             .fetch_all(&self.pool)

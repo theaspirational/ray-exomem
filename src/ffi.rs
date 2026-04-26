@@ -19,6 +19,9 @@ pub type ray_err_t = c_int;
 pub const RAY_OK: ray_err_t = 0;
 pub const RAY_ERR_CORRUPT: ray_err_t = 10;
 
+// RAY_ERROR object type tag (see rayforce.h: `#define RAY_ERROR 127`).
+pub const RAY_ERROR: i8 = 127;
+
 // ---------------------------------------------------------------------------
 // Type constants
 // ---------------------------------------------------------------------------
@@ -89,6 +92,13 @@ extern "C" {
 
     pub fn ray_error_msg() -> *const c_char;
     pub fn ray_error_clear();
+
+    // RAY_ERROR object inspection — read the 8-byte ASCII code packed into
+    // the error object's `sdata`. `ray_err_from_obj` maps the code back to
+    // the `ray_err_t` enum; `ray_err_code_str` is the inverse name table.
+    pub fn ray_err_from_obj(err: *mut ray_t) -> ray_err_t;
+    pub fn ray_err_code(err: *mut ray_t) -> *const c_char;
+    pub fn ray_err_code_str(e: ray_err_t) -> *const c_char;
 
     // -----------------------------------------------------------------------
     // Environment API (promoted to public header in fork Feature C)

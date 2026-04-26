@@ -11,14 +11,18 @@
 		Plus,
 		ShieldCheck,
 		ShieldOff,
-		AlertTriangle
+		AlertTriangle,
+		Check,
+		Copy
 	} from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import Input from '$lib/components/ui/input/input.svelte';
 	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import { auth } from '$lib/auth.svelte';
-	import { getExomemBaseUrl, factoryReset } from '$lib/exomem.svelte';
+	import { builtinViewQuery } from '$lib/builtinViewQueries';
+	import { getExomemBaseUrl, factoryReset, fetchExomemSchema } from '$lib/exomem.svelte';
+	import type { ExomemSchemaResponse } from '$lib/types';
 
 	function authApiBase(): string {
 		return getExomemBaseUrl().replace('/ray-exomem', '');
@@ -33,6 +37,7 @@
 		{ id: 'shares', label: 'Shares' },
 		{ id: 'domains', label: 'Domains' },
 		{ id: 'admins', label: 'Admins', topAdminOnly: true },
+		{ id: 'developer', label: 'Developer', topAdminOnly: true },
 		{ id: 'system', label: 'System', topAdminOnly: true }
 	];
 
@@ -410,6 +415,37 @@
 		}
 	}
 
+	// --- Developer (builtin views) ---
+	let devExomPath = $state('main');
+	let devSchemaLoading = $state(false);
+	let devSchema = $state<ExomemSchemaResponse | null>(null);
+	let devSchemaError = $state<string | null>(null);
+	let devCopied = $state<string | null>(null);
+	let devCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+	async function loadDeveloperSchema() {
+		devSchemaLoading = true;
+		devSchemaError = null;
+		try {
+			const p = devExomPath.trim() || 'main';
+			devSchema = await fetchExomemSchema(p);
+		} catch (e) {
+			devSchema = null;
+			devSchemaError = e instanceof Error ? e.message : 'Failed to load schema';
+		} finally {
+			devSchemaLoading = false;
+		}
+	}
+
+	function copyDevSnippet(key: string, text: string) {
+		void navigator.clipboard.writeText(text);
+		devCopied = key;
+		if (devCopyTimer) clearTimeout(devCopyTimer);
+		devCopyTimer = setTimeout(() => (devCopied = null), 1600);
+	}
+
+	const devBuiltinViews = $derived(devSchema?.ontology?.builtin_views ?? []);
+
 	// --- System / factory-reset ---
 	const FACTORY_RESET_PHRASE = 'reset';
 	let factoryResetArmed = $state(false);
@@ -444,7 +480,15 @@
 			factoryResetResult = { removed_exoms: res.removed_exoms ?? [] };
 			factoryResetArmed = false;
 			factoryResetConfirm = '';
-			toast.success(`Factory reset complete (${res.removed_exoms?.length ?? 0} exoms removed)`);
+			toast.success(
+				`Factory reset complete (${res.removed_exoms?.length ?? 0} exoms removed). Signing out…`
+			);
+			// The server cleared the session cookie and truncated auth state.
+			// Drop our in-memory user record and redirect to the login page so
+			// the next session starts cleanly. Any cached SPA state (selected
+			// exom, share lists) gets dropped naturally on reload after login.
+			auth.user = null;
+			void goto(`${base}/login`, { replaceState: true });
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			factoryResetError = msg;
@@ -482,6 +526,9 @@
 				break;
 			case 'admins':
 				fetchUsers();
+				break;
+			case 'developer':
+				if (auth.isTopAdmin) void loadDeveloperSchema();
 				break;
 		}
 	}
@@ -929,6 +976,85 @@
 
 		<!-- System Tab (top-admin only) -->
 		{#if auth.isTopAdmin}
+			<Tabs.Content value="developer" class="pt-4">
+				<div class="space-y-4">
+					<div class="flex flex-wrap items-end gap-2">
+						<div class="min-w-0 grow">
+							<p class="mb-1 text-xs text-zinc-500">Exom (slash path, e.g. main)</p>
+							<Input
+								bind:value={devExomPath}
+								placeholder="main"
+								class="max-w-md border-zinc-700 bg-zinc-950 text-sm font-mono"
+							/>
+						</div>
+						<Button
+							size="sm"
+							variant="secondary"
+							disabled={devSchemaLoading}
+							onclick={() => void loadDeveloperSchema()}
+						>
+							{#if devSchemaLoading}
+								<Loader2 class="mr-1 size-3.5 animate-spin" />
+							{/if}
+							Load
+						</Button>
+					</div>
+
+					{#if devSchemaLoading}
+						<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+							<Loader2 class="size-4 animate-spin" />
+							Loading schema…
+						</div>
+					{:else if devSchemaError}
+						<p class="py-4 text-sm text-red-400">{devSchemaError}</p>
+					{:else if devBuiltinViews.length === 0}
+						<p class="text-sm text-zinc-500">No built-in views for this exom.</p>
+					{:else}
+						<div class="space-y-3">
+							{#each devBuiltinViews as view, vi (`${view.name}-${vi}`)}
+								<div
+									class="rounded-md border border-zinc-800 bg-zinc-950/50 p-3"
+								>
+									<div class="flex items-start justify-between gap-2">
+										<div class="min-w-0">
+											<div class="flex flex-wrap items-center gap-2">
+												<span class="font-mono text-sm text-zinc-200">{view.name}</span>
+												<Badge variant="secondary" class="text-[10px]">arity {view.arity}</Badge>
+											</div>
+											<p class="mt-1 text-xs text-zinc-500">{view.description}</p>
+										</div>
+										<Button
+											variant="ghost"
+											size="sm"
+											class="shrink-0"
+											onclick={() =>
+												copyDevSnippet(
+													`view:${view.name}`,
+													builtinViewQuery(devExomPath.trim() || 'main', view)
+												)}
+										>
+											{#if devCopied === `view:${view.name}`}
+												<Check class="size-3.5" />
+											{:else}
+												<Copy class="size-3.5" />
+											{/if}
+										</Button>
+									</div>
+									<div class="mt-2 text-[0.7rem] text-zinc-500">Rule</div>
+									<pre
+										class="mt-0.5 overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-400"
+									>{view.rule}</pre>
+									<div class="mt-2 text-[0.7rem] text-zinc-500">Query</div>
+									<pre
+										class="mt-0.5 overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-400"
+									>{builtinViewQuery(devExomPath.trim() || 'main', view)}</pre>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</Tabs.Content>
+
 			<Tabs.Content value="system" class="pt-4">
 				<div class="space-y-6">
 					<div class="space-y-3 rounded-md border border-red-900/50 bg-red-950/20 p-4">

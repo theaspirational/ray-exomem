@@ -3,8 +3,9 @@
 		ChevronRight,
 		Circle,
 		ChevronsDownUp,
+		Eye,
+		EyeOff,
 		FilePlus,
-		FolderOpen,
 		FolderPlus,
 		GitBranch,
 		Loader2,
@@ -27,17 +28,27 @@
 		ContextMenuItem,
 		ContextMenuTrigger
 	} from '$lib/components/ui/context-menu/index.js';
+	import {
+		graphFolderVisState,
+		graphViz,
+		toggleGraphExom,
+		toggleGraphFolderVisibility
+	} from '$lib/graphExomVisibility.svelte';
 	import { fetchTree, type TreeExom, type TreeNode } from '$lib/exomem.svelte';
 	import { treeModals } from '$lib/treeModals.svelte';
 
 	let {
 		currentPath = '',
 		refreshSignal = 0,
-		onNavigate
+		onNavigate,
+		inlineEyeIcons = false,
+		onTreeRoot
 	}: {
 		currentPath?: string;
 		refreshSignal?: number;
 		onNavigate: (path: string) => void;
+		inlineEyeIcons?: boolean;
+		onTreeRoot?: (root: TreeNode) => void;
 	} = $props();
 
 	let root = $state<TreeNode | null>(null);
@@ -126,6 +137,10 @@
 	});
 
 	$effect(() => {
+		if (root) onTreeRoot?.(root);
+	});
+
+	$effect(() => {
 		const path = currentPath;
 		root;
 		if (!root) return;
@@ -153,9 +168,9 @@
 	}
 
 	function exomDotClass(kind: string): string {
-		if (kind === 'project_main') return 'fill-emerald-500 text-emerald-500';
+		if (kind === 'project_main' || kind === 'project-main') return 'fill-emerald-500 text-emerald-500';
 		if (kind === 'session') return 'fill-sky-500 text-sky-500';
-		return 'fill-zinc-500 text-zinc-500';
+		return 'fill-muted-foreground text-muted-foreground';
 	}
 
 	function isActivePath(path: string): boolean {
@@ -163,7 +178,7 @@
 	}
 
 	function activeRowClass(): string {
-		return 'border-l-2 border-blue-400 bg-zinc-700/50 pl-0.5';
+		return 'border-l-2 border-primary bg-card/50 pl-0.5';
 	}
 
 	function labelForSession(node: TreeExom): string {
@@ -190,7 +205,7 @@
 <div class="flex items-center justify-end gap-0.5 px-1 py-1">
 	<button
 		type="button"
-		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		class="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
 		title="New exom"
 		onclick={() => treeModals.openNewExom(suggestedNewExomPath())}
 	>
@@ -198,7 +213,7 @@
 	</button>
 	<button
 		type="button"
-		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		class="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
 		title="Init project here"
 		onclick={() => treeModals.openInit(defaultWritableBase)}
 	>
@@ -206,7 +221,7 @@
 	</button>
 	<button
 		type="button"
-		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		class="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
 		title="Refresh tree"
 		onclick={() => void loadTree()}
 	>
@@ -214,7 +229,7 @@
 	</button>
 	<button
 		type="button"
-		class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+		class="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
 		title="Collapse all"
 		onclick={toggleCollapseAll}
 	>
@@ -222,29 +237,29 @@
 	</button>
 </div>
 
-<div class="flex min-h-0 flex-1 flex-col gap-1 font-mono text-xs text-zinc-300">
+<div class="flex min-h-0 flex-1 flex-col gap-1 font-mono text-xs text-muted-foreground">
 	{#if loading}
 		<div class="space-y-2 px-1 py-1" aria-busy="true">
-			<div class="flex items-center gap-2 text-zinc-500">
-				<Loader2 class="size-4 shrink-0 animate-spin text-zinc-400" aria-hidden="true" />
+			<div class="flex items-center gap-2 text-muted-foreground">
+				<Loader2 class="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" />
 				<span class="text-[11px]">Loading tree…</span>
 			</div>
 			{#each Array.from({ length: 6 }) as _, i (i)}
 				<div class="flex items-center gap-2">
-					<div class="h-3.5 w-3.5 shrink-0 animate-pulse rounded-sm bg-zinc-700"></div>
-					<div class="h-3 max-w-[70%] flex-1 animate-pulse rounded bg-zinc-700/80"></div>
-					<div class="h-4 w-8 shrink-0 animate-pulse rounded bg-zinc-700/60"></div>
+					<div class="h-3.5 w-3.5 shrink-0 animate-pulse rounded-sm bg-border"></div>
+					<div class="h-3 max-w-[70%] flex-1 animate-pulse rounded bg-border/80"></div>
+					<div class="h-4 w-8 shrink-0 animate-pulse rounded bg-border/60"></div>
 				</div>
 			{/each}
 		</div>
 	{:else if error}
-		<div class="flex flex-col gap-2 px-1 py-2 text-zinc-400">
+		<div class="flex flex-col gap-2 px-1 py-2 text-muted-foreground">
 			<p class="text-[11px] leading-relaxed">Failed to load tree</p>
-			<p class="text-[10px] text-zinc-500">{error}</p>
+			<p class="text-[10px] text-muted-foreground/80">{error}</p>
 			<Button
 				variant="outline"
 				size="sm"
-				class="h-7 border-zinc-600 bg-zinc-800/80 text-zinc-200"
+				class="h-7 border-border bg-card text-foreground"
 				onclick={() => void loadTree()}
 			>
 				<RefreshCw class="mr-1 size-3" />
@@ -273,36 +288,64 @@
 												: ''}"
 										>
 											<CollapsibleTrigger
-												class="flex min-w-0 flex-1 items-center gap-1 rounded-sm px-0.5 py-0.5 text-left text-zinc-300 hover:bg-zinc-800/80 [&[data-state=open]>svg:first-of-type]:rotate-90"
+												class="group/trigger flex min-w-0 min-h-0 flex-1 items-center gap-1 rounded-sm px-0.5 py-0.5 text-left text-muted-foreground hover:bg-card/80 [&[data-state=open]>span:first-of-type]:rotate-90"
 											>
-												<ChevronRight
-													class="size-3.5 shrink-0 text-zinc-500 transition-transform"
-												/>
-												<FolderOpen class="size-3.5 shrink-0 text-amber-600/90" />
-												<span class="min-w-0 truncate text-[11px] text-zinc-200">{node.name || '/'}</span>
+												<span
+													class="inline-flex size-3.5 shrink-0 select-none items-center justify-center text-muted-foreground transition-transform"
+													aria-hidden="true"
+												>
+													<ChevronRight class="size-3.5" />
+												</span>
+												<span
+													class="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground"
+													>{node.name || '/'}</span
+												>
 											</CollapsibleTrigger>
+											{#if inlineEyeIcons}
+												{@const fv = graphFolderVisState(node.path, graphViz.exomVis)}
+												<button
+													type="button"
+													class="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
+													aria-label="Toggle visibility for folder {node.name || '/'}"
+													onclick={(e) => {
+														e.stopPropagation();
+														e.preventDefault();
+														toggleGraphFolderVisibility(node.path);
+													}}
+												>
+													{#if fv === 'all'}
+														<Eye class="size-3" />
+													{:else if fv === 'none'}
+														<EyeOff class="size-3 opacity-80" />
+													{:else}
+														<Eye class="size-3 opacity-50" />
+													{/if}
+												</button>
+											{/if}
 										</div>
 										<CollapsibleContent>
-											{@render treeNodes(node.children, depth + 1)}
+											<div class="border-l border-border pl-1.5">
+												{@render treeNodes(node.children, depth + 1)}
+											</div>
 										</CollapsibleContent>
 									</Collapsible>
 								</ContextMenuTrigger>
-								<ContextMenuContent class="border-zinc-700 bg-zinc-900 text-zinc-100">
+								<ContextMenuContent class="border-border bg-card text-foreground">
 									<ContextMenuItem
-										class="text-xs focus:bg-zinc-800"
+										class="text-xs focus:bg-muted"
 										onclick={() => treeModals.openInit(node.path)}
 									>Init here</ContextMenuItem>
 									<ContextMenuItem
-										class="text-xs focus:bg-zinc-800"
+										class="text-xs focus:bg-muted"
 										onclick={() =>
 											treeModals.openNewExom(node.path ? `${node.path}/notes` : 'notes')}
 									>New exom</ContextMenuItem>
 									<ContextMenuItem
-										class="text-xs focus:bg-zinc-800"
+										class="text-xs focus:bg-muted"
 										onclick={() => treeModals.openNewSession(node.path)}
 									>New session</ContextMenuItem>
 									<ContextMenuItem
-										class="text-xs focus:bg-zinc-800"
+										class="text-xs focus:bg-muted"
 										onclick={() => treeModals.openRename(node.path)}
 									>Rename</ContextMenuItem>
 								</ContextMenuContent>
@@ -310,49 +353,74 @@
 						{:else}
 							<ContextMenu>
 								<ContextMenuTrigger class="block w-full text-left">
-									<button
-										type="button"
-										data-tree-active={isActivePath(node.path) ? '' : undefined}
-										class="flex w-full min-w-0 items-center gap-1.5 rounded-sm border border-transparent px-0.5 py-0.5 text-left hover:bg-zinc-800/80 {isActivePath(node.path)
-											? activeRowClass()
-											: ''} {node.archived ? 'opacity-50' : ''}"
-										onclick={() => onNavigate(node.path)}
+									<div
+										class="flex w-full min-w-0 items-center gap-0.5 {node.archived ? 'opacity-50' : ''}"
 									>
-										<Circle
-											class="size-2.5 shrink-0 {exomDotClass(node.exom_kind)}"
-											aria-hidden="true"
-										/>
-										<span class="min-w-0 flex-1 truncate text-[11px] text-zinc-100">{node.name}</span>
-										{#if node.branches && node.branches.length > 0}
-											<GitBranch
-												class="size-3 shrink-0 text-zinc-600"
+										<button
+											type="button"
+											data-tree-active={isActivePath(node.path) ? '' : undefined}
+											class="flex min-w-0 min-h-0 flex-1 items-center gap-1.5 rounded-sm border border-transparent px-0.5 py-0.5 text-left font-normal hover:bg-card/80 {isActivePath(
+												node.path
+											)
+												? activeRowClass()
+												: ''}"
+											onclick={() => onNavigate(node.path)}
+										>
+											<Circle
+												class="size-2.5 shrink-0 {exomDotClass(node.exom_kind)}"
 												aria-hidden="true"
 											/>
+											<span class="min-w-0 flex-1 truncate text-[11px] text-foreground"
+												>{node.name}</span
+											>
+											{#if node.branches && node.branches.length > 0}
+												<GitBranch
+													class="size-3 shrink-0 text-muted-foreground"
+													aria-hidden="true"
+												/>
+											{/if}
+											<Badge
+												variant="secondary"
+												class="h-4 shrink-0 px-1 font-mono text-[9px] tabular-nums"
+											>{node.fact_count}</Badge>
+										</button>
+										{#if inlineEyeIcons}
+											<button
+												type="button"
+												class="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
+												aria-label="Toggle visibility for {node.name}"
+												onclick={(e) => {
+													e.stopPropagation();
+													toggleGraphExom(node.path);
+												}}
+											>
+												{#if graphViz.exomVis[node.path]}
+													<Eye class="size-3" />
+												{:else}
+													<EyeOff class="size-3 opacity-80" />
+												{/if}
+											</button>
 										{/if}
-										<Badge
-											variant="secondary"
-											class="h-4 shrink-0 px-1 font-mono text-[9px] tabular-nums text-zinc-300"
-										>{node.fact_count}</Badge>
-									</button>
+									</div>
 								</ContextMenuTrigger>
-								<ContextMenuContent class="border-zinc-700 bg-zinc-900 text-zinc-100">
+								<ContextMenuContent class="border-border bg-card text-foreground">
 									{#if node.exom_kind !== 'session'}
 										<ContextMenuItem
-											class="text-xs focus:bg-zinc-800"
+											class="text-xs focus:bg-muted"
 											onclick={() => treeModals.openRename(node.path)}
 										>Rename</ContextMenuItem>
 									{:else}
 										<ContextMenuItem
-											class="text-xs focus:bg-zinc-800"
+											class="text-xs focus:bg-muted"
 											onclick={() =>
 												treeModals.openSessionLabel(node.path, labelForSession(node))}
 										>Rename label…</ContextMenuItem>
 										<ContextMenuItem
-											class="text-xs focus:bg-zinc-800"
+											class="text-xs focus:bg-muted"
 											onclick={notImplemented}
 										>Close</ContextMenuItem>
 										<ContextMenuItem
-											class="text-xs focus:bg-zinc-800"
+											class="text-xs focus:bg-muted"
 											onclick={notImplemented}
 										>Archive</ContextMenuItem>
 									{/if}
@@ -365,14 +433,15 @@
 
 			{#if root.kind === 'folder'}
 				{#if root.children.length === 0}
-					<p class="px-1 py-3 text-[11px] leading-relaxed text-zinc-500">
-						Empty tree — run <span class="font-mono text-zinc-400">ray-exomem init</span> to create a project.
+					<p class="px-1 py-3 text-[11px] leading-relaxed text-muted-foreground">
+						Empty tree — run <span class="font-mono text-foreground/80">ray-exomem init</span> to create
+						a project.
 					</p>
 				{:else}
 					{@render treeNodes(root.children, 0)}
 				{/if}
 			{:else}
-				<p class="px-1 py-2 text-[11px] text-zinc-500">Unexpected tree root (not a folder).</p>
+				<p class="px-1 py-2 text-[11px] text-muted-foreground">Unexpected tree root (not a folder).</p>
 			{/if}
 		</div>
 	{/if}

@@ -644,4 +644,31 @@ impl AuthDb for JsonlAuthDb {
     async fn list_domains(&self) -> anyhow::Result<Vec<String>> {
         Ok(self.allowed_domains.lock().unwrap().clone())
     }
+
+    async fn factory_reset(&self) -> anyhow::Result<()> {
+        // Preserve allowed_domains across the reset; everything else goes.
+        let domains: Vec<String> = self.allowed_domains.lock().unwrap().clone();
+
+        self.users.lock().unwrap().clear();
+        self.api_keys.lock().unwrap().clear();
+        self.api_key_by_hash.lock().unwrap().clear();
+        self.share_grants.lock().unwrap().clear();
+        *self.top_admin.lock().unwrap() = None;
+        self.admins.lock().unwrap().clear();
+        self.sessions.clear();
+
+        if let Some(parent) = self.jsonl_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.jsonl_path)?;
+        for d in domains {
+            let entry = serde_json::json!({ "kind": "domain", "domain": d });
+            writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+        }
+        Ok(())
+    }
 }

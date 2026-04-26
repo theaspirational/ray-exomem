@@ -67,6 +67,27 @@ impl RayforceEngine {
             ffi::ray_error_clear();
             let raw = ffi::ray_eval_str(c_source.as_ptr());
 
+            // Result may be a RAY_ERROR object (post-PR #7 hardening surfaces
+            // many failures this way instead of via thread-local err.msg).
+            // Read the label off the object before releasing so we don't lose
+            // it to ray_release.
+            if !raw.is_null() && ffi::ray_obj_type(raw) == ffi::RAY_ERROR {
+                let code_ptr = ffi::ray_err_code(raw);
+                let label = if code_ptr.is_null() {
+                    "(unknown)".to_string()
+                } else {
+                    CStr::from_ptr(code_ptr).to_string_lossy().into_owned()
+                };
+                let msg_ptr = ffi::ray_error_msg();
+                let msg = if msg_ptr.is_null() {
+                    "(no msg)".to_string()
+                } else {
+                    CStr::from_ptr(msg_ptr).to_string_lossy().into_owned()
+                };
+                ffi::ray_release(raw);
+                return Err(anyhow!("rayforce2 err {}: {}", label, msg));
+            }
+
             let err_msg = ffi::ray_error_msg();
             if !err_msg.is_null() {
                 let message = CStr::from_ptr(err_msg).to_string_lossy().into_owned();

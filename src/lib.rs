@@ -18,6 +18,7 @@ pub mod rules;
 pub mod scaffold;
 pub mod server;
 pub mod storage;
+pub mod sym_rewrite;
 pub mod system_schema;
 pub mod tree;
 

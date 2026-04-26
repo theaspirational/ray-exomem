@@ -18,7 +18,7 @@ fn run(d: &TestDaemon, args: &[&str]) -> std::process::Output {
 #[test]
 fn init_creates_project_on_disk() {
     let d = TestDaemon::start();
-    let out = run(&d, &["init", "work::ath::lynx::orsl"]);
+    let out = run(&d, &["init", "work::team::project::repo"]);
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -26,9 +26,9 @@ fn init_creates_project_on_disk() {
     );
     assert!(d
         .tree_root()
-        .join("work/ath/lynx/orsl/main/exom.json")
+        .join("work/team/project/repo/main/exom.json")
         .exists());
-    assert!(d.tree_root().join("work/ath/lynx/orsl/sessions").is_dir());
+    assert!(d.tree_root().join("work/team/project/repo/sessions").is_dir());
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn session_add_agent_returns_501() {
 #[test]
 fn inspect_prints_tree() {
     let d = TestDaemon::start();
-    run(&d, &["init", "work::ath::lynx::orsl"]);
+    run(&d, &["init", "work::team::project::repo"]);
     let out = run(&d, &["inspect", "work", "--depth", "4"]);
     assert!(
         out.status.success(),

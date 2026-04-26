@@ -225,7 +225,9 @@
 				<Badge variant="secondary">{derivedFacts.length}</Badge>
 			</div>
 			<p class="mt-3 text-xs leading-relaxed text-muted-foreground">
-				System views come from the ontology and expose Datalog-native joins like <span class="font-mono">fact-row</span> and <span class="font-mono">tx-row</span>. Authored relations come from project rules.
+				Built-in relations come from the ontology and expose Datalog-native joins like <span
+					class="font-mono">fact-row</span
+				> and <span class="font-mono">tx-row</span>. Custom relations come from your project rules.
 			</p>
 		</div>
 
@@ -253,7 +255,7 @@
 			<Input class="pl-9" placeholder="Search derived facts or ontology descriptions..." bind:value={searchQuery} />
 		</div>
 		<Badge variant="outline">{derivedFacts.filter((item) => item.category === 'authored').length} authored</Badge>
-		<Badge variant="outline">{derivedFacts.filter((item) => item.category === 'system').length} system</Badge>
+		<Badge variant="outline">{derivedFacts.filter((item) => item.category === 'system').length} built-in</Badge>
 	</div>
 
 	<div class="grid gap-6 lg:grid-cols-[1fr_1fr]">
@@ -335,7 +337,7 @@
 						<div class="mb-4 rounded-lg border border-fact-derived/30 bg-fact-derived/5 px-4 py-3">
 							<div class="flex flex-wrap items-center gap-2">
 								<Badge variant="secondary" class="text-[0.6rem] px-1.5 h-4">
-									{selectedFact.category === 'system' ? 'system view' : 'authored'}
+									{selectedFact.category === 'system' ? 'built-in' : 'authored'}
 								</Badge>
 								<span class="font-mono text-sm text-fact-derived">
 									{explainResult.predicate}({explainResult.terms.join(', ')})
@@ -476,7 +478,7 @@
 		<div class="grid gap-6 xl:grid-cols-[1fr_1fr]">
 			<section class="flex flex-col gap-2">
 				<div class="flex items-center justify-between gap-2">
-					<h2 class="text-sm font-medium text-muted-foreground">System views</h2>
+					<h2 class="text-sm font-medium text-muted-foreground">Built-in relations</h2>
 					<Badge variant="outline">{builtinViews.length}</Badge>
 				</div>
 				<div class="grid gap-2">
@@ -487,7 +489,7 @@
 									<div class="flex flex-wrap items-center gap-2">
 										<span class="font-mono text-sm text-fact-derived">{view.name}</span>
 										<Badge variant="outline" class="h-4 px-1.5 text-[10px]">arity {view.arity}</Badge>
-										<Badge variant="outline" class="h-4 px-1.5 text-[10px]">system</Badge>
+										<Badge variant="outline" class="h-4 px-1.5 text-[10px]">schema</Badge>
 									</div>
 									<p class="mt-1 text-xs leading-relaxed text-muted-foreground">{view.description}</p>
 								</div>

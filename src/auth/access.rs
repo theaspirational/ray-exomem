@@ -27,21 +27,30 @@ fn access_level_label(level: AccessLevel) -> &'static str {
 ///
 /// Evaluation order:
 /// 1. Admin or TopAdmin -> FullAccess
-/// 2. Path starts with user's email -> FullAccess (owner)
-/// 3. Share grants for (path, user.email) -> best match
-/// 4. Denied
+/// 2. Path is in the `public/` namespace -> FullAccess (shared workspace)
+/// 3. Path starts with user's email -> FullAccess (owner)
+/// 4. Share grants for (path, user.email) -> best match
+/// 5. Denied
 pub async fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
     // 1. Admins get full access
     if user.is_admin() {
         return AccessLevel::FullAccess;
     }
 
-    // 2. Owner namespace
+    // 2. Public namespace — readable + writable by any authenticated user.
+    //    Membership in an allowed domain is enforced at login; if the user
+    //    holds a session, they're already cleared for collaborative writes
+    //    here.
+    if path == "public" || path.starts_with("public/") {
+        return AccessLevel::FullAccess;
+    }
+
+    // 3. Owner namespace
     if path == user.email || path.starts_with(&format!("{}/", user.email)) {
         return AccessLevel::FullAccess;
     }
 
-    // 3. Check share grants
+    // 4. Check share grants
     let grants = store.shares_for_grantee(&user.email).await;
     resolve_from_grants(path, &grants)
 }
@@ -247,6 +256,31 @@ mod tests {
         let store = make_test_store();
         assert_eq!(
             resolve_access(&bob, "alice@co.com/proj", &store).await,
+            AccessLevel::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn public_namespace_full_access_for_regular_user() {
+        let bob = user("bob@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(&bob, "public", &store).await,
+            AccessLevel::FullAccess
+        );
+        assert_eq!(
+            resolve_access(&bob, "public/work/team/project/concepts/main", &store).await,
+            AccessLevel::FullAccess
+        );
+    }
+
+    #[tokio::test]
+    async fn public_prefix_does_not_match_unrelated_segment() {
+        // "publication/..." must NOT bind to the public-namespace clause
+        let bob = user("bob@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(&bob, "publication/foo", &store).await,
             AccessLevel::Denied
         );
     }

@@ -225,92 +225,92 @@
 	<title>Sign In - Ray Exomem</title>
 </svelte:head>
 
-<div class="flex min-h-screen items-center justify-center bg-zinc-900 px-4">
+<div class="flex min-h-screen items-center justify-center bg-background px-4 text-foreground">
 	<div class="w-full max-w-sm space-y-8">
-		<!-- Branding -->
 		<div class="text-center">
-			<h1 class="text-2xl font-semibold tracking-tight text-zinc-100">Ray Exomem</h1>
-			<p class="mt-1 text-sm text-zinc-500">Sign in to continue</p>
+			<h1 class="font-serif text-2xl font-medium tracking-tight">Ray Exomem</h1>
+			<p class="mt-2 font-sans text-sm text-muted-foreground">persistent memory for your agents</p>
 		</div>
 
-		<!-- Card -->
-		<div class="rounded-lg border border-zinc-800 bg-zinc-900/80 p-6 shadow-lg">
+		<div
+			class="rounded-lg border border-border bg-card p-6 shadow-[0_0_0_1px_color-mix(in_oklch,_white_4%,_transparent)]"
+		>
 			{#if error}
-				<div class="mb-4 rounded-md bg-red-950/40 px-3 py-2 text-sm text-red-400">
+				<div class="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 					{error}
 				</div>
 			{/if}
 
 			{#if !infoLoaded}
-				<!-- Loading state while fetching auth info -->
 				<div class="flex items-center justify-center py-6">
-					<div class="h-5 w-5 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-300"></div>
-					<span class="ml-3 text-sm text-zinc-500">Loading...</span>
+					<div class="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-primary"></div>
+					<span class="ml-3 text-sm text-muted-foreground">Loading...</span>
 				</div>
 			{:else if infoError}
-				<p class="py-4 text-center text-sm text-zinc-500">
+				<p class="py-4 text-center text-sm text-muted-foreground">
 					Could not reach authentication service.
 				</p>
 			{:else if provider === null}
-				<!-- Auth not configured -->
-				<p class="py-4 text-center text-sm text-zinc-500">
+				<p class="py-4 text-center text-sm text-muted-foreground">
 					Authentication not configured
 				</p>
 			{:else}
-				<!-- Google Sign-In (rendered by GSI library) -->
 				{#if googleClientId}
 					<div class="flex justify-center">
 						<div id="google-signin-btn"></div>
 					</div>
 					{#if !gsiReady}
 						<div class="flex items-center justify-center py-2">
-							<div class="h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-zinc-300"></div>
-							<span class="ml-2 text-xs text-zinc-500">Loading Google Sign-In...</span>
+							<div class="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-primary"></div>
+							<span class="ml-2 text-xs text-muted-foreground">Loading Google Sign-In...</span>
 						</div>
 					{/if}
 				{/if}
 
-				<!-- Mock login for development mode -->
 				{#if provider === 'mock'}
 					{#if googleClientId}
 						<div class="my-5 flex items-center gap-3">
-							<div class="h-px flex-1 bg-zinc-800"></div>
-							<span class="text-xs text-zinc-600">or</span>
-							<div class="h-px flex-1 bg-zinc-800"></div>
+							<div class="h-px flex-1 bg-border"></div>
+							<span class="text-xs text-muted-foreground">or</span>
+							<div class="h-px flex-1 bg-border"></div>
 						</div>
 					{/if}
 
 					<div class="space-y-3">
-						<p class="text-center text-xs font-medium uppercase tracking-wider text-zinc-600">
+						<p class="text-center text-xs font-medium uppercase tracking-wider text-muted-foreground">
 							Development mode
 						</p>
 						<form onsubmit={(e) => { e.preventDefault(); mockLogin(); }} class="space-y-3">
 							<div>
-								<label for="mock-email" class="block text-xs font-medium text-zinc-400">Email</label>
+								<label for="mock-email" class="block text-xs font-medium text-muted-foreground"
+									>Email</label
+								>
 								<input
 									id="mock-email"
 									type="email"
 									bind:value={mockEmail}
 									placeholder="you@example.com"
 									required
-									class="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+									class="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
 								/>
 							</div>
 							<div>
-								<label for="mock-name" class="block text-xs font-medium text-zinc-400">Display Name</label>
+								<label for="mock-name" class="block text-xs font-medium text-muted-foreground"
+									>Display Name</label
+								>
 								<input
 									id="mock-name"
 									type="text"
 									bind:value={mockName}
 									placeholder="Your Name"
 									required
-									class="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+									class="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
 								/>
 							</div>
 							<button
 								type="submit"
 								disabled={loading || !mockEmail || !mockName}
-								class="w-full rounded-md bg-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
+								class="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
 							>
 								{#if loading}
 									Signing in...

@@ -3,9 +3,9 @@
 Ray-exomem persists memory as a tree of folders and exoms.
 
 ```
-Tree:        work/ath/lynx/orsl/main              (project main exom)
-             work/ath/lynx/orsl/sessions/<id>     (per-session exoms)
-CLI paths:   work::ath::lynx::orsl::main          (`::` == `/`)
+Tree:        work/team/project/repo/main              (project main exom)
+             work/team/project/repo/sessions/<id>     (per-session exoms)
+CLI paths:   work::team::project::repo::main          (`::` == `/`)
 UI / API:    http://127.0.0.1:9780/ray-exomem/
 Writes:      pass --actor <name> on mutating commands
 ```
@@ -34,8 +34,8 @@ Rules worth remembering:
 
 ### Paths
 
-- CLI paths use `::`: `work::ath::lynx::orsl::main`
-- Disk, UI, and HTTP paths use `/`: `work/ath/lynx/orsl/main`
+- CLI paths use `::`: `work::team::project::repo::main`
+- Disk, UI, and HTTP paths use `/`: `work/team/project/repo/main`
 - `--exom <path>` must point at a leaf exom path
 - `--branch <name>` is available on branch/coord commands and on some writes such as `assert`, `retract`, `observe`, and `eval`
 - `query` does **not** currently accept `--branch`
@@ -63,20 +63,20 @@ CLI transport is mixed right now:
 ray-exomem inspect
 
 # Scaffold a project
-ray-exomem init work::ath::lynx::orsl
+ray-exomem init work::team::project::repo
 
 # That creates:
-#   ~/.ray-exomem/tree/work/ath/lynx/orsl/main/
-#   ~/.ray-exomem/tree/work/ath/lynx/orsl/sessions/
+#   ~/.ray-exomem/tree/work/team/project/repo/main/
+#   ~/.ray-exomem/tree/work/team/project/repo/sessions/
 
 # Create a bare exom instead of a full project
 ray-exomem exom-new work::scratch
 
 # Inspect a subtree
-ray-exomem inspect work::ath::lynx::orsl --depth 3
+ray-exomem inspect work::team::project::repo --depth 3
 ```
 
-Projects nest freely. `init work::ath` and `init work::ath::lynx::orsl` can coexist.
+Projects nest freely. `init work::ath` and `init work::team::project::repo` can coexist.
 
 ---
 
@@ -93,7 +93,7 @@ Session exoms live under:
 Example:
 
 ```text
-work/ath/lynx/orsl/sessions/20260411T143215Z_multi_agent_landing-page
+work/team/project/repo/sessions/20260411T143215Z_multi_agent_landing-page
 ```
 
 The session id directory is immutable. Use the display label, not the directory name, when you want a human-facing rename.
@@ -101,7 +101,7 @@ The session id directory is immutable. Use the display label, not the directory 
 ### Create a session
 
 ```bash
-ray-exomem session new work::ath::lynx::orsl \
+ray-exomem session new work::team::project::repo \
   --multi \
   --name landing-page \
   --actor orchestrator \
@@ -117,7 +117,7 @@ This creates a session exom under `.../sessions/...` and pre-creates:
 Single-agent session:
 
 ```bash
-ray-exomem session new work::ath::lynx::orsl \
+ray-exomem session new work::team::project::repo \
   --single \
   --name exploration \
   --actor solo
@@ -128,18 +128,18 @@ ray-exomem session new work::ath::lynx::orsl \
 ```bash
 # Change the display label
 ray-exomem session rename \
-  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
   --label new-label \
   --actor orchestrator
 
 # Close the session (future writes rejected)
 ray-exomem session close \
-  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
   --actor orchestrator
 
 # Archive the session (hidden from default inspect/tree views)
 ray-exomem session archive \
-  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
   --actor orchestrator
 ```
 
@@ -150,7 +150,7 @@ There is no dedicated reopen/unarchive command today. Reversal means retracting
 
 ```bash
 ray-exomem session join \
-  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
   --actor agent_a
 ```
 
@@ -180,11 +180,11 @@ Useful commands:
 
 ```bash
 # List branches on an exom
-ray-exomem branch list --exom work::ath::lynx::orsl::main
+ray-exomem branch list --exom work::team::project::repo::main
 
 # Diff a branch against main
 ray-exomem branch diff agent_a \
-  --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --exom work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
   --base main
 ```
 
@@ -210,18 +210,18 @@ GET /ray-exomem/api/facts?exom=<path>&branch=<branch>
 ```bash
 # Default logical fact listing
 ray-exomem query \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --json
 
 # Explicit Rayfall query using the derived fact-row view
 ray-exomem query \
-  --exom work::ath::lynx::orsl::main \
-  --request '(query work/ath/lynx/orsl/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
+  --exom work::team::project::repo::main \
+  --request '(query work/team/project/repo/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
   --json
 
 # Fact history and explanation
-ray-exomem history project/status --exom work::ath::lynx::orsl::main --json
-ray-exomem why project/status --exom work::ath::lynx::orsl::main --json
+ray-exomem history project/status --exom work::team::project::repo::main --json
+ray-exomem why project/status --exom work::team::project::repo::main --json
 ```
 
 ### Writes
@@ -229,19 +229,19 @@ ray-exomem why project/status --exom work::ath::lynx::orsl::main --json
 ```bash
 # Assert a fact
 ray-exomem assert project/status active \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --actor orchestrator \
   --source kickoff-notes
 
 # Assert on a branch
 ray-exomem assert task/status done \
-  --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_landing-page \
+  --exom work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
   --branch agent_a \
   --actor agent_a
 
 # Retract by stable fact id
 ray-exomem retract project/status \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --actor orchestrator
 ```
 
@@ -260,19 +260,19 @@ Examples:
 ```bash
 # Eval from a file
 ray-exomem eval \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --actor orchestrator \
   --file queries/seed.ray
 
 # Eval from stdin
 cat queries/seed.ray | ray-exomem eval \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --actor orchestrator \
   --file -
 
 # Query from a file
 ray-exomem query \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --request @queries/list-facts.ray \
   --json
 ```
@@ -306,43 +306,43 @@ ray-exomem stop
 
 # --- Tree ---
 ray-exomem inspect
-ray-exomem init work::ath::lynx::orsl
+ray-exomem init work::team::project::repo
 ray-exomem exom-new work::scratch
 
 # --- Sessions ---
-ray-exomem session new work::ath::lynx::orsl \
+ray-exomem session new work::team::project::repo \
   --multi \
   --name sprint-42 \
   --actor orchestrator \
   --agents agent_a,agent_b
 
 ray-exomem session join \
-  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
+  work::team::project::repo::sessions::20260411T143215Z_multi_agent_sprint-42 \
   --actor agent_a
 
 ray-exomem session rename \
-  work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
+  work::team::project::repo::sessions::20260411T143215Z_multi_agent_sprint-42 \
   --label sprint-42b \
   --actor orchestrator
 
 # --- Reads ---
-ray-exomem query --exom work::ath::lynx::orsl::main --json
-ray-exomem history project/status --exom work::ath::lynx::orsl::main --json
-ray-exomem why project/status --exom work::ath::lynx::orsl::main --json
+ray-exomem query --exom work::team::project::repo::main --json
+ray-exomem history project/status --exom work::team::project::repo::main --json
+ray-exomem why project/status --exom work::team::project::repo::main --json
 
 # --- Writes ---
 ray-exomem assert project/status active \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --actor orchestrator
 
 ray-exomem retract project/status \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --actor orchestrator
 
 # --- Branches ---
-ray-exomem branch list --exom work::ath::lynx::orsl::main
+ray-exomem branch list --exom work::team::project::repo::main
 ray-exomem branch diff agent_a \
-  --exom work::ath::lynx::orsl::sessions::20260411T143215Z_multi_agent_sprint-42 \
+  --exom work::team::project::repo::sessions::20260411T143215Z_multi_agent_sprint-42 \
   --base main
 
 # --- Reference ---

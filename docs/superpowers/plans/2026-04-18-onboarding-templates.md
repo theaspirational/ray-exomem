@@ -10,7 +10,7 @@
 - Persistence: `StoredUser` gains `onboarded: bool` and `seeded_templates: Vec<String>`. Both JSONL-backed and Postgres-backed auth stores carry these fields. JSONL replay preserves them across reads.
 - The per-template seed includes a sentinel fact `(onboarding/template_id "<id>")` and `(onboarding/template_version "<version>")` for future migration ladders.
 
-**Out of scope of this plan:** Adding aggregate / float / between features to rayforce2 (that work has its own plan at `~/Documents/code/lynx/Teide/rayforce2/docs/plans/2026-04-18-datalog-aggregates-and-onboarding.md`). The Phase B prelude in that plan — deleting `system_schema::native_derived_relations` — is included here as Task 1 because the new health template owns those derivations declaratively and any leftover procedural code would double-fire.
+**Out of scope of this plan:** Adding aggregate / float / between features to rayforce2 (that work has its own plan at `~/code/<workspace>/rayforce2/docs/plans/2026-04-18-datalog-aggregates-and-onboarding.md`). The Phase B prelude in that plan — deleting `system_schema::native_derived_relations` — is included here as Task 1 because the new health template owns those derivations declaratively and any leftover procedural code would double-fire.
 
 **Tech Stack:** Rust (axum, serde, toml, include_dir), SvelteKit 5 (Tailwind, shadcn-svelte), JSONL persistence, optional Postgres.
 

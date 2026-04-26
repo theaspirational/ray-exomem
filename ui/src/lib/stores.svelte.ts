@@ -21,8 +21,14 @@ class AppState {
 		// No-op: tree UI uses fetchTree() directly. Old /api/exoms endpoint removed.
 	}
 
-	defaultExomForUser(email: string): string {
-		return `${email}/main`;
+	/**
+	 * Path the UI lands on for an authenticated user with no prior selection.
+	 * `main` is the bare exom auto-created on a fresh persistent state, so it
+	 * is guaranteed to exist regardless of which (if any) bootstrap fixtures
+	 * are configured.
+	 */
+	defaultExomForUser(_email: string): string {
+		return 'main';
 	}
 
 	ensureAuthenticatedDefaultExom(email: string | null) {

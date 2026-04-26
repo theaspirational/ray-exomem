@@ -13,8 +13,8 @@ the Rayfall evaluator, Datalog engine, symbol table, and columnar storage.
 
 The repo is currently centered on the newer tree/session model:
 
-- Tree paths on disk and in the UI: `work/ath/lynx/orsl/main`
-- CLI tree paths: `work::ath::lynx::orsl::main`
+- Tree paths on disk and in the UI: `work/team/project/repo/main`
+- CLI tree paths: `work::team::project::repo::main`
 - Projects scaffold to `main` plus `sessions/`
 - Sessions are exoms created under `<project>/sessions/<id>`
 
@@ -61,14 +61,14 @@ ray-exomem inspect
 Scaffold a project and query its main exom:
 
 ```bash
-ray-exomem init work::ath::lynx::orsl
-ray-exomem query --exom work::ath::lynx::orsl::main --json
+ray-exomem init work::team::project::repo
+ray-exomem query --exom work::team::project::repo::main --json
 ```
 
 Create a session exom under that project:
 
 ```bash
-ray-exomem session new work::ath::lynx::orsl \
+ray-exomem session new work::team::project::repo \
   --name landing-page \
   --multi \
   --actor orchestrator \
@@ -127,13 +127,13 @@ parallel work, and session ownership.
 CLI paths use `::` separators:
 
 ```text
-work::ath::lynx::orsl::main
+work::team::project::repo::main
 ```
 
 Disk and UI paths use `/` separators:
 
 ```text
-work/ath/lynx/orsl/main
+work/team/project/repo/main
 ```
 
 The default data root is:
@@ -152,9 +152,9 @@ High-level layout:
     main/
       exom.json
     work/
-      ath/
-        lynx/
-          orsl/
+      team/
+        project/
+          repo/
             main/
               exom.json
             sessions/
@@ -204,14 +204,14 @@ Examples:
 
 ```bash
 ray-exomem assert project/status active \
-  --exom work::ath::lynx::orsl::main \
+  --exom work::team::project::repo::main \
   --source kickoff-notes
 
-ray-exomem branch list --exom work::ath::lynx::orsl::main
+ray-exomem branch list --exom work::team::project::repo::main
 
 ray-exomem query \
-  --exom work::ath::lynx::orsl::main \
-  --request '(query work/ath/lynx/orsl/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
+  --exom work::team::project::repo::main \
+  --request '(query work/team/project/repo/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
   --json
 ```
 

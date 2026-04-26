@@ -1,25 +1,16 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { Check, Copy, LoaderCircle, Pencil, Plus, Search, Trash2, X, BookOpen, Route } from '@lucide/svelte';
+	import { Check, Copy, LoaderCircle, Pencil, Plus, Search, Trash2, X } from '@lucide/svelte';
 
-	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
-	import {
-		addRule,
-		exportBackupText,
-		fetchExomemSchema,
-		importBackup,
-		parseRulesFromExport
-	} from '$lib/exomem.svelte';
-	import type { ExomemSchemaResponse, RuleEntry } from '$lib/types';
+	import { addRule, exportBackupText, importBackup, parseRulesFromExport } from '$lib/exomem.svelte';
+	import { toCli } from '$lib/path.svelte';
+	import type { RuleEntry } from '$lib/types';
 
 	let { exomPath }: { exomPath: string } = $props();
 
-	type BuiltinView = NonNullable<ExomemSchemaResponse['ontology']>['builtin_views'][number];
-
 	let rules = $state<RuleEntry[]>([]);
-	let builtinViews = $state<BuiltinView[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let searchQuery = $state('');
@@ -50,27 +41,10 @@
 				})
 	);
 	const editDraft = $derived(parseDraftRule(editRawText));
-	const filteredBuiltinViews = $derived(
-		searchQuery.trim() === ''
-			? builtinViews
-			: builtinViews.filter((view) => {
-					const q = searchQuery.toLowerCase();
-					return (
-						view.name.toLowerCase().includes(q) ||
-						view.description.toLowerCase().includes(q) ||
-						view.rule.toLowerCase().includes(q)
-					);
-				})
+
+	const exampleRule = $derived(
+		`(rule ${toCli(exomPath)} (active-projects ?p) ((entity/type ?p "project") (project/status ?p "active")))`
 	);
-
-	function varsForArity(arity: number): string[] {
-		return Array.from({ length: arity }, (_, i) => `?v${i + 1}`);
-	}
-
-	function builtinViewQuery(view: BuiltinView): string {
-		const vars = varsForArity(view.arity);
-		return `(query ${exomPath} (find ${vars.join(' ')}) (where (${view.name} ${vars.join(' ')})))`;
-	}
 
 	function ruleHeadQuery(rule: RuleEntry): string {
 		const vars = Array.from({ length: Math.max(1, rule.body_atoms.length + 1) }, (_, i) => `?v${i + 1}`);
@@ -122,14 +96,9 @@
 		return lines.join('\n');
 	}
 
-	/**
-	 * Simple syntax highlighting for Rayfall rules.
-	 * Returns an HTML string with colored spans.
-	 */
 	function highlightRule(raw: string): string {
 		const separatorIdx = raw.indexOf(':-');
 		if (separatorIdx === -1) {
-			// No body, treat entire thing as head
 			return highlightAtom(raw);
 		}
 
@@ -144,7 +113,6 @@
 	}
 
 	function highlightBody(body: string): string {
-		// Remove trailing period if present
 		const cleaned = body.replace(/\.\s*$/, '');
 		const atoms = splitBodyAtoms(cleaned);
 
@@ -154,7 +122,6 @@
 					const trimmed = atom.trim();
 					if (!trimmed) return '';
 
-					// Check for negation
 					if (trimmed.startsWith('!') || trimmed.startsWith('\\+')) {
 						const rest = trimmed.startsWith('\\+') ? trimmed.slice(2) : trimmed.slice(1);
 						return `<span class="text-contra">!</span>${highlightAtom(rest.trim())}`;
@@ -186,7 +153,6 @@
 	}
 
 	function highlightAtom(atom: string): string {
-		// Match predicate_name(args)
 		const match = atom.match(/^([a-z_][a-z0-9_]*)\((.+)\)$/i);
 		if (!match) return escapeHtml(atom);
 
@@ -195,7 +161,6 @@
 			.split(',')
 			.map((arg) => {
 				const a = arg.trim();
-				// Variables start with uppercase
 				if (/^[A-Z]/.test(a)) {
 					return `<span class="text-foreground">${escapeHtml(a)}</span>`;
 				}
@@ -228,12 +193,8 @@
 		loading = true;
 		error = null;
 		try {
-			const [dlText, schema] = await Promise.all([
-				exportBackupText(exomPath),
-				fetchExomemSchema(exomPath)
-			]);
+			const dlText = await exportBackupText(exomPath);
 			rules = parseRulesFromExport(dlText);
-			builtinViews = schema.ontology?.builtin_views ?? [];
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -321,60 +282,20 @@
 </script>
 
 <div class="flex flex-col gap-3">
-	<!-- Header -->
 	<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-		<div class="flex flex-wrap items-center gap-2">
-			{#if !loading}
-				<Badge variant="secondary">{rules.length} authored</Badge>
-				<Badge variant="outline">{builtinViews.length} system views</Badge>
-			{/if}
-		</div>
 		<Button size="sm" onclick={() => (showAddForm = !showAddForm)}>
 			{#if showAddForm}
 				<X class="mr-1 size-3.5" />
 				Cancel
 			{:else}
 				<Plus class="mr-1 size-3.5" />
-				Add Rule
+				Add rule
 			{/if}
 		</Button>
 	</div>
 
-	<div class="grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
-		<div class="rounded-lg border border-border/60 bg-card p-3">
-			<div class="flex items-center justify-between gap-2">
-				<div>
-					<h2 class="text-sm font-medium text-muted-foreground">Authoring layer</h2>
-					<p class="mt-1 text-sm text-foreground">Editable Rayfall rules stored in the exom export.</p>
-				</div>
-				<Badge variant="secondary">{rules.length}</Badge>
-			</div>
-			<p class="mt-3 text-xs leading-relaxed text-muted-foreground">
-				These are the rules you add, edit, and delete. They define project-specific derivations on top of the base Datalog substrate.
-			</p>
-		</div>
-
-		<div class="rounded-lg border border-border/60 bg-card p-3">
-			<div class="flex items-center justify-between gap-2">
-				<div>
-					<h2 class="text-sm font-medium text-muted-foreground">System view layer</h2>
-					<p class="mt-1 text-sm text-foreground">Built-in derived views over facts, txs, and coordination metadata.</p>
-				</div>
-				<Route class="size-4 text-muted-foreground" />
-			</div>
-			<p class="mt-3 text-xs leading-relaxed text-muted-foreground">
-				System views are queryable and documented here, but not editable. Use them as ergonomic entry points instead of querying raw metadata rows directly.
-			</p>
-		</div>
-	</div>
-
-	<!-- Add Rule Panel -->
 	{#if showAddForm}
 		<div class="rounded-lg border border-border/60 bg-card p-3">
-			<!-- svelte-ignore a11y_label_has_associated_control -->
-			<label class="mb-1.5 block text-xs font-medium text-muted-foreground">
-				Rayfall rule syntax
-			</label>
 			<textarea
 				class="w-full rounded-md border border-border/40 bg-background p-2 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
 				rows={3}
@@ -386,7 +307,7 @@
 				<Button size="sm" onclick={handleAddRule} disabled={submitting || !newRuleText.trim()}>
 					{#if submitting}
 						<LoaderCircle class="mr-1 size-3.5 animate-spin" />
-						Adding...
+						Adding…
 					{:else}
 						Submit
 					{/if}
@@ -407,10 +328,6 @@
 	{#if editingRule}
 		<div class="rounded-lg border border-border/60 bg-card p-3">
 			<div class="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-				<div>
-					<h3 class="text-sm font-medium">Edit rule</h3>
-					<p class="text-xs text-muted-foreground">Edit the raw Rayfall and preview the parsed rule before saving.</p>
-				</div>
 				<Button variant="ghost" size="sm" onclick={closeEditRule} disabled={editing}>
 					<X class="mr-1 size-3.5" />
 					Close
@@ -419,7 +336,9 @@
 
 			<div class="grid gap-3 lg:grid-cols-[1.4fr_1fr]">
 				<div>
-					<label for="edit-rule-raw" class="mb-1 block text-xs font-medium text-muted-foreground">Raw Rayfall</label>
+					<label for="edit-rule-raw" class="mb-1 block text-xs font-medium text-muted-foreground"
+						>Raw Rayfall</label
+					>
 					<textarea
 						id="edit-rule-raw"
 						class="min-h-28 w-full rounded-md border border-border/40 bg-background p-2 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
@@ -428,19 +347,13 @@
 					></textarea>
 				</div>
 				<div class="rounded-md border border-border/40 bg-muted/20 p-3 text-sm">
-					<div class="mb-2 flex items-center gap-2">
-						<span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Preview</span>
-						{#if editDraft.rule}
-							<Badge variant="outline" class="h-5 px-2 text-[10px]">valid</Badge>
-						{:else}
-							<Badge variant="destructive" class="h-5 px-2 text-[10px]">invalid</Badge>
-						{/if}
+					<div class="mb-2 flex items-center gap-2 text-xs">
+						Preview
 					</div>
 					{#if editDraft.rule}
 						<div class="space-y-2 font-mono text-xs text-foreground/90">
-							<div><span class="text-muted-foreground">Head:</span> {editDraft.rule.head_predicate}</div>
-							<div><span class="text-muted-foreground">Body atoms:</span> {editDraft.rule.body_atoms.join(', ') || '—'}</div>
-							<div class="rounded border border-border/40 bg-background px-2 py-1.5 text-[11px] text-muted-foreground">{editDraft.rule.raw}</div>
+							<div>Head: {editDraft.rule.head_predicate}</div>
+							<div>Body atoms: {editDraft.rule.body_atoms.join(', ') || '—'}</div>
 						</div>
 					{:else}
 						<p class="text-xs text-contra">{editDraft.error}</p>
@@ -454,7 +367,7 @@
 				<Button size="sm" onclick={handleSaveEditRule} disabled={editing}>
 					{#if editing}
 						<LoaderCircle class="mr-1 size-3.5 animate-spin" />
-						Saving...
+						Saving…
 					{:else}
 						<Check class="mr-1 size-3.5" />
 						Save changes
@@ -465,183 +378,133 @@
 		</div>
 	{/if}
 
-	<!-- Search -->
 	<div class="relative">
 		<Search class="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
 		<Input
 			class="pl-8 text-sm"
-			placeholder="Filter authored rules or system views..."
+			placeholder="Filter rules…"
 			bind:value={searchQuery}
 		/>
 	</div>
 
-	<!-- Loading / Error -->
 	{#if loading}
 		<div class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
 			<LoaderCircle class="size-4 animate-spin" />
-			Loading rules...
+			Loading rules…
 		</div>
 	{:else if error}
 		<div class="rounded-lg border border-contra/30 bg-contra/5 p-3 text-sm text-contra">
 			{error}
 		</div>
-	{:else if filteredRules.length === 0 && filteredBuiltinViews.length === 0}
-		<div class="flex flex-col items-center gap-2 py-12 text-muted-foreground">
-			<BookOpen class="size-8 opacity-40" />
-			<p class="text-sm">
-				{searchQuery ? 'No authored rules or system views match your filter.' : 'No inference rules found.'}
-			</p>
+	{:else if filteredRules.length === 0}
+		<div class="flex flex-col gap-2 py-8">
+			{#if searchQuery.trim()}
+				<p class="text-sm text-muted-foreground">No rules match your filter.</p>
+			{:else}
+				<p class="font-serif text-sm text-muted-foreground">
+					No rules yet — derivations let you compute things from your facts.
+				</p>
+				<pre
+					class="mt-1 overflow-x-auto rounded border border-border/50 bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground"
+				>{exampleRule}</pre>
+			{/if}
 		</div>
 	{:else}
-		<div class="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-			<section class="flex flex-col gap-3">
-				<div class="flex items-center justify-between gap-2">
-					<h2 class="text-sm font-medium text-muted-foreground">System views</h2>
-					<Badge variant="outline">{filteredBuiltinViews.length}</Badge>
-				</div>
-				{#if filteredBuiltinViews.length === 0}
-					<div class="rounded-lg border border-border/60 bg-card/40 px-4 py-6 text-sm text-muted-foreground">
-						No system views match the current filter.
-					</div>
-				{:else}
-					<div class="grid gap-2">
-						{#each filteredBuiltinViews as view (view.name)}
-							<div class="rounded-lg border border-border/60 border-l-2 border-l-fact-derived bg-card/40 px-3 py-3">
-								<div class="flex items-start justify-between gap-3">
-									<div class="min-w-0">
-										<div class="flex flex-wrap items-center gap-2">
-											<span class="font-mono text-sm text-fact-derived">{view.name}</span>
-											<Badge variant="secondary" class="h-4 px-1.5 text-[10px]">arity {view.arity}</Badge>
-											<Badge variant="outline" class="h-4 px-1.5 text-[10px]">system</Badge>
-										</div>
-										<p class="mt-1 text-xs leading-relaxed text-muted-foreground">{view.description}</p>
-									</div>
-									<Button
-										variant="ghost"
-										size="sm"
-										class="h-7 px-2 text-[0.7rem]"
-										onclick={() => copySnippet(`view:${view.name}`, builtinViewQuery(view))}
-									>
-										{#if copiedSnippet === `view:${view.name}`}
-											<Check class="mr-1 size-3.5" />
-											Copied
-										{:else}
-											<Copy class="mr-1 size-3.5" />
-											Copy query
-										{/if}
-									</Button>
-								</div>
-								<div class="mt-2 rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-									{builtinViewQuery(view)}
-								</div>
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</section>
-
-			<section class="flex flex-col gap-3">
-				<div class="flex items-center justify-between gap-2">
-					<h2 class="text-sm font-medium text-muted-foreground">Authored rules</h2>
-					<Badge variant="secondary">{filteredRules.length}</Badge>
-				</div>
-				{#if filteredRules.length === 0}
-					<div class="rounded-lg border border-border/60 bg-card/40 px-4 py-6 text-sm text-muted-foreground">
-						{searchQuery ? 'No authored rules match the current filter.' : 'No authored rules yet. Add one to start deriving project-specific facts.'}
-					</div>
-				{:else}
-					<div class="flex flex-col gap-1.5">
-						{#each filteredRules as rule (rule.index)}
-							<div
-								class="rounded-lg border border-border/60 border-l-2 border-l-rule-accent bg-card/50 px-3 py-2"
+		<div class="flex flex-col gap-1.5">
+			{#each filteredRules as rule (rule.index)}
+				<div
+					class="rounded-lg border border-border/60 border-l-2 border-l-rule-accent bg-card/50 px-3 py-2"
+				>
+					<div class="mb-1 flex items-center justify-between gap-2">
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="text-xs font-semibold text-rule-accent">{rule.head_predicate}</span>
+							{#if rule.uses_negation}
+								<span class="text-[10px] text-contra">negation</span>
+							{/if}
+							{#if rule.uses_temporal}
+								<span class="text-[10px] text-fact-derived">temporal</span>
+							{/if}
+						</div>
+						<div class="flex items-center gap-1">
+							<Button
+								variant="ghost"
+								size="sm"
+								class="h-7 px-2 text-[0.7rem]"
+								onclick={() => copySnippet(`rule:${rule.index}`, ruleHeadQuery(rule))}
 							>
-								<div class="mb-1 flex items-center justify-between gap-2">
-									<div class="flex flex-wrap items-center gap-2">
-										<span class="text-xs font-semibold text-rule-accent">{rule.head_predicate}</span>
-										<Badge variant="outline" class="h-4 px-1.5 text-[10px]">authored</Badge>
-										{#if rule.uses_negation}
-											<Badge variant="outline" class="h-4 px-1 text-[10px] text-contra">negation</Badge>
-										{/if}
-										{#if rule.uses_temporal}
-											<Badge variant="outline" class="h-4 px-1 text-[10px] text-fact-derived">temporal</Badge>
-										{/if}
-									</div>
-									<div class="flex items-center gap-1">
-										<Button
-											variant="ghost"
-											size="sm"
-											class="h-7 px-2 text-[0.7rem]"
-											onclick={() => copySnippet(`rule:${rule.index}`, ruleHeadQuery(rule))}
-										>
-											{#if copiedSnippet === `rule:${rule.index}`}
-												<Check class="mr-1 size-3.5" />
-												Copied
-											{:else}
-												<Copy class="mr-1 size-3.5" />
-												Copy query
-											{/if}
-										</Button>
-										<button
-											class="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
-											onclick={() => openEditRule(rule)}
-											title="Edit rule"
-										>
-											<Pencil class="size-3.5" />
-										</button>
-										{#if deleteConfirmIndex === rule.index}
-											<button
-												class="rounded p-1 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-												onclick={cancelDeleteRule}
-												title="Cancel delete"
-											>
-												<X class="size-3.5" />
-											</button>
-											<button
-												class="rounded p-1 text-contra hover:bg-contra/10"
-												onclick={() => handleDeleteRule(rule)}
-												disabled={deleting}
-												title="Confirm delete"
-											>
-												{#if deleting}
-													<LoaderCircle class="size-3.5 animate-spin" />
-												{:else}
-													<Check class="size-3.5" />
-												{/if}
-											</button>
-										{:else}
-											<button
-												class="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-contra"
-												onclick={() => promptDeleteRule(rule)}
-												title="Delete rule"
-											>
-												<Trash2 class="size-3.5" />
-											</button>
-										{/if}
-									</div>
-								</div>
-
-								<div class="font-mono text-sm leading-relaxed">
-									{@html highlightRule(rule.raw)}
-								</div>
-
-								<div class="mt-2 rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-									{ruleHeadQuery(rule)}
-								</div>
-
-								{#if rule.body_atoms.length > 0}
-									<div class="mt-1.5 flex flex-wrap gap-1">
-										{#each rule.body_atoms as atom, i (i)}
-											<Badge variant="ghost" class="h-4 px-1.5 font-mono text-[10px] text-fact-base">
-												{extractPredicateFromAtom(atom)}
-											</Badge>
-										{/each}
-									</div>
+								{#if copiedSnippet === `rule:${rule.index}`}
+									<Check class="mr-1 size-3.5" />
+									Copy query
+								{:else}
+									<Copy class="mr-1 size-3.5" />
+									Copy query
 								{/if}
-							</div>
-						{/each}
+							</Button>
+							<button
+								class="rounded p-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
+								onclick={() => openEditRule(rule)}
+								type="button"
+								title="Edit rule"
+							>
+								<Pencil class="size-3.5" />
+							</button>
+							{#if deleteConfirmIndex === rule.index}
+								<button
+									class="rounded p-1 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+									onclick={cancelDeleteRule}
+									type="button"
+									title="Cancel delete"
+								>
+									<X class="size-3.5" />
+								</button>
+								<button
+									class="rounded p-1 text-contra hover:bg-contra/10"
+									onclick={() => handleDeleteRule(rule)}
+									disabled={deleting}
+									type="button"
+									title="Confirm delete"
+								>
+									{#if deleting}
+										<LoaderCircle class="size-3.5 animate-spin" />
+									{:else}
+										<Check class="size-3.5" />
+									{/if}
+								</button>
+							{:else}
+								<button
+									class="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-contra"
+									onclick={() => promptDeleteRule(rule)}
+									type="button"
+									title="Delete rule"
+								>
+									<Trash2 class="size-3.5" />
+								</button>
+							{/if}
+						</div>
 					</div>
-				{/if}
-			</section>
+
+					<div class="font-mono text-sm leading-relaxed">
+						{@html highlightRule(rule.raw)}
+					</div>
+
+					<div
+						class="mt-2 rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground"
+					>
+						{ruleHeadQuery(rule)}
+					</div>
+
+					{#if rule.body_atoms.length > 0}
+						<div class="mt-1.5 flex flex-wrap gap-1">
+							{#each rule.body_atoms as atom, i (i)}
+								<span
+									class="h-4 rounded border border-border/40 bg-muted/20 px-1.5 font-mono text-[10px] text-fact-base"
+									>{extractPredicateFromAtom(atom)}</span
+								>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/each}
 		</div>
 	{/if}
 </div>

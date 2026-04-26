@@ -1,0 +1,85 @@
+{
+  "path": "public/example/getting-started",
+  "branches": [
+    {
+      "branch_id": "alt-naming",
+      "name": "alternative naming candidate",
+      "parent_branch_id": "main",
+      "archived": false,
+      "claimed_by": "design-team",
+      "tx_time": "2024-01-02T10:00:00Z"
+    }
+  ],
+  "facts": [
+    {
+      "fact_id": "concept/exom#type",
+      "predicate": "entity/type",
+      "value": "memory-concept",
+      "confidence": 1.0,
+      "provenance": "example:bootstrap",
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    },
+    {
+      "fact_id": "concept/exom#name",
+      "predicate": "entity/name",
+      "value": "exom",
+      "confidence": 1.0,
+      "provenance": "example:bootstrap",
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    },
+    {
+      "fact_id": "concept/exom#summary",
+      "predicate": "concept/summary",
+      "value": "An exom is one logical memory: a folder of facts, observations, beliefs, branches, and rules under a tree path.",
+      "confidence": 0.95,
+      "provenance": "example:bootstrap",
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    },
+    {
+      "fact_id": "concept/exom#docs",
+      "predicate": "concept/docs_url",
+      "value": "https://github.com/anthropics/ray-exomem",
+      "confidence": 0.9,
+      "provenance": "example:bootstrap",
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    },
+    {
+      "fact_id": "concept/exom#fact_count",
+      "predicate": "concept/seed_size",
+      "value": 5,
+      "confidence": 1.0,
+      "provenance": "example:bootstrap",
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    }
+  ],
+  "observations": [
+    {
+      "obs_id": "obs/example-bootstrap",
+      "source_type": "example",
+      "source_ref": "bootstrap/example.json",
+      "content": "This file is the canonical drop-in seed example. Copy, rename, edit `path`, and refill with real fixture data.",
+      "confidence": 1.0,
+      "tags": ["example", "bootstrap"],
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    }
+  ],
+  "beliefs": [
+    {
+      "belief_id": "belief/seeded-content-is-discoverable",
+      "claim_text": "Seed data should give a cold visitor something real to read on first load.",
+      "status": "Active",
+      "confidence": 0.85,
+      "supported_by": ["obs/example-bootstrap"],
+      "rationale": "An empty dashboard reads as broken; pre-loaded entities make the surface immediately legible.",
+      "valid_from": "2024-01-01T09:00:00Z",
+      "tx_time": "2024-01-01T09:00:00Z"
+    }
+  ],
+  "rules": []
+}

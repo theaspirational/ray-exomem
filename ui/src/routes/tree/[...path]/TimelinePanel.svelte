@@ -6,7 +6,7 @@
 	import { exportBackupText, fetchExomemStatus, parseFactsFromExport } from '$lib/exomem.svelte';
 	import type { FactEntry } from '$lib/types';
 
-	let { exomPath }: { exomPath: string } = $props();
+	let { exomPath, notebookMode = false }: { exomPath: string; notebookMode?: boolean } = $props();
 
 	let facts = $state<FactEntry[]>([]);
 	let currentBranch = $state('main');
@@ -75,6 +75,9 @@
 	});
 </script>
 
+{#if notebookMode && !loading && temporalFacts.length === 0}
+	<p class="font-serif text-sm text-muted-foreground">No changes recorded yet.</p>
+{:else}
 <div class="flex flex-col gap-4">
 	<div class="grid gap-3 xl:grid-cols-4">
 		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
@@ -182,3 +185,4 @@
 		</div>
 	{/if}
 </div>
+{/if}

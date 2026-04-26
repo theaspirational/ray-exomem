@@ -120,6 +120,10 @@ pub trait AuthDb: Send + Sync {
     async fn remove_domain(&self, domain: &str) -> anyhow::Result<()>;
 
     async fn list_domains(&self) -> anyhow::Result<Vec<String>>;
+
+    /// Wipe all user-derived auth state (users, sessions, api keys, shares).
+    /// `allowed_domains` is preserved so login policy survives the reset.
+    async fn factory_reset(&self) -> anyhow::Result<()>;
 }
 
 #[cfg(feature = "postgres")]

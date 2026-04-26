@@ -158,6 +158,35 @@ impl AuthStore {
         Ok(store)
     }
 
+    /// Wipe all user-derived auth state so the daemon comes back as if no one
+    /// had ever logged in. Domain policy (`allowed_domains`) is preserved so
+    /// subsequent logins still pass the domain check. The bootstrap will run
+    /// again on the next login because the tree is also being wiped by the
+    /// factory-reset endpoint.
+    ///
+    /// Order matters: clear in-memory caches first so any concurrent request
+    /// sees a clean cache; then truncate the durable store. The reverse order
+    /// would briefly leave a logged-in user holding an in-memory session that
+    /// no longer corresponds to anything in the database.
+    pub async fn factory_reset_state(&self) -> anyhow::Result<()> {
+        // 1. In-memory caches. Order does not matter relative to each other.
+        self.session_cache.clear();
+        self.api_key_cache.clear();
+        self.users.lock().unwrap().clear();
+        self.api_keys.lock().unwrap().clear();
+        self.api_key_by_hash.lock().unwrap().clear();
+        self.share_grants.lock().unwrap().clear();
+        *self.top_admin.lock().unwrap() = None;
+        self.admins.lock().unwrap().clear();
+        // allowed_domains stays — it is configuration, not user state.
+
+        // 2. Durable store.
+        if let Some(ref db) = self.auth_db {
+            db.factory_reset().await?;
+        }
+        Ok(())
+    }
+
     /// Empty list = allow all; otherwise check email domain against allowed list.
     pub async fn check_domain(&self, email: &str) -> bool {
         if let Some(ref db) = self.auth_db {

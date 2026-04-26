@@ -145,16 +145,16 @@ mod tests {
 
     #[test]
     fn parses_double_colon() {
-        let p: TreePath = "work::ath::lynx::orsl::main".parse().unwrap();
-        assert_eq!(p.segments(), &["work", "ath", "lynx", "orsl", "main"]);
-        assert_eq!(p.to_cli_string(), "work::ath::lynx::orsl::main");
-        assert_eq!(p.to_slash_string(), "work/ath/lynx/orsl/main");
+        let p: TreePath = "work::team::project::repo::main".parse().unwrap();
+        assert_eq!(p.segments(), &["work", "team", "project", "repo", "main"]);
+        assert_eq!(p.to_cli_string(), "work::team::project::repo::main");
+        assert_eq!(p.to_slash_string(), "work/team/project/repo/main");
     }
 
     #[test]
     fn parses_slash() {
-        let p: TreePath = "work/ath/lynx".parse().unwrap();
-        assert_eq!(p.segments(), &["work", "ath", "lynx"]);
+        let p: TreePath = "work/team/project".parse().unwrap();
+        assert_eq!(p.segments(), &["work", "team", "project"]);
     }
 
     #[test]
@@ -183,8 +183,8 @@ mod tests {
 
     #[test]
     fn mixed_separator_round_trip() {
-        let p: TreePath = "work::ath/lynx".parse().unwrap();
-        assert_eq!(p.segments(), &["work", "ath", "lynx"]);
+        let p: TreePath = "work::team/project".parse().unwrap();
+        assert_eq!(p.segments(), &["work", "team", "project"]);
     }
 
     #[test]

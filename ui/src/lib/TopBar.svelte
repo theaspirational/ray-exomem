@@ -2,8 +2,9 @@
 	import { browser } from '$app/environment';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { ChevronRight, LogOut, MoreHorizontal, Shield, User } from '@lucide/svelte';
+	import { ChevronRight, Key, LogOut, MoreHorizontal, Shield, User } from '@lucide/svelte';
 	import { auth } from '$lib/auth.svelte';
+	import { welcomeSheetState } from '$lib/Welcome/welcomeSheetState.svelte';
 
 	let overflowOpen = $state(false);
 	let userMenuOpen = $state(false);
@@ -106,6 +107,17 @@
 						{auth.user.email}
 					</div>
 				{/if}
+				<button
+					type="button"
+					class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+					onclick={() => {
+						userMenuOpen = false;
+						welcomeSheetState.openSheet();
+					}}
+				>
+					<Key class="size-3.5" />
+					Connect an agent
+				</button>
 				<a
 					href="{base}/profile"
 					class="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"

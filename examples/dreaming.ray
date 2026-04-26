@@ -1,12 +1,12 @@
 ;; dreaming.ray — Consolidation: supersession and active observations.
 ;;
 ;; Observations about people and workplaces are versioned.
-;; obs1 (alice@google) is superseded by obs2 (alice@lynx).
-;; obs3 (bob@lynx) stands alone.
+;; obs1 (alice@acme) is superseded by obs2 (alice@widgets).
+;; obs3 (bob@widgets) stands alone.
 ;; Superseded observations are retracted to model memory consolidation.
 ;;
 ;; Entities: obs1=1 obs2=2 obs3=3
-;; Subjects: alice=100 bob=101; Objects: google=200 lynx=201
+;; Subjects: alice=100 bob=101; Objects: acme=200 widgets=201
 ;;
 ;; Demonstrates: explicit supersession links, retraction of stale
 ;; observations, and a rule that surfaces only active (consolidated)
@@ -28,5 +28,5 @@
   ;; Rule: active observations have both subject and object
   (rule (active ?obs ?s ?o) (?obs :subject ?s) (?obs :object ?o))
   ;; Query: which observations survived consolidation?
-  ;; Expected: obs2 (alice@lynx) and obs3 (bob@lynx) = 2 rows
+  ;; Expected: obs2 (alice@widgets) and obs3 (bob@widgets) = 2 rows
   (query db (find ?obs ?s ?o) (where (active ?obs ?s ?o))))

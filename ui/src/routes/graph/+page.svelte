@@ -1,33 +1,17 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import * as d3 from 'd3';
-	import {
-		ChevronRight,
-		Circle,
-		Eye,
-		EyeOff,
-		FolderOpen,
-		Maximize2,
-		RefreshCw,
-		ZoomIn,
-		ZoomOut
-	} from '@lucide/svelte';
+	import { Maximize2, RefreshCw, ZoomIn, ZoomOut } from '@lucide/svelte';
 	import { tick } from 'svelte';
 
 	import {
-		fetchRelationGraph,
-		fetchTree,
-		type RelationGraphResponse,
-		type TreeExom,
-		type TreeNode
-	} from '$lib/exomem.svelte';
+		collectExomNodes,
+		graphViz,
+		hideAllGraphExoms,
+		showAllGraphExoms
+	} from '$lib/graphExomVisibility.svelte';
+	import { fetchRelationGraph, type RelationGraphResponse } from '$lib/exomem.svelte';
 
-	let treeRoot = $state<TreeNode | null>(null);
-	let treeError = $state<string | null>(null);
-	let treeLoading = $state(true);
-
-	let visibility = $state<Record<string, boolean>>({});
-	let folderOpen = $state<Record<string, boolean>>({});
 	let graphCache = $state<Record<string, RelationGraphResponse>>({});
 
 	let svgEl = $state<SVGSVGElement | null>(null);
@@ -62,88 +46,15 @@
 		});
 	}
 
-	function exomDotClass(kind: string): string {
-		if (kind === 'project_main' || kind === 'project-main') return 'fill-emerald-500 text-emerald-500';
-		if (kind === 'session') return 'fill-sky-500 text-sky-500';
-		return 'fill-zinc-500 text-zinc-500';
-	}
+	const visibleExomPaths = $derived.by(() => {
+		const r = graphViz.treeRoot;
+		if (!r) return [] as string[];
+		return collectExomNodes(r)
+			.map((e) => e.path)
+			.filter((p) => graphViz.exomVis[p]);
+	});
 
-	function findNode(root: TreeNode, path: string): TreeNode | null {
-		if (root.path === path) return root;
-		if (root.kind !== 'folder') return null;
-		for (const c of root.children) {
-			const r = findNode(c, path);
-			if (r) return r;
-		}
-		return null;
-	}
-
-	function collectExomPaths(node: TreeNode): string[] {
-		if (node.kind === 'exom') return [node.path];
-		return node.children.flatMap((c) => collectExomPaths(c));
-	}
-
-	function collectExomNodes(node: TreeNode): TreeExom[] {
-		if (node.kind === 'exom') return [node];
-		return node.children.flatMap((c) => collectExomNodes(c));
-	}
-
-	function folderIsOpen(path: string): boolean {
-		return folderOpen[path] !== false;
-	}
-
-	function toggleFolder(path: string) {
-		folderOpen = { ...folderOpen, [path]: !folderIsOpen(path) };
-	}
-
-	function exomsUnderFolder(folderPath: string): string[] {
-		if (!treeRoot) return [];
-		const n = findNode(treeRoot, folderPath);
-		if (!n || n.kind !== 'folder') return [];
-		return collectExomPaths(n);
-	}
-
-	function folderVisibility(folderPath: string): 'all' | 'none' | 'mixed' {
-		const exoms = exomsUnderFolder(folderPath);
-		if (exoms.length === 0) return 'all';
-		let vis = 0;
-		for (const p of exoms) {
-			if (visibility[p]) vis++;
-		}
-		if (vis === 0) return 'none';
-		if (vis === exoms.length) return 'all';
-		return 'mixed';
-	}
-
-	function toggleFolderVisibility(folderPath: string) {
-		const exoms = exomsUnderFolder(folderPath);
-		if (exoms.length === 0) return;
-		const visCount = exoms.filter((p) => visibility[p]).length;
-		const setTo = visCount < exoms.length;
-		const patch: Record<string, boolean> = {};
-		for (const p of exoms) patch[p] = setTo;
-		visibility = { ...visibility, ...patch };
-	}
-
-	function toggleExomVisibility(path: string) {
-		visibility = { ...visibility, [path]: !visibility[path] };
-	}
-
-	function showAllExoms() {
-		if (!treeRoot) return;
-		const exoms = collectExomNodes(treeRoot);
-		const patch: Record<string, boolean> = {};
-		for (const e of exoms) patch[e.path] = true;
-		visibility = { ...visibility, ...patch };
-	}
-
-	function hideAllExoms() {
-		if (!treeRoot) return;
-		const exoms = collectExomNodes(treeRoot);
-		const patch: Record<string, boolean> = {};
-		for (const e of exoms) patch[e.path] = false;
-		visibility = { ...visibility, ...patch };
-	}
+	const visibleExomCount = $derived(visibleExomPaths.length);
 
 	type MergedNode = {
 		id: string;
@@ -207,15 +118,6 @@
 		return { nodes, edges };
 	}
 
-	const visibleExomPaths = $derived.by(() => {
-		if (!treeRoot) return [] as string[];
-		return collectExomNodes(treeRoot)
-			.map((e) => e.path)
-			.filter((p) => visibility[p]);
-	});
-
-	const visibleExomCount = $derived(visibleExomPaths.length);
-
 	const mergedGraph = $derived.by(() => {
 		const m = new Map<string, RelationGraphResponse>();
 		for (const p of visibleExomPaths) {
@@ -234,32 +136,6 @@
 		const map = new Map<string, string>();
 		sorted.forEach((p, i) => map.set(p, palette[i % palette.length]));
 		return map;
-	});
-
-	async function loadTree() {
-		treeLoading = true;
-		treeError = null;
-		try {
-			const root = await fetchTree(undefined, { depth: 10, archived: true });
-			treeRoot = root;
-			const patch: Record<string, boolean> = { ...visibility };
-			for (const e of collectExomNodes(root)) {
-				if (!(e.path in patch)) {
-					patch[e.path] = e.exom_kind !== 'session';
-				}
-			}
-			visibility = patch;
-		} catch (e) {
-			treeRoot = null;
-			treeError = e instanceof Error ? e.message : 'Failed to load tree';
-		} finally {
-			treeLoading = false;
-		}
-	}
-
-	$effect(() => {
-		if (!browser) return;
-		void loadTree();
 	});
 
 	let fetchGeneration = 0;
@@ -496,167 +372,91 @@
 	}
 </script>
 
-{#snippet treeRows(node: TreeNode)}
-	{#if node.kind === 'folder'}
-		{@const open = folderIsOpen(node.path)}
-		{@const fv = folderVisibility(node.path)}
-		<div class="flex flex-col">
-			<div class="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-zinc-800/50">
-				<button
-					type="button"
-					onclick={() => toggleFolder(node.path)}
-					class="flex size-5 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-					aria-expanded={open}
-				>
-					<ChevronRight class="size-3 transition-transform {open ? 'rotate-90' : ''}" />
-				</button>
-				<FolderOpen class="size-3 shrink-0 text-amber-500/80" />
-				<span class="min-w-0 flex-1 truncate text-zinc-300">{node.name}</span>
-				<button
-					type="button"
-					onclick={() => toggleFolderVisibility(node.path)}
-					class="flex size-6 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-					aria-label="Toggle visibility for folder {node.name}"
-				>
-					{#if fv === 'all'}
-						<Eye class="size-3 text-zinc-400" />
-					{:else if fv === 'none'}
-						<EyeOff class="size-3 text-zinc-600" />
-					{:else}
-						<Eye class="size-3 text-zinc-600 opacity-50" />
-					{/if}
-				</button>
-			</div>
-			{#if open}
-				<div class="ml-2 border-l border-zinc-800 pl-1">
-					{#each node.children as child (child.path)}
-						{@render treeRows(child)}
-					{/each}
-				</div>
-			{/if}
-		</div>
-	{:else}
-		<div class="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-zinc-800/50">
-			<span class="size-3 shrink-0"></span>
-			<Circle class="size-2 shrink-0 {exomDotClass(node.exom_kind)}" />
-			<span class="min-w-0 flex-1 truncate text-zinc-200">{node.name}</span>
-			<button
-				type="button"
-				onclick={() => toggleExomVisibility(node.path)}
-				class="flex size-6 shrink-0 items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-				aria-label="Toggle visibility for {node.name}"
-			>
-				{#if visibility[node.path]}
-					<Eye class="size-3 text-zinc-400" />
-				{:else}
-					<EyeOff class="size-3 text-zinc-600" />
-				{/if}
-			</button>
-		</div>
-	{/if}
-{/snippet}
-
-<div class="flex h-full min-h-0 flex-1 overflow-hidden bg-zinc-950">
-	<!-- Sidebar -->
-	<div
-		class="w-56 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-900 p-2 text-xs"
-	>
-		<div class="mb-2 flex items-center justify-between px-1">
-			<span class="text-[0.65rem] uppercase tracking-wide text-zinc-500">Exom Visibility</span>
+<div class="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-background">
+	<div class="flex items-center justify-between gap-2 border-b border-border px-3 py-1.5">
+		<div class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+			<span class="text-[0.65rem] uppercase tracking-wide">Exom visibility</span>
 			<div class="flex gap-1">
 				<button
 					type="button"
 					title="Show all"
-					onclick={showAllExoms}
-					class="rounded px-1.5 py-0.5 text-[0.65rem] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+					onclick={showAllGraphExoms}
+					class="rounded px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-card hover:text-foreground"
 				>
 					All
 				</button>
 				<button
 					type="button"
 					title="Hide all"
-					onclick={hideAllExoms}
-					class="rounded px-1.5 py-0.5 text-[0.65rem] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+					onclick={hideAllGraphExoms}
+					class="rounded px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-card hover:text-foreground"
 				>
 					None
 				</button>
 			</div>
+			<span class="text-border">·</span>
+			<span class="tabular-nums">{totalNodes} nodes</span>
+			<span class="text-border">·</span>
+			<span class="tabular-nums">{totalEdges} edges</span>
+			<span class="text-border">·</span>
+			<span>{visibleExomCount} exoms</span>
 		</div>
-		{#if treeLoading}
-			<p class="px-1 text-zinc-500">Loading tree…</p>
-		{:else if treeError}
-			<p class="px-1 text-red-400">{treeError}</p>
-		{:else if treeRoot}
-			{@render treeRows(treeRoot)}
-		{/if}
+		<div class="flex items-center gap-0.5">
+			<button
+				type="button"
+				class="flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
+				onclick={zoomIn}
+				title="Zoom in"
+			>
+				<ZoomIn class="size-3.5" />
+			</button>
+			<button
+				type="button"
+				class="flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
+				onclick={zoomOut}
+				title="Zoom out"
+			>
+				<ZoomOut class="size-3.5" />
+			</button>
+			<button
+				type="button"
+				class="flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
+				onclick={zoomFit}
+				title="Reset view"
+			>
+				<Maximize2 class="size-3.5" />
+			</button>
+			<button
+				type="button"
+				class="flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
+				onclick={reloadGraphs}
+				disabled={graphLoading}
+				title="Reload"
+			>
+				<RefreshCw class="size-3.5 {graphLoading ? 'animate-spin' : ''}" />
+			</button>
+		</div>
 	</div>
 
-	<!-- Graph -->
-	<div class="flex min-w-0 flex-1 flex-col">
-		<div class="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
-			<div class="flex items-center gap-2 text-xs text-zinc-500">
-				<span class="tabular-nums">{totalNodes} nodes</span>
-				<span class="text-zinc-700">·</span>
-				<span class="tabular-nums">{totalEdges} edges</span>
-				<span class="text-zinc-700">·</span>
-				<span>{visibleExomCount} exoms</span>
+	<div class="relative min-h-0 flex-1 overflow-hidden">
+		{#if graphError && totalNodes === 0}
+			<div
+				class="flex h-full min-h-[200px] items-center justify-center px-4 text-center text-sm text-destructive"
+			>
+				{graphError}
 			</div>
-			<div class="flex items-center gap-0.5">
-				<button
-					type="button"
-					class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-					onclick={zoomIn}
-					title="Zoom in"
-				>
-					<ZoomIn class="size-3.5" />
-				</button>
-				<button
-					type="button"
-					class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-					onclick={zoomOut}
-					title="Zoom out"
-				>
-					<ZoomOut class="size-3.5" />
-				</button>
-				<button
-					type="button"
-					class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-					onclick={zoomFit}
-					title="Reset view"
-				>
-					<Maximize2 class="size-3.5" />
-				</button>
-				<button
-					type="button"
-					class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-					onclick={reloadGraphs}
-					disabled={graphLoading}
-					title="Reload"
-				>
-					<RefreshCw class="size-3.5 {graphLoading ? 'animate-spin' : ''}" />
-				</button>
+		{:else if graphLoading && visibleExomPaths.length > 0 && totalNodes === 0}
+			<div
+				class="flex h-full min-h-[200px] items-center justify-center text-sm text-muted-foreground"
+			>
+				<RefreshCw class="mr-2 size-5 animate-spin" />
+				Loading graphs…
 			</div>
-		</div>
-
-		<div class="relative min-h-0 flex-1 overflow-hidden">
-			{#if graphError && totalNodes === 0}
-				<div class="flex h-full min-h-[200px] items-center justify-center px-4 text-center text-sm text-red-400">
-					{graphError}
-				</div>
-			{:else if graphLoading && visibleExomPaths.length > 0 && totalNodes === 0}
-				<div
-					class="flex h-full min-h-[200px] items-center justify-center text-sm text-zinc-500"
-				>
-					<RefreshCw class="mr-2 size-5 animate-spin" />
-					Loading graphs…
-				</div>
-			{:else}
-				<svg
-					bind:this={svgEl}
-					class="block h-full min-h-[320px] w-full"
-					style="background: oklch(0.15 0.01 260);"
-				></svg>
-			{/if}
-		</div>
+		{:else}
+			<svg
+				bind:this={svgEl}
+				class="block h-full min-h-[320px] w-full bg-card"
+			></svg>
+		{/if}
 	</div>
 </div>

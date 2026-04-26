@@ -6,3 +6,12 @@
 .DS_Store
 .superpowers/
 .env
+
+# Drop-in seed fixtures embedded by build.rs. Operators commit only the
+# README + sample; their own private/private-domain fixtures stay local.
+/bootstrap/*.json
+!/bootstrap/example.json
+
+# Working directory for design briefs / plans / specs. Local only —
+# may reference proprietary product names or internal codenames.
+/archive/
