@@ -38,6 +38,12 @@
 	const VERIFY_CURL = $derived(`curl -H "Authorization: Bearer $KEY" \\
   ${authApiBase()}/api/status`);
 
+	function claudeCodeCmd(rawKey: string | null): string {
+		const token = rawKey ?? '<API_TOKEN>';
+		return `claude mcp add --scope user --transport http ray-exomem ${authApiBase()}/mcp \\
+  --header "Authorization: Bearer ${token}"`;
+	}
+
 	function mcpJson(cfg: Record<string, unknown> | null): string {
 		if (cfg) return JSON.stringify(cfg, null, 2);
 		const url = `${authApiBase()}/mcp`;
@@ -56,14 +62,14 @@
 	let keyLabel = $state('');
 	let generating = $state(false);
 	let generatedKey = $state<GeneratedKey | null>(null);
-	let snippetTab = $state<'mcp' | 'http'>('mcp');
+	let snippetTab = $state<'claude' | 'mcp' | 'http'>('claude');
 
 	$effect(() => {
 		const o = welcomeSheetState.open;
 		if (o && !preOpen) {
 			generatedKey = null;
 			keyLabel = defaultKeyLabel();
-			snippetTab = 'mcp';
+			snippetTab = 'claude';
 		}
 		preOpen = o;
 	});
@@ -181,6 +187,16 @@
 									type="button"
 									class={cn(
 										'flex-1 rounded px-2 py-1.5 transition',
+										snippetTab === 'claude' ? 'bg-primary text-primary-foreground' : 'text-foreground/70'
+									)}
+									onclick={() => (snippetTab = 'claude')}
+								>
+									Claude Code
+								</button>
+								<button
+									type="button"
+									class={cn(
+										'flex-1 rounded px-2 py-1.5 transition',
 										snippetTab === 'mcp' ? 'bg-primary text-primary-foreground' : 'text-foreground/70'
 									)}
 									onclick={() => (snippetTab = 'mcp')}
@@ -200,7 +216,30 @@
 							</div>
 
 							<div class="relative">
-								{#if snippetTab === 'mcp'}
+								{#if snippetTab === 'claude'}
+									<pre
+										class="max-h-48 overflow-auto rounded-md border border-border bg-background p-3 pr-10 font-mono text-xs text-foreground/90"
+									>{claudeCodeCmd(generatedKey.raw_key)}</pre>
+									<Button
+										variant="ghost"
+										size="icon-sm"
+										class="absolute top-1.5 right-1.5"
+										onclick={() =>
+											void copyToClipboard(
+												claudeCodeCmd(generatedKey!.raw_key),
+												'Claude Code command'
+											)}
+										title="Copy"
+									>
+										<Copy class="size-3" />
+									</Button>
+									<p class="mt-2 font-sans text-[11px] leading-relaxed text-foreground/60">
+										Run this in any terminal where the
+										<code class="rounded bg-muted px-1 py-0.5 font-mono">claude</code> CLI is installed.
+										<code class="rounded bg-muted px-1 py-0.5 font-mono">--scope user</code> registers
+										ray-exomem for every project on this machine.
+									</p>
+								{:else if snippetTab === 'mcp'}
 									<pre
 										class="max-h-48 overflow-auto rounded-md border border-border bg-background p-3 pr-10 font-mono text-xs text-foreground/90"
 									>{mcpJson(generatedKey.mcp_config)}</pre>
@@ -217,6 +256,9 @@
 									>
 										<Copy class="size-3" />
 									</Button>
+									<p class="mt-2 font-sans text-[11px] leading-relaxed text-foreground/60">
+										For agents that read MCP config from JSON (Cursor, Cline, custom hosts).
+									</p>
 								{:else}
 									<pre
 										class="max-h-48 overflow-auto rounded-md border border-border bg-background p-3 pr-10 font-mono text-xs text-foreground/90"

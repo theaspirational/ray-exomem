@@ -167,6 +167,12 @@
 		);
 	}
 
+	function claudeCodeCmd(rawKey?: string): string {
+		const token = rawKey ?? '<API_TOKEN>';
+		return `claude mcp add --scope user --transport http ray-exomem ${authApiBase()}/mcp \\
+  --header "Authorization: Bearer ${token}"`;
+	}
+
 	function formatDate(iso: string): string {
 		try {
 			return new Date(iso).toLocaleDateString(undefined, {
@@ -298,13 +304,42 @@
 		</div>
 	</Card>
 
+	<!-- Connect Claude Code -->
+	<Card class="border-border/60 bg-card/80">
+		<div class="space-y-3">
+			<h2 class="text-sm font-medium text-foreground/60">Connect Claude Code</h2>
+			<p class="text-xs text-muted-foreground">
+				Run this in any terminal where the
+				<code class="rounded bg-muted px-1 py-0.5 font-mono">claude</code> CLI is installed.
+				Replace <code class="rounded bg-muted px-1 py-0.5 font-mono">&lt;API_TOKEN&gt;</code> with a
+				generated key.
+				<code class="rounded bg-muted px-1 py-0.5 font-mono">--scope user</code> registers ray-exomem
+				for every project on this machine.
+			</p>
+			<div class="relative">
+				<pre
+					class="overflow-x-auto rounded-md border border-border/60 bg-background p-3 text-xs text-foreground/80"
+				>{claudeCodeCmd()}</pre>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					class="absolute top-2 right-2"
+					onclick={() => copyToClipboard(claudeCodeCmd(), 'Claude Code command')}
+					title="Copy command"
+				>
+					<Copy class="size-3" />
+				</Button>
+			</div>
+		</div>
+	</Card>
+
 	<!-- MCP Configuration -->
 	<Card class="border-border/60 bg-card/80">
 		<div class="space-y-3">
 			<h2 class="text-sm font-medium text-foreground/60">MCP Configuration</h2>
 			<p class="text-xs text-muted-foreground">
-				Use this snippet in your MCP client configuration. Replace the API key placeholder with a
-				generated key.
+				For agents that read MCP config from JSON (Cursor, Cline, custom hosts). Replace the API key
+				placeholder with a generated key.
 			</p>
 			<div class="relative">
 				<pre
@@ -364,6 +399,26 @@
 						</Button>
 					</div>
 					<p class="text-xs text-primary/80">This key is shown only once.</p>
+				</div>
+
+				<!-- Claude Code one-liner -->
+				<div class="space-y-1.5">
+					<span class="text-xs font-medium text-foreground/60">Claude Code</span>
+					<div class="relative">
+						<pre
+							class="overflow-x-auto rounded-md border border-border/60 bg-background p-3 pr-10 text-xs text-foreground/80 break-all whitespace-pre-wrap"
+						>{claudeCodeCmd(generatedKey.raw_key)}</pre>
+						<Button
+							variant="ghost"
+							size="icon-xs"
+							class="absolute top-2 right-2"
+							onclick={() =>
+								copyToClipboard(claudeCodeCmd(generatedKey!.raw_key), 'Claude Code command')}
+							title="Copy command"
+						>
+							<Copy class="size-3" />
+						</Button>
+					</div>
 				</div>
 
 				<!-- MCP Config -->
