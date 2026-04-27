@@ -1,3 +1,4 @@
+import { untrack } from 'svelte';
 import type { TreeExom, TreeNode } from '$lib/exomem.svelte';
 
 function collectExomNodes(node: TreeNode): TreeExom[] {
@@ -28,14 +29,16 @@ type GraphViz = {
 export const graphViz = $state<GraphViz>({ treeRoot: null, exomVis: {} });
 
 export function initGraphExomVisFromTree(root: TreeNode) {
-	graphViz.treeRoot = root;
-	const patch: Record<string, boolean> = { ...graphViz.exomVis };
-	for (const e of collectExomNodes(root)) {
-		if (!(e.path in patch)) {
-			patch[e.path] = e.exom_kind !== 'session';
+	untrack(() => {
+		graphViz.treeRoot = root;
+		const patch: Record<string, boolean> = { ...graphViz.exomVis };
+		for (const e of collectExomNodes(root)) {
+			if (!(e.path in patch)) {
+				patch[e.path] = e.exom_kind !== 'session';
+			}
 		}
-	}
-	graphViz.exomVis = patch;
+		graphViz.exomVis = patch;
+	});
 }
 
 export function toggleGraphExom(path: string) {

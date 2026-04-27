@@ -33,17 +33,17 @@
 	<h1 class="mb-6 font-sans text-lg font-semibold">Guide</h1>
 
 	{#if loading}
-		<p class="flex items-center gap-2 text-sm text-zinc-500">
-			<Loader2 class="size-4 animate-spin text-zinc-400" aria-hidden="true" />
+		<p class="flex items-center gap-2 text-sm text-muted-foreground">
+			<Loader2 class="size-4 animate-spin text-foreground/60" aria-hidden="true" />
 			Loading…
 		</p>
 	{:else if err}
-		<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+		<div class="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 			<p>{err}</p>
 			<Button
 				variant="outline"
 				size="sm"
-				class="w-fit border-red-800/60 text-red-100"
+				class="w-fit border-destructive/50 text-destructive"
 				onclick={() => loadToken++}
 			>
 				<RefreshCw class="mr-1 size-3" />

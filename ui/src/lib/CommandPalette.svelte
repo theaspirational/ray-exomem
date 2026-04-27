@@ -145,24 +145,24 @@
 	shouldFilter={false}
 	title="Command palette"
 	description="Navigate the tree or run actions"
-	class="border-zinc-700 bg-zinc-950 text-zinc-100"
+	class="border-border bg-card text-foreground"
 	showCloseButton={false}
 >
 	<CommandInput
 		placeholder="Filter paths (full /slash/path)…"
-		class="border-zinc-800 bg-zinc-950 text-zinc-100 placeholder:text-zinc-600"
+		class="border-border bg-card text-foreground placeholder:text-muted-foreground"
 	/>
 	<CommandList class="max-h-[min(50vh,24rem)] thin-scrollbar">
-		<CommandEmpty class="py-6 text-center text-sm text-zinc-500">
+		<CommandEmpty class="py-6 text-center text-sm text-muted-foreground">
 			{loading ? 'Loading tree…' : 'No matches.'}
 		</CommandEmpty>
 
 		{#if filteredPaths.length > 0}
-			<CommandGroup heading="Go to" class="text-zinc-500 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
+			<CommandGroup heading="Go to" class="text-muted-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
 				{#each filteredPaths as p (p)}
 					<CommandItem
 						value={p}
-						class="cursor-pointer font-mono text-xs text-zinc-200 aria-selected:bg-zinc-800"
+						class="cursor-pointer font-mono text-xs text-foreground aria-selected:bg-secondary"
 						onSelect={() => goTree(p)}
 					>
 						<span class="truncate">{p}</span>
@@ -172,11 +172,11 @@
 		{/if}
 
 		{#if filteredBranches.length > 0}
-			<CommandGroup heading="Switch branch" class="text-zinc-500 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
+			<CommandGroup heading="Switch branch" class="text-muted-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
 				{#each filteredBranches as b (b)}
 					<CommandItem
 						value={`branch ${b}`}
-						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
+						class="cursor-pointer text-sm text-foreground aria-selected:bg-secondary"
 						onSelect={() => switchBranch(b)}
 					>
 						Switch branch {b}
@@ -186,11 +186,11 @@
 		{/if}
 
 		{#if showGuide || showInit || showRename || showQuery}
-			<CommandGroup heading="Actions" class="text-zinc-500 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
+			<CommandGroup heading="Actions" class="text-muted-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5">
 				{#if showGuide}
 					<CommandItem
 						value="open guide"
-						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
+						class="cursor-pointer text-sm text-foreground aria-selected:bg-secondary"
 						onSelect={doGuide}
 					>
 						Open guide
@@ -199,7 +199,7 @@
 				{#if showInit}
 					<CommandItem
 						value="init here"
-						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
+						class="cursor-pointer text-sm text-foreground aria-selected:bg-secondary"
 						onSelect={doInit}
 					>
 						Init here{initTargetPath ? ` (${initTargetPath})` : ''}
@@ -208,7 +208,7 @@
 				{#if showRename}
 					<CommandItem
 						value="rename"
-						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
+						class="cursor-pointer text-sm text-foreground aria-selected:bg-secondary"
 						onSelect={doRename}
 					>
 						Rename (current path)
@@ -217,7 +217,7 @@
 				{#if showQuery}
 					<CommandItem
 						value="open query editor"
-						class="cursor-pointer text-sm text-zinc-200 aria-selected:bg-zinc-800"
+						class="cursor-pointer text-sm text-foreground aria-selected:bg-secondary"
 						onSelect={doQuery}
 					>
 						Open Query Editor

@@ -33,9 +33,10 @@ static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/build");
 // Public constants (previously in web.rs)
 // ---------------------------------------------------------------------------
 
-pub const UI_MOUNT_PATH: &str = "/ray-exomem";
-pub const API_PREFIX: &str = "/ray-exomem/api/";
-pub const EVENTS_PATH: &str = "/ray-exomem/events";
+/// Sub-path mount, baked at compile time from `$RAY_EXOMEM_BASE_PATH`.
+/// Empty string means root mount. When non-empty, must start with `/` and
+/// must not end with `/` (build.rs enforces this).
+pub const BASE_PATH: &str = env!("RAY_EXOMEM_BASE_PATH");
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9780";
 pub const DEFAULT_EXOM: &str = "main";
 
@@ -74,7 +75,14 @@ pub struct AppState {
     pub tree_root: Option<PathBuf>,
     pub sym_path: Option<PathBuf>,
     pub start_time: Instant,
-    pub sse_tx: broadcast::Sender<String>,
+    /// SSE event channel. The first tuple element is the exom path the
+    /// event belongs to (`Some(slash_path)` for per-exom events, `None`
+    /// for global structural events like `tree:changed` or
+    /// `system:factory_reset`). The second is the JSON payload.
+    /// Subscribers in `api_sse` filter `Some`-tagged events through
+    /// `resolve_access` so a subscriber never sees activity in an exom
+    /// they cannot read.
+    pub sse_tx: broadcast::Sender<(Option<String>, String)>,
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
     pub bind_addr: Option<String>,
@@ -133,25 +141,21 @@ impl AppState {
                 }
 
                 load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
-                if exoms.is_empty() {
-                    let default_path: crate::path::TreePath = "main".parse().unwrap();
-                    let _ = crate::scaffold::new_bare_exom(&tree_dir, &default_path);
-                    load_tree_exoms_into(&tree_dir, &sym, &mut exoms);
-                }
+                // No auto-scaffolded `tree/main`. Under the privacy model
+                // ownership is required for every read/write, and a bare
+                // root-level `main` is owned by no one — so the only thing
+                // an auto-create would do is mint an unreachable directory.
+                // Fresh deployments boot with an empty exoms map; projects
+                // and user namespaces are added explicitly via `init`,
+                // `exom-new`, or first authenticated login (which seeds
+                // `{email}/main`).
                 (engine, Some(tree_dir), Some(sym))
             }
             None => {
+                // No persistence: ephemeral engine, empty exoms map. Same
+                // contract as the persistent fresh-state path above —
+                // exoms are added explicitly, never auto-created.
                 let engine = RayforceEngine::new()?;
-                exoms.insert(
-                    DEFAULT_EXOM.to_string(),
-                    ExomState {
-                        brain: Brain::new(),
-                        datoms: storage::build_datoms_table(&Brain::new())?,
-                        typed_facts: storage::build_typed_fact_tables(&Brain::new())?,
-                        rules: Vec::new(),
-                        exom_disk: None,
-                    },
-                );
                 (engine, None, None)
             }
         };
@@ -409,11 +413,44 @@ fn api_router() -> Router<Arc<AppState>> {
 
 async fn api_sse(
     State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
 ) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.sse_tx.subscribe();
+    // Snapshot the subscriber's identity for the per-event filter. The
+    // `require_auth` middleware on `/events` guarantees `maybe_user.0` is
+    // `Some` whenever `auth_store` is configured; the `None` arm only
+    // fires in single-user dev mode where every event is delivered.
+    let subscriber = maybe_user.0;
+    let state_for_filter = state.clone();
     let events = BroadcastStream::new(rx)
-        .filter_map(|r| async { r.ok() })
-        .map(|data| Ok(Event::default().data(data)));
+        .filter_map(move |r| {
+            let state = state_for_filter.clone();
+            let subscriber = subscriber.clone();
+            async move {
+                let (exom, payload) = r.ok()?;
+                match (exom, &state.auth_store, subscriber) {
+                    // No exom tag = global event (tree:changed, factory_reset). Always deliver.
+                    (None, _, _) => Some(payload),
+                    // Per-exom event but auth disabled (single-user dev). Deliver.
+                    (Some(_), None, _) => Some(payload),
+                    // Per-exom event, auth on, but no subscriber identity. Drop.
+                    (Some(_), Some(_), None) => None,
+                    // Per-exom event with an authenticated subscriber. Filter by access.
+                    (Some(exom_path), Some(store), Some(user)) => {
+                        let level = crate::auth::access::resolve_access(
+                            &user, &exom_path, store,
+                        )
+                        .await;
+                        if level.can_read() {
+                            Some(payload)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+        })
+        .map(|payload| Ok(Event::default().data(payload)));
     let pings = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
         .map(|_| Ok(Event::default().event("ping").data("{}")));
     Sse::new(futures::stream::select(events, pings))
@@ -450,8 +487,10 @@ fn content_type_for_ext(path: &str) -> &'static str {
 }
 
 async fn spa_fallback(uri: Uri) -> impl IntoResponse {
-    let raw = uri.path().trim_start_matches('/');
-    let path = raw.strip_prefix("ray-exomem/").unwrap_or(raw);
+    // When mounted under `.nest(BASE_PATH, ...)`, the inner handlers see the
+    // request path with BASE_PATH already stripped. When mounted at root the
+    // path is unchanged. Either way, just trim the leading slash.
+    let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 
     if let Some(file) = EMBEDDED_UI.get_file(path) {
@@ -498,25 +537,36 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = Router::new()
-        // Nested under /ray-exomem/api
-        .nest("/ray-exomem/api", api_router())
-        // MCP JSON-RPC endpoint
+    let require_auth_layer = axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::auth::middleware::require_auth,
+    );
+
+    // Routes that go through `require_auth_layer`. The layer is no-op when
+    // `state.auth_store` is `None` (single-user dev mode).
+    let protected = Router::new()
+        .nest("/api", api_router())
         .route(
             "/mcp",
             get(crate::mcp::mcp_stream_handler)
                 .post(crate::mcp::mcp_handler)
                 .delete(crate::mcp::mcp_delete_handler),
         )
-        // Auth routes
+        .route("/events", get(api_sse))
+        .layer(require_auth_layer);
+
+    let inner = protected
         .nest("/auth", crate::auth::routes::auth_router())
         .nest("/auth/admin", crate::auth::admin::admin_router())
-        // SSE event stream
-        .route("/ray-exomem/events", get(api_sse))
-        .route("/sse", get(api_sse))
-        // Compat shim: smoke test calls /api/status
-        .route("/api/status", get(api_status))
-        .fallback(spa_fallback)
+        .fallback(spa_fallback);
+
+    let app_router = if BASE_PATH.is_empty() {
+        inner
+    } else {
+        Router::new().nest(BASE_PATH, inner)
+    };
+
+    let app = app_router
         .with_state(state)
         .layer(middleware::map_response(set_response_headers))
         .layer(cors);
@@ -704,9 +754,10 @@ pub fn mutate_exom<T>(
     };
     let out = result?;
     refresh_exom_binding(state, &mut exoms, exom_name)?;
-    let _ = state
-        .sse_tx
-        .send(format!(r#"{{"kind":"memory","exom":"{}"}}"#, exom_name));
+    let _ = state.sse_tx.send((
+        Some(exom_name.to_string()),
+        format!(r#"{{"kind":"memory","exom":"{}"}}"#, exom_name),
+    ));
     Ok(out)
 }
 
@@ -719,9 +770,10 @@ pub async fn mutate_exom_async<T>(
 }
 
 fn emit_tree_changed(state: &AppState) {
-    let _ = state
-        .sse_tx
-        .send(r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string());
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
 }
 
 async fn guard_read(
@@ -828,41 +880,6 @@ fn append_public_subtree(
         opts,
     )?);
     Ok(())
-}
-
-async fn build_tree_root_for_admin(
-    state: &AppState,
-    user: &User,
-    opts: &crate::tree::WalkOptions,
-) -> std::io::Result<crate::tree::TreeNode> {
-    let tree_root = server_tree_root(state);
-    let sym_path = server_sym_path(state);
-    let mut namespaces = BTreeSet::new();
-    namespaces.insert(user.namespace_root().to_string());
-    if let Some(ref auth_store) = state.auth_store {
-        for stored in auth_store.list_users().await {
-            namespaces.insert(stored.email);
-        }
-    }
-
-    let mut children = Vec::new();
-    for namespace in namespaces {
-        let root_path = namespace_path(&namespace)?;
-        children.push(crate::tree::walk_or_empty(
-            &tree_root,
-            &sym_path,
-            &root_path,
-            opts,
-        )?);
-    }
-
-    append_public_subtree(&tree_root, &sym_path, &mut children, opts)?;
-
-    Ok(crate::tree::TreeNode::Folder {
-        name: String::new(),
-        path: String::new(),
-        children,
-    })
 }
 
 async fn build_tree_root_for_user(
@@ -1111,29 +1128,12 @@ async fn api_tree(
     };
     let result = if let Some(ref user) = maybe_user.0 {
         match q.path.as_deref().filter(|s| !s.is_empty()) {
-            None => {
-                if user.is_admin() {
-                    build_tree_root_for_admin(&state, user, &opts).await
-                } else {
-                    build_tree_root_for_user(&state, user, &opts).await
-                }
-            }
+            None => build_tree_root_for_user(&state, user, &opts).await,
             Some(p) => match p.parse::<crate::path::TreePath>() {
-                Ok(tp) => {
-                    if user.is_admin() {
-                        let walk_result = if tp.len() == 1 {
-                            crate::tree::walk_or_empty(&tree_root, &sym_path, &tp, &opts)
-                        } else {
-                            crate::tree::walk(&tree_root, &sym_path, &tp, &opts)
-                        };
-                        walk_result
-                    } else {
-                        match build_tree_path_for_user(&state, user, &tp, &opts).await {
-                            Ok(node) => return Json(node).into_response(),
-                            Err(err) => return err.into_response(),
-                        }
-                    }
-                }
+                Ok(tp) => match build_tree_path_for_user(&state, user, &tp, &opts).await {
+                    Ok(node) => return Json(node).into_response(),
+                    Err(err) => return err.into_response(),
+                },
                 Err(e) => {
                     let err = ApiError::new("bad_path", e.to_string());
                     return err.into_response();
@@ -2381,7 +2381,10 @@ async fn api_eval_inner(
                             std::fs::write(disk.join("rules.ray"), format!("{}\n", body_str))?;
                         }
                     }
-                    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
+                    let _ = state.sse_tx.send((
+                        Some(exom.clone()),
+                        format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred),
+                    ));
                     Ok(())
                 })();
                 r
@@ -2404,7 +2407,10 @@ async fn api_eval_inner(
                     if let Some(_disk) = es.exom_disk.as_ref() {
                         es.brain.save()?;
                     }
-                    let _ = state.sse_tx.send(format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred));
+                    let _ = state.sse_tx.send((
+                        Some(exom.clone()),
+                        format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred),
+                    ));
                     Ok(())
                 })();
                 r
@@ -2433,9 +2439,12 @@ async fn api_eval_inner(
                             .join("\n");
                         std::fs::write(disk.join("rules.ray"), format!("{}\n", body_str))?;
                     }
-                    let _ = state.sse_tx.send(format!(
-                        r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#,
-                        exom_name, ctx.actor
+                    let _ = state.sse_tx.send((
+                        Some(exom_name.clone()),
+                        format!(
+                            r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#,
+                            exom_name, ctx.actor
+                        ),
                     ));
                     Ok(())
                 })();
@@ -3117,9 +3126,12 @@ async fn api_switch_branch_handler(
     .await;
     match result {
         Ok(()) => {
-            let _ = state.sse_tx.send(format!(
-                r#"{{"v":1,"kind":"memory","op":"branch_switch","exom":"{}","actor":"{}"}}"#,
-                exom_slash, actor
+            let _ = state.sse_tx.send((
+                Some(exom_slash.clone()),
+                format!(
+                    r#"{{"v":1,"kind":"memory","op":"branch_switch","exom":"{}","actor":"{}"}}"#,
+                    exom_slash, actor
+                ),
             ));
             Json(serde_json::json!({"switched_to": branch_id})).into_response()
         }
@@ -3568,9 +3580,12 @@ async fn api_import_json(
             // Re-bind all exoms after import to ensure consistency
             let exoms = state.exoms.lock().unwrap();
             reconcile_engine(&state, &exoms);
-            let _ = state.sse_tx.send(format!(
-                r#"{{"v":1,"kind":"memory","op":"import_json","exom":"{}","actor":"{}"}}"#,
-                exom_slash, actor
+            let _ = state.sse_tx.send((
+                Some(exom_slash.clone()),
+                format!(
+                    r#"{{"v":1,"kind":"memory","op":"import_json","exom":"{}","actor":"{}"}}"#,
+                    exom_slash, actor
+                ),
             ));
             Json(serde_json::json!({
                 "ok": true,
@@ -3659,9 +3674,12 @@ async fn api_retract_all(
 
     match result {
         Ok(count) => {
-            let _ = state.sse_tx.send(format!(
-                r#"{{"v":1,"kind":"memory","op":"retract_all","exom":"{}","actor":"{}"}}"#,
-                exom_slash, actor
+            let _ = state.sse_tx.send((
+                Some(exom_slash.clone()),
+                format!(
+                    r#"{{"v":1,"kind":"memory","op":"retract_all","exom":"{}","actor":"{}"}}"#,
+                    exom_slash, actor
+                ),
             ));
             Json(serde_json::json!({"ok": true, "tuples_removed": count})).into_response()
         }
@@ -3724,9 +3742,12 @@ async fn api_wipe(
 
     match result {
         Ok(()) => {
-            let _ = state.sse_tx.send(format!(
-                r#"{{"v":1,"kind":"memory","op":"wipe","exom":"{}","actor":"{}"}}"#,
-                exom_slash, actor
+            let _ = state.sse_tx.send((
+                Some(exom_slash.clone()),
+                format!(
+                    r#"{{"v":1,"kind":"memory","op":"wipe","exom":"{}","actor":"{}"}}"#,
+                    exom_slash, actor
+                ),
             ));
             Json(serde_json::json!({"ok": true, "wiped": exom_slash})).into_response()
         }
@@ -3767,10 +3788,9 @@ async fn api_factory_reset(
             .unwrap_or("anonymous")
             .to_string()
     };
-    // The brain/tree wipe and rebuild is fully sync. Wrap it in a closure so
-    // the std::sync::MutexGuard on `state.exoms` is released before we await
+    // The brain/tree wipe is fully sync. Wrap it in a closure so the
+    // std::sync::MutexGuard on `state.exoms` is released before we await
     // the auth-store wipe below — otherwise the future would not be Send.
-    let default_exom = DEFAULT_EXOM;
     let sync_result: Result<Vec<String>, ApiError> = (|| {
         let mut exoms = state.exoms.lock().unwrap();
         let old_names: Vec<String> = exoms.keys().cloned().collect();
@@ -3801,37 +3821,6 @@ async fn api_factory_reset(
             }
         }
 
-        // If persistence is configured, re-scaffold the default exom on disk
-        // and load it back so its in-memory brain is wired to the freshly-
-        // cleared splay tree. Matches a cold-start against an empty data dir.
-        // Fall back to an in-memory-only ExomState otherwise.
-        let new_es = match (state.tree_root.as_ref(), state.sym_path.as_ref()) {
-            (Some(tree_root), Some(sym_path)) => {
-                let default_path: crate::path::TreePath = default_exom
-                    .parse()
-                    .map_err(|e: crate::path::PathError| {
-                        ApiError::new("factory_reset_failed", e.to_string()).with_status(500)
-                    })?;
-                crate::scaffold::new_bare_exom(tree_root, &default_path).map_err(|e| {
-                    ApiError::new("factory_reset_failed", e.to_string()).with_status(500)
-                })?;
-                let disk = tree_root.join(default_exom);
-                load_exom_from_tree_path(&disk, sym_path, default_exom).map_err(|e| {
-                    ApiError::new("factory_reset_failed", e.to_string()).with_status(500)
-                })?
-            }
-            _ => ExomState {
-                brain: Brain::new(),
-                datoms: storage::build_datoms_table(&Brain::new())
-                    .map_err(|e| ApiError::new("error", e.to_string()))?,
-                typed_facts: storage::build_typed_fact_tables(&Brain::new())
-                    .map_err(|e| ApiError::new("error", e.to_string()))?,
-                rules: Vec::new(),
-                exom_disk: None,
-            },
-        };
-        exoms.insert(default_exom.to_string(), new_es);
-
         reconcile_engine(&state, &exoms);
         Ok(old_names)
     })();
@@ -3854,9 +3843,12 @@ async fn api_factory_reset(
         }
     }
 
-    let _ = state.sse_tx.send(format!(
-        r#"{{"v":1,"kind":"memory","op":"factory_reset","exom":"*","actor":"{}"}}"#,
-        actor
+    let _ = state.sse_tx.send((
+        None,
+        format!(
+            r#"{{"v":1,"kind":"system","op":"factory_reset","actor":"{}"}}"#,
+            actor
+        ),
     ));
 
     let cookie = crate::auth::middleware::clear_session_cookie();

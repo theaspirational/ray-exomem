@@ -256,12 +256,12 @@
 	<header class="space-y-3">
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<div class="flex flex-wrap items-center gap-2 text-xs">
-				<Badge variant="secondary" class="text-[10px] capitalize text-zinc-200">{kindLabel}</Badge>
+				<Badge variant="secondary" class="text-[10px] capitalize text-foreground">{kindLabel}</Badge>
 				{#if node.archived}
-					<Badge variant="outline" class="border-amber-700/60 text-amber-200">archived</Badge>
+					<Badge variant="outline" class="border-primary/40 text-primary">archived</Badge>
 				{/if}
 				{#if node.closed}
-					<Badge variant="outline" class="border-red-800/60 text-red-200">closed</Badge>
+					<Badge variant="outline" class="border-destructive/50 text-destructive">closed</Badge>
 				{/if}
 			</div>
 			{#if showUnarchive}

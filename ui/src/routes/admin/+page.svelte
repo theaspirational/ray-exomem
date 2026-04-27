@@ -558,10 +558,10 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-5xl space-y-6 p-6">
-	<h1 class="text-lg font-semibold text-zinc-100">Admin Panel</h1>
+	<h1 class="text-lg font-semibold text-foreground">Admin Panel</h1>
 
 	<Tabs.Root bind:value={activeTab}>
-		<Tabs.List class="border-b border-zinc-800 bg-transparent" variant="line">
+		<Tabs.List class="border-b border-border/60 bg-transparent" variant="line">
 			{#each visibleTabs as tab (tab.id)}
 				<Tabs.Trigger value={tab.id}>{tab.label}</Tabs.Trigger>
 			{/each}
@@ -570,21 +570,21 @@
 		<!-- Users Tab -->
 		<Tabs.Content value="users" class="pt-4">
 			{#if usersLoading}
-				<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+				<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 					<Loader2 class="size-4 animate-spin" />
 					Loading users...
 				</div>
 			{:else if usersError}
-				<p class="py-8 text-sm text-zinc-500">{usersError}</p>
+				<p class="py-8 text-sm text-muted-foreground">{usersError}</p>
 			{:else if users.length === 0}
-				<div class="rounded-md border border-dashed border-zinc-800 py-8 text-center">
-					<p class="text-sm text-zinc-500">No users found</p>
+				<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
+					<p class="text-sm text-muted-foreground">No users found</p>
 				</div>
 			{:else}
-				<div class="overflow-x-auto rounded-md border border-zinc-800">
+				<div class="overflow-x-auto rounded-md border border-border/60">
 					<table class="w-full text-sm">
 						<thead>
-							<tr class="border-b border-zinc-800 text-left text-xs text-zinc-500">
+							<tr class="border-b border-border/60 text-left text-xs text-muted-foreground">
 								<th class="px-3 py-2 font-medium">Email</th>
 								<th class="px-3 py-2 font-medium">Role</th>
 								<th class="px-3 py-2 font-medium">Status</th>
@@ -592,9 +592,9 @@
 								<th class="px-3 py-2 font-medium">Actions</th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-zinc-800">
+						<tbody class="divide-y divide-border/60">
 							{#each users as user (user.email)}
-								<tr class="text-zinc-300">
+								<tr class="text-foreground/80">
 									<td class="px-3 py-2 font-mono text-xs">{user.email}</td>
 									<td class="px-3 py-2">
 										<Badge
@@ -616,7 +616,7 @@
 											{user.status || 'active'}
 										</Badge>
 									</td>
-									<td class="px-3 py-2 text-xs text-zinc-500">
+									<td class="px-3 py-2 text-xs text-muted-foreground">
 										{formatDate(user.last_login)}
 									</td>
 									<td class="px-3 py-2">
@@ -633,7 +633,7 @@
 													{#if userActioning === user.email}
 														<Loader2 class="size-3.5 animate-spin" />
 													{:else}
-														<UserCheck class="size-3.5 text-green-400" />
+														<UserCheck class="size-3.5 text-branch-active" />
 													{/if}
 													Activate
 												</Button>
@@ -650,7 +650,7 @@
 													{#if userActioning === user.email}
 														<Loader2 class="size-3.5 animate-spin" />
 													{:else}
-														<UserX class="size-3.5 text-red-400" />
+														<UserX class="size-3.5 text-destructive" />
 													{/if}
 													Deactivate
 												</Button>
@@ -667,7 +667,7 @@
 													{#if userDeleting === user.email}
 														<Loader2 class="size-3.5 animate-spin" />
 													{:else}
-														<Trash2 class="size-3.5 text-red-400" />
+														<Trash2 class="size-3.5 text-destructive" />
 													{/if}
 													Delete
 												</Button>
@@ -685,33 +685,33 @@
 		<!-- Sessions Tab -->
 		<Tabs.Content value="sessions" class="pt-4">
 			{#if sessionsLoading}
-				<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+				<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 					<Loader2 class="size-4 animate-spin" />
 					Loading sessions...
 				</div>
 			{:else if sessionsError}
-				<p class="py-8 text-sm text-zinc-500">{sessionsError}</p>
+				<p class="py-8 text-sm text-muted-foreground">{sessionsError}</p>
 			{:else if sessions.length === 0}
-				<div class="rounded-md border border-dashed border-zinc-800 py-8 text-center">
-					<p class="text-sm text-zinc-500">No active sessions</p>
+				<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
+					<p class="text-sm text-muted-foreground">No active sessions</p>
 				</div>
 			{:else}
-				<div class="overflow-x-auto rounded-md border border-zinc-800">
+				<div class="overflow-x-auto rounded-md border border-border/60">
 					<table class="w-full text-sm">
 						<thead>
-							<tr class="border-b border-zinc-800 text-left text-xs text-zinc-500">
+							<tr class="border-b border-border/60 text-left text-xs text-muted-foreground">
 								<th class="px-3 py-2 font-medium">Session ID</th>
 								<th class="px-3 py-2 font-medium">User</th>
 								<th class="px-3 py-2 font-medium">Created</th>
 								<th class="px-3 py-2 font-medium">Actions</th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-zinc-800">
+						<tbody class="divide-y divide-border/60">
 							{#each sessions as session (session.session_id)}
-								<tr class="text-zinc-300">
+								<tr class="text-foreground/80">
 									<td class="px-3 py-2 font-mono text-xs">{session.session_id}</td>
 									<td class="px-3 py-2 text-xs">{session.email}</td>
-									<td class="px-3 py-2 text-xs text-zinc-500">
+									<td class="px-3 py-2 text-xs text-muted-foreground">
 										{formatDate(session.created_at)}
 									</td>
 									<td class="px-3 py-2">
@@ -724,7 +724,7 @@
 											{#if sessionKilling === session.session_id}
 												<Loader2 class="size-3.5 animate-spin" />
 											{:else}
-												<Trash2 class="size-3.5 text-red-400" />
+												<Trash2 class="size-3.5 text-destructive" />
 											{/if}
 											Kill
 										</Button>
@@ -740,21 +740,21 @@
 		<!-- API Keys Tab -->
 		<Tabs.Content value="api-keys" class="pt-4">
 			{#if apiKeysLoading}
-				<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+				<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 					<Loader2 class="size-4 animate-spin" />
 					Loading API keys...
 				</div>
 			{:else if apiKeysError}
-				<p class="py-8 text-sm text-zinc-500">{apiKeysError}</p>
+				<p class="py-8 text-sm text-muted-foreground">{apiKeysError}</p>
 			{:else if apiKeys.length === 0}
-				<div class="rounded-md border border-dashed border-zinc-800 py-8 text-center">
-					<p class="text-sm text-zinc-500">No API keys found</p>
+				<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
+					<p class="text-sm text-muted-foreground">No API keys found</p>
 				</div>
 			{:else}
-				<div class="overflow-x-auto rounded-md border border-zinc-800">
+				<div class="overflow-x-auto rounded-md border border-border/60">
 					<table class="w-full text-sm">
 						<thead>
-							<tr class="border-b border-zinc-800 text-left text-xs text-zinc-500">
+							<tr class="border-b border-border/60 text-left text-xs text-muted-foreground">
 								<th class="px-3 py-2 font-medium">User</th>
 								<th class="px-3 py-2 font-medium">Label</th>
 								<th class="px-3 py-2 font-medium">Key ID</th>
@@ -762,13 +762,13 @@
 								<th class="px-3 py-2 font-medium">Actions</th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-zinc-800">
+						<tbody class="divide-y divide-border/60">
 							{#each apiKeys as key (key.key_id)}
-								<tr class="text-zinc-300">
+								<tr class="text-foreground/80">
 									<td class="px-3 py-2 text-xs">{key.email}</td>
 									<td class="px-3 py-2 text-xs">{key.label}</td>
 									<td class="px-3 py-2 font-mono text-xs">{key.key_id}</td>
-									<td class="px-3 py-2 text-xs text-zinc-500">
+									<td class="px-3 py-2 text-xs text-muted-foreground">
 										{formatDate(key.created_at)}
 									</td>
 									<td class="px-3 py-2">
@@ -781,7 +781,7 @@
 											{#if keyRevoking === key.key_id}
 												<Loader2 class="size-3.5 animate-spin" />
 											{:else}
-												<Trash2 class="size-3.5 text-red-400" />
+												<Trash2 class="size-3.5 text-destructive" />
 											{/if}
 											Revoke
 										</Button>
@@ -797,21 +797,21 @@
 		<!-- Shares Tab -->
 		<Tabs.Content value="shares" class="pt-4">
 			{#if sharesLoading}
-				<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+				<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 					<Loader2 class="size-4 animate-spin" />
 					Loading shares...
 				</div>
 			{:else if sharesError}
-				<p class="py-8 text-sm text-zinc-500">{sharesError}</p>
+				<p class="py-8 text-sm text-muted-foreground">{sharesError}</p>
 			{:else if shares.length === 0}
-				<div class="rounded-md border border-dashed border-zinc-800 py-8 text-center">
-					<p class="text-sm text-zinc-500">No shares found</p>
+				<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
+					<p class="text-sm text-muted-foreground">No shares found</p>
 				</div>
 			{:else}
-				<div class="overflow-x-auto rounded-md border border-zinc-800">
+				<div class="overflow-x-auto rounded-md border border-border/60">
 					<table class="w-full text-sm">
 						<thead>
-							<tr class="border-b border-zinc-800 text-left text-xs text-zinc-500">
+							<tr class="border-b border-border/60 text-left text-xs text-muted-foreground">
 								<th class="px-3 py-2 font-medium">Owner</th>
 								<th class="px-3 py-2 font-medium">Path</th>
 								<th class="px-3 py-2 font-medium">Grantee</th>
@@ -819,16 +819,16 @@
 								<th class="px-3 py-2 font-medium">Created</th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-zinc-800">
+						<tbody class="divide-y divide-border/60">
 							{#each shares as share, i (i)}
-								<tr class="text-zinc-300">
+								<tr class="text-foreground/80">
 									<td class="px-3 py-2 text-xs">{share.owner_email}</td>
 									<td class="px-3 py-2 font-mono text-xs">{share.path}</td>
 									<td class="px-3 py-2 text-xs">{share.grantee_email}</td>
 									<td class="px-3 py-2">
 										<Badge variant="outline" class="text-xs">{share.permission}</Badge>
 									</td>
-									<td class="px-3 py-2 text-xs text-zinc-500">
+									<td class="px-3 py-2 text-xs text-muted-foreground">
 										{formatDate(share.created_at)}
 									</td>
 								</tr>
@@ -853,7 +853,7 @@
 						bind:value={newDomain}
 						placeholder="example.com"
 						disabled={domainAdding}
-						class="max-w-xs border-zinc-700 bg-zinc-950 text-sm"
+						class="max-w-xs border-border bg-background text-sm"
 					/>
 					<Button type="submit" size="sm" disabled={domainAdding || !newDomain.trim()}>
 						{#if domainAdding}
@@ -866,21 +866,21 @@
 				</form>
 
 				{#if domainsLoading}
-					<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+					<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 						<Loader2 class="size-4 animate-spin" />
 						Loading domains...
 					</div>
 				{:else if domainsError}
-					<p class="py-8 text-sm text-zinc-500">{domainsError}</p>
+					<p class="py-8 text-sm text-muted-foreground">{domainsError}</p>
 				{:else if domains.length === 0}
-					<div class="rounded-md border border-dashed border-zinc-800 py-8 text-center">
-						<p class="text-sm text-zinc-500">No allowed domains configured</p>
+					<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
+						<p class="text-sm text-muted-foreground">No allowed domains configured</p>
 					</div>
 				{:else}
-					<div class="divide-y divide-zinc-800 rounded-md border border-zinc-800">
+					<div class="divide-y divide-border/60 rounded-md border border-border/60">
 						{#each domains as domain (domain)}
 							<div class="flex items-center justify-between px-3 py-2.5">
-								<span class="font-mono text-sm text-zinc-300">{domain}</span>
+								<span class="font-mono text-sm text-foreground/80">{domain}</span>
 								<Button
 									variant="ghost"
 									size="icon-sm"
@@ -891,7 +891,7 @@
 									{#if domainRemoving === domain}
 										<Loader2 class="size-3.5 animate-spin" />
 									{:else}
-										<Trash2 class="size-3.5 text-zinc-500 hover:text-red-400" />
+										<Trash2 class="size-3.5 text-muted-foreground hover:text-destructive" />
 									{/if}
 								</Button>
 							</div>
@@ -917,7 +917,7 @@
 							placeholder="user@example.com"
 							type="email"
 							disabled={adminGranting}
-							class="max-w-xs border-zinc-700 bg-zinc-950 text-sm"
+							class="max-w-xs border-border bg-background text-sm"
 						/>
 						<Button type="submit" size="sm" disabled={adminGranting || !adminEmail.trim()}>
 							{#if adminGranting}
@@ -930,20 +930,20 @@
 					</form>
 
 					{#if usersLoading}
-						<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+						<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 							<Loader2 class="size-4 animate-spin" />
 							Loading admins...
 						</div>
 					{:else if adminUsers.length === 0}
-						<div class="rounded-md border border-dashed border-zinc-800 py-8 text-center">
-							<p class="text-sm text-zinc-500">No admin users found</p>
+						<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
+							<p class="text-sm text-muted-foreground">No admin users found</p>
 						</div>
 					{:else}
-						<div class="divide-y divide-zinc-800 rounded-md border border-zinc-800">
+						<div class="divide-y divide-border/60 rounded-md border border-border/60">
 							{#each adminUsers as user (user.email)}
 								<div class="flex items-center justify-between px-3 py-2.5">
 									<div class="flex items-center gap-2">
-										<span class="font-mono text-sm text-zinc-300">{user.email}</span>
+										<span class="font-mono text-sm text-foreground/80">{user.email}</span>
 										<Badge
 											variant={user.role === 'top-admin' ? 'default' : 'secondary'}
 											class="text-xs"
@@ -961,7 +961,7 @@
 											{#if adminRevoking === user.email}
 												<Loader2 class="size-3.5 animate-spin" />
 											{:else}
-												<ShieldOff class="size-3.5 text-red-400" />
+												<ShieldOff class="size-3.5 text-destructive" />
 											{/if}
 											Revoke
 										</Button>
@@ -980,11 +980,11 @@
 				<div class="space-y-4">
 					<div class="flex flex-wrap items-end gap-2">
 						<div class="min-w-0 grow">
-							<p class="mb-1 text-xs text-zinc-500">Exom (slash path, e.g. main)</p>
+							<p class="mb-1 text-xs text-muted-foreground">Exom (slash path, e.g. main)</p>
 							<Input
 								bind:value={devExomPath}
 								placeholder="main"
-								class="max-w-md border-zinc-700 bg-zinc-950 text-sm font-mono"
+								class="max-w-md border-border bg-background text-sm font-mono"
 							/>
 						</div>
 						<Button
@@ -1001,27 +1001,27 @@
 					</div>
 
 					{#if devSchemaLoading}
-						<div class="flex items-center gap-2 py-8 text-sm text-zinc-500">
+						<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
 							<Loader2 class="size-4 animate-spin" />
 							Loading schema…
 						</div>
 					{:else if devSchemaError}
-						<p class="py-4 text-sm text-red-400">{devSchemaError}</p>
+						<p class="py-4 text-sm text-destructive">{devSchemaError}</p>
 					{:else if devBuiltinViews.length === 0}
-						<p class="text-sm text-zinc-500">No built-in views for this exom.</p>
+						<p class="text-sm text-muted-foreground">No built-in views for this exom.</p>
 					{:else}
 						<div class="space-y-3">
 							{#each devBuiltinViews as view, vi (`${view.name}-${vi}`)}
 								<div
-									class="rounded-md border border-zinc-800 bg-zinc-950/50 p-3"
+									class="rounded-md border border-border/60 bg-background/50 p-3"
 								>
 									<div class="flex items-start justify-between gap-2">
 										<div class="min-w-0">
 											<div class="flex flex-wrap items-center gap-2">
-												<span class="font-mono text-sm text-zinc-200">{view.name}</span>
+												<span class="font-mono text-sm text-foreground">{view.name}</span>
 												<Badge variant="secondary" class="text-[10px]">arity {view.arity}</Badge>
 											</div>
-											<p class="mt-1 text-xs text-zinc-500">{view.description}</p>
+											<p class="mt-1 text-xs text-muted-foreground">{view.description}</p>
 										</div>
 										<Button
 											variant="ghost"
@@ -1040,13 +1040,13 @@
 											{/if}
 										</Button>
 									</div>
-									<div class="mt-2 text-[0.7rem] text-zinc-500">Rule</div>
+									<div class="mt-2 text-[0.7rem] text-muted-foreground">Rule</div>
 									<pre
-										class="mt-0.5 overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-400"
+										class="mt-0.5 overflow-x-auto rounded border border-border/60 bg-background p-2 font-mono text-[11px] leading-relaxed text-foreground/60"
 									>{view.rule}</pre>
-									<div class="mt-2 text-[0.7rem] text-zinc-500">Query</div>
+									<div class="mt-2 text-[0.7rem] text-muted-foreground">Query</div>
 									<pre
-										class="mt-0.5 overflow-x-auto rounded border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-400"
+										class="mt-0.5 overflow-x-auto rounded border border-border/60 bg-background p-2 font-mono text-[11px] leading-relaxed text-foreground/60"
 									>{builtinViewQuery(devExomPath.trim() || 'main', view)}</pre>
 								</div>
 							{/each}
@@ -1057,33 +1057,33 @@
 
 			<Tabs.Content value="system" class="pt-4">
 				<div class="space-y-6">
-					<div class="space-y-3 rounded-md border border-red-900/50 bg-red-950/20 p-4">
+					<div class="space-y-3 rounded-md border border-destructive/40 bg-destructive/10 p-4">
 						<div class="flex items-center gap-2">
-							<AlertTriangle class="size-4 text-red-400" />
-							<h2 class="text-sm font-semibold text-zinc-100">Factory reset</h2>
+							<AlertTriangle class="size-4 text-destructive" />
+							<h2 class="text-sm font-semibold text-foreground">Factory reset</h2>
 						</div>
-						<p class="text-sm text-zinc-400">
+						<p class="text-sm text-foreground/60">
 							Wipes every exom, fact, rule, and transaction across the entire server. Only the
 							default <span class="font-mono">main</span> exom remains, empty. This cannot be undone.
 						</p>
 
 						{#if factoryResetResult}
 							<div
-								class="rounded-md border border-zinc-800 bg-zinc-950 p-3 text-sm text-zinc-300"
+								class="rounded-md border border-border/60 bg-background p-3 text-sm text-foreground/80"
 							>
 								<p>
 									Factory reset complete. Removed
-									<span class="font-mono text-zinc-100"
+									<span class="font-mono text-foreground"
 										>{factoryResetResult.removed_exoms.length}</span
 									>
 									exom{factoryResetResult.removed_exoms.length === 1 ? '' : 's'}.
 								</p>
-								<p class="mt-1 text-xs text-zinc-500">Reload the page to refresh UI state.</p>
+								<p class="mt-1 text-xs text-muted-foreground">Reload the page to refresh UI state.</p>
 							</div>
 						{/if}
 
 						{#if factoryResetError}
-							<p class="text-sm text-red-400">{factoryResetError}</p>
+							<p class="text-sm text-destructive">{factoryResetError}</p>
 						{/if}
 
 						{#if !factoryResetArmed}
@@ -1095,8 +1095,8 @@
 							</div>
 						{:else}
 							<div class="space-y-3">
-								<p class="text-xs text-zinc-400">
-									Type <span class="font-mono text-zinc-200">{FACTORY_RESET_PHRASE}</span> to
+								<p class="text-xs text-foreground/60">
+									Type <span class="font-mono text-foreground">{FACTORY_RESET_PHRASE}</span> to
 									confirm.
 								</p>
 								<div class="flex items-center gap-2">
@@ -1105,7 +1105,7 @@
 										placeholder={FACTORY_RESET_PHRASE}
 										disabled={factoryResetRunning}
 										autocomplete="off"
-										class="max-w-xs border-zinc-700 bg-zinc-950 text-sm"
+										class="max-w-xs border-border bg-background text-sm"
 									/>
 									<Button
 										variant="destructive"

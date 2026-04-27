@@ -12,19 +12,19 @@
 
 	type Mode = 'switcher' | 'kanban' | 'timeline';
 
-	const PALETTE = [
-		'border-l-blue-500/80 bg-blue-950/25',
-		'border-l-emerald-500/80 bg-emerald-950/25',
-		'border-l-amber-500/80 bg-amber-950/25',
-		'border-l-violet-500/80 bg-violet-950/25',
-		'border-l-rose-500/80 bg-rose-950/25',
-		'border-l-cyan-500/80 bg-cyan-950/25'
+	const BRANCH_DOT = [
+		'bg-fact-base',
+		'bg-branch-active',
+		'bg-primary',
+		'bg-fact-derived',
+		'bg-contra',
+		'bg-rule-accent'
 	];
 
-	function branchColor(name: string) {
+	function branchDotClass(name: string): string {
 		let h = 0;
-		for (let i = 0; i < name.length; i++) h = (h + name.charCodeAt(i) * (i + 1)) % PALETTE.length;
-		return PALETTE[h]!;
+		for (let i = 0; i < name.length; i++) h = (h + name.charCodeAt(i) * (i + 1)) % BRANCH_DOT.length;
+		return BRANCH_DOT[h]!;
 	}
 
 	function readMode(): Mode {
@@ -213,7 +213,7 @@
 
 <div class="flex flex-col gap-3">
 	<div class="flex flex-wrap items-center gap-2">
-		<span class="text-[0.65rem] uppercase tracking-wide text-zinc-500">Mode</span>
+		<span class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Mode</span>
 		{#each ['switcher', 'kanban', 'timeline'] as m (m)}
 			<Button
 				size="sm"
@@ -227,16 +227,16 @@
 	</div>
 
 	{#if branchesLoading}
-		<p class="flex items-center gap-2 text-sm text-zinc-500">
+		<p class="flex items-center gap-2 text-sm text-muted-foreground">
 			<Loader2 class="size-4 animate-spin" /> Loading branches…
 		</p>
 	{:else if branchesErr}
-		<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+		<div class="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 			<p>{branchesErr}</p>
 			<Button
 				variant="outline"
 				size="sm"
-				class="w-fit border-red-800/60 text-red-100"
+				class="w-fit border-destructive/50 text-destructive"
 				onclick={() => {
 					branchesErr = null;
 					branchesRetry++;
@@ -247,7 +247,7 @@
 			</Button>
 		</div>
 	{:else if branches.length === 0}
-		<p class="text-sm text-zinc-500">No branches</p>
+		<p class="text-sm text-muted-foreground">No branches</p>
 	{:else if mode === 'switcher'}
 		<div class="flex flex-wrap gap-2">
 			{#each branches as b (b.branch_id)}
@@ -263,12 +263,12 @@
 		</div>
 		{#if selectedBranch}
 			{#if switcherErr}
-				<div class="mt-2 flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+				<div class="mt-2 flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 					<p>{switcherErr}</p>
 					<Button
 						variant="outline"
 						size="sm"
-						class="w-fit border-red-800/60 text-red-100"
+						class="w-fit border-destructive/50 text-destructive"
 						onclick={() => {
 							switcherErr = null;
 							switcherRetry++;
@@ -284,16 +284,16 @@
 		{/if}
 	{:else if mode === 'kanban'}
 		{#if kanbanLoading}
-			<p class="flex items-center gap-2 text-sm text-zinc-500">
+			<p class="flex items-center gap-2 text-sm text-muted-foreground">
 				<Loader2 class="size-4 animate-spin" /> Loading facts…
 			</p>
 		{:else if kanbanErr}
-			<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+			<div class="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 				<p>{kanbanErr}</p>
 				<Button
 					variant="outline"
 					size="sm"
-					class="w-fit border-red-800/60 text-red-100"
+					class="w-fit border-destructive/50 text-destructive"
 					onclick={() => {
 						kanbanErr = null;
 						kanbanRetry++;
@@ -306,24 +306,24 @@
 		{:else}
 			<div class="flex min-h-[280px] flex-row gap-3 overflow-x-auto pb-2">
 				{#each branches as b (b.branch_id)}
-					<div class="flex w-[min(100%,280px)] shrink-0 flex-col rounded-md border border-zinc-700 bg-zinc-950/50">
-						<div class="border-b border-zinc-700 px-2 py-2">
-							<p class="font-mono text-xs text-zinc-100">{b.name}</p>
-							<p class="text-[10px] text-zinc-500">
+					<div class="flex w-[min(100%,280px)] shrink-0 flex-col rounded-md border border-border bg-background/50">
+						<div class="border-b border-border px-2 py-2">
+							<p class="font-mono text-xs text-foreground">{b.name}</p>
+							<p class="text-[10px] text-muted-foreground">
 								{b.claimed_by ? `owner ${b.claimed_by}` : 'unclaimed'}
 							</p>
 						</div>
 						<ScrollArea class="h-[min(50vh,420px)] p-2">
-							<ul class="space-y-1.5 text-[11px] font-mono text-zinc-300">
+							<ul class="space-y-1.5 text-[11px] font-mono text-foreground/80">
 								{#each kanbanFacts[b.name] ?? [] as f (f.fact_id)}
-									<li class="rounded border border-zinc-800/80 bg-zinc-900/40 px-2 py-1">
-										<span class="text-zinc-500">{f.predicate}</span>
-										<span class="text-zinc-200"> · {f.value}</span>
+									<li class="rounded border border-border/40 bg-card/40 px-2 py-1">
+										<span class="text-muted-foreground">{f.predicate}</span>
+										<span class="text-foreground"> · {f.value}</span>
 									</li>
 								{/each}
 							</ul>
 							{#if (kanbanFacts[b.name] ?? []).length === 0}
-								<p class="text-xs text-zinc-500">No facts yet</p>
+								<p class="text-xs text-muted-foreground">No facts yet</p>
 							{/if}
 						</ScrollArea>
 					</div>
@@ -332,7 +332,7 @@
 		{/if}
 	{:else}
 		<div class="flex flex-wrap gap-2">
-			<span class="text-[0.65rem] uppercase tracking-wide text-zinc-500">Branches</span>
+			<span class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Branches</span>
 			{#each branches as b (b.branch_id)}
 				<button type="button" onclick={() => toggleBranchFilter(b.name)}>
 					<Badge
@@ -345,16 +345,16 @@
 			{/each}
 		</div>
 		{#if timelineLoading}
-			<p class="flex items-center gap-2 text-sm text-zinc-500">
+			<p class="flex items-center gap-2 text-sm text-muted-foreground">
 				<Loader2 class="size-4 animate-spin" /> Loading timeline…
 			</p>
 		{:else if timelineErr}
-			<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+			<div class="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 				<p>{timelineErr}</p>
 				<Button
 					variant="outline"
 					size="sm"
-					class="w-fit border-red-800/60 text-red-100"
+					class="w-fit border-destructive/50 text-destructive"
 					onclick={() => {
 						timelineErr = null;
 						timelineRetry++;
@@ -368,22 +368,21 @@
 			<div class="space-y-1">
 				{#each timelineVisible as f (f.fact_id + (f.tx_time ?? ''))}
 					<div
-						class="flex flex-col gap-0.5 rounded-md border border-zinc-800 border-l-4 px-2 py-1.5 font-mono text-[11px] {branchColor(
-							f.branch_name ?? '—'
-						)}"
+						class="flex flex-col gap-0.5 border border-border/60 bg-background/40 px-2 py-1.5 font-mono text-[11px]"
 					>
-						<div class="flex flex-wrap items-center gap-2 text-[10px] text-zinc-500">
+						<div class="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+							<span class="inline-block size-1.5 rounded-full {branchDotClass(f.branch_name ?? '—')}" aria-hidden="true"></span>
 							<span>{f.tx_time ?? '—'}</span>
 							<Badge variant="outline" class="h-5 text-[9px]">{f.branch_name ?? '—'}</Badge>
 						</div>
-						<div class="text-zinc-200">
-							<span class="text-zinc-500">{f.predicate}</span>
+						<div class="text-foreground">
+							<span class="text-muted-foreground">{f.predicate}</span>
 							<span> · {f.value}</span>
 						</div>
 					</div>
 				{/each}
 				{#if timelineVisible.length === 0}
-					<p class="text-sm text-zinc-500">No facts yet</p>
+					<p class="text-sm text-muted-foreground">No facts yet</p>
 				{/if}
 			</div>
 		{/if}

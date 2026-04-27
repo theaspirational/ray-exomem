@@ -45,20 +45,20 @@
 		if (!v) actorPrompt.cancel();
 	}}
 >
-	<Dialog.Content class="border-zinc-700 bg-zinc-900 text-zinc-100 sm:max-w-md">
+	<Dialog.Content class="border-border bg-card text-foreground sm:max-w-md">
 		<Dialog.Header>
 			<Dialog.Title>Set actor identity</Dialog.Title>
-			<Dialog.Description class="text-zinc-400">
+			<Dialog.Description class="text-foreground/70">
 				Writes are attributed to this name (sent as <span class="font-mono">X-Actor</span>). Set it once per
 				browser profile.
 			</Dialog.Description>
 		</Dialog.Header>
 		<div class="flex flex-col gap-2 py-2">
-			<label class="text-xs text-zinc-500" for="actor-id">Actor</label>
+			<label class="text-xs text-muted-foreground" for="actor-id">Actor</label>
 			<Input
 				id="actor-id"
 				bind:value={draft}
-				class="border-zinc-700 bg-zinc-950 font-mono text-sm"
+				class="border-border bg-background font-mono text-sm"
 				placeholder="e.g. alice or claude-code"
 				autocomplete="username"
 				onkeydown={(e) => {
@@ -67,7 +67,7 @@
 			/>
 		</div>
 		<Dialog.Footer>
-			<Button type="button" variant="outline" class="border-zinc-600" onclick={() => actorPrompt.cancel()}>
+			<Button type="button" variant="outline" onclick={() => actorPrompt.cancel()}>
 				Cancel
 			</Button>
 			<Button type="button" disabled={busy || !draft.trim()} onclick={() => void save()}>

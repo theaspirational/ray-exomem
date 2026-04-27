@@ -85,9 +85,10 @@ async fn purge_user_namespace(state: &AppState, email: &str) -> Result<usize, Ap
         removed
     };
 
-    let _ = state
-        .sse_tx
-        .send(r#"{"v":1,"kind":"tree","op":"changed"}"#.to_string());
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree","op":"changed"}"#.to_string(),
+    ));
 
     Ok(removed)
 }

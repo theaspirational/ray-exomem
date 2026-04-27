@@ -41,13 +41,13 @@
 <div class="min-h-[60vh] p-4 sm:p-6">
 
 	{#if loading}
-		<div class="flex items-center gap-2 text-sm text-zinc-400">
+		<div class="flex items-center gap-2 text-sm text-foreground/60">
 			<Loader2 class="size-4 animate-spin" />
 			Loading node…
 		</div>
 	{:else if error}
 		<div
-			class="flex flex-col gap-2 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-sm text-red-200"
+			class="flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
 		>
 			<p>{error}</p>
 			<Button variant="outline" size="sm" class="w-fit" onclick={() => void loadNode()}>
@@ -66,6 +66,6 @@
 			<ExomView {node} />
 		{/if}
 	{:else}
-		<p class="text-sm text-zinc-500">Nothing to show for this path.</p>
+		<p class="text-sm text-muted-foreground">Nothing to show for this path.</p>
 	{/if}
 </div>

@@ -58,19 +58,19 @@
 </script>
 
 <footer
-	class="flex h-8 shrink-0 items-center gap-x-4 gap-y-1 border-t border-zinc-700 bg-zinc-900 px-3 font-sans text-[11px] text-zinc-500"
+	class="flex h-8 shrink-0 items-center gap-x-4 gap-y-1 border-t border-border bg-background px-3 font-sans text-[11px] text-muted-foreground"
 >
-	<span class={health === 'ok' ? 'text-zinc-400' : 'text-zinc-500'}>
+	<span class={health === 'ok' ? 'text-foreground/70' : 'text-muted-foreground'}>
 		{health === 'ok' ? 'daemon ok' : 'daemon unreachable'}
 	</span>
 	<span>
-		<span class="text-zinc-600">exoms</span>
-		<span class="ml-1 font-mono tabular-nums text-zinc-400">{exomCount ?? '—'}</span>
+		<span class="text-muted-foreground/70">exoms</span>
+		<span class="ml-1 font-mono tabular-nums text-foreground/70">{exomCount ?? '—'}</span>
 	</span>
 	{#if auth.isAuthenticated}
 		<span>
-			<span class="text-zinc-600">role</span>
-			<span class="ml-1 font-mono text-zinc-400">{auth.user?.role}</span>
+			<span class="text-muted-foreground/70">role</span>
+			<span class="ml-1 font-mono text-foreground/70">{auth.user?.role}</span>
 		</span>
 	{/if}
 </footer>

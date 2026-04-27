@@ -54,10 +54,10 @@
 		if (!v) onClose();
 	}}
 >
-	<Dialog.Content class="border-zinc-700 bg-zinc-900 text-zinc-100 sm:max-w-md">
+	<Dialog.Content class="border-border bg-card text-foreground sm:max-w-md">
 		<Dialog.Header>
 			<Dialog.Title>Rename session label</Dialog.Title>
-			<Dialog.Description class="font-mono text-xs text-zinc-500">
+			<Dialog.Description class="font-mono text-xs text-muted-foreground">
 				{sessionPath}
 			</Dialog.Description>
 		</Dialog.Header>
@@ -69,16 +69,16 @@
 			}}
 		>
 			<div>
-				<label class="text-xs text-zinc-500" for="sess-label">Display label</label>
+				<label class="text-xs text-muted-foreground" for="sess-label">Display label</label>
 				<Input
 					id="sess-label"
 					bind:value
-					class="mt-1 border-zinc-700 bg-zinc-950 text-sm"
+					class="mt-1 border-border bg-background text-sm"
 					autocomplete="off"
 				/>
 			</div>
 			<Dialog.Footer>
-				<Button type="button" variant="outline" class="border-zinc-600" onclick={() => (open = false)}>
+				<Button type="button" variant="outline" onclick={() => (open = false)}>
 					Cancel
 				</Button>
 				<Button type="submit" disabled={busy || !value.trim()}>

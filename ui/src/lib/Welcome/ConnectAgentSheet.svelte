@@ -22,7 +22,7 @@
 	}
 
 	function authApiBase(): string {
-		return getExomemBaseUrl().replace('/ray-exomem', '');
+		return getExomemBaseUrl();
 	}
 
 	function defaultKeyLabel(): string {
@@ -35,8 +35,8 @@
 		return `${(safe || 'user').toLowerCase()}-laptop`;
 	}
 
-	const VERIFY_CURL = `curl -H "Authorization: Bearer $KEY" \\
-  https://devmem.trydev.app/ray-exomem/api/status`;
+	const VERIFY_CURL = $derived(`curl -H "Authorization: Bearer $KEY" \\
+  ${authApiBase()}/api/status`);
 
 	function mcpJson(cfg: Record<string, unknown> | null): string {
 		if (cfg) return JSON.stringify(cfg, null, 2);

@@ -573,9 +573,10 @@ async fn bootstrap_public_tree(state: &AppState, actor_email: &str) -> Result<()
     }
 
     if changed {
-        let _ = state
-            .sse_tx
-            .send(r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string());
+        let _ = state.sse_tx.send((
+            None,
+            r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+        ));
     }
 
     Ok(())
@@ -766,7 +767,7 @@ async fn create_api_key(
     let mcp_snippet = serde_json::json!({
         "mcpServers": {
             "ray-exomem": {
-                "url": format!("http://{bind}/ray-exomem/api"),
+                "url": format!("http://{bind}{}/api", crate::server::BASE_PATH),
                 "headers": {
                     "Authorization": format!("Bearer {raw_key}")
                 }
@@ -847,12 +848,13 @@ async fn create_share(
     }
 
     // Verify user owns the path (path must start with user's email).
+    // The Admin/TopAdmin role does not grant the ability to mint share
+    // grants on namespaces they do not own — a share is owner consent,
+    // and operator status doesn't substitute for it.
     if body.path != user.email && !body.path.starts_with(&format!("{}/", user.email)) {
-        if !user.is_admin() {
-            return Err(
-                ApiError::new("not_owner", "you can only share paths you own").with_status(403),
-            );
-        }
+        return Err(
+            ApiError::new("not_owner", "you can only share paths you own").with_status(403),
+        );
     }
 
     let share_id = uuid::Uuid::new_v4().to_string();

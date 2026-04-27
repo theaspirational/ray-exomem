@@ -51,12 +51,31 @@ fn main() {
     let build_unix = build_unix_timestamp();
 
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=RAY_EXOMEM_BASE_PATH");
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join(".git/HEAD").display()
     );
     println!("cargo:rustc-env=RAY_EXOMEM_GIT_SHA={git_sha}");
     println!("cargo:rustc-env=RAY_EXOMEM_BUILD_UNIX={build_unix}");
+
+    // Sub-path mount, baked at compile time. Default empty (root). To mount the
+    // whole app under e.g. somesite.com/ray-exomem, set this env var before
+    // `cargo build`. The same value is propagated to the SvelteKit build via
+    // env so its baked asset paths match.
+    let raw_base = env::var("RAY_EXOMEM_BASE_PATH").unwrap_or_default();
+    let base_path = raw_base.trim().trim_end_matches('/').to_string();
+    if !base_path.is_empty() && !base_path.starts_with('/') {
+        panic!(
+            "RAY_EXOMEM_BASE_PATH must start with `/` (got `{}`)",
+            base_path
+        );
+    }
+    println!("cargo:rustc-env=RAY_EXOMEM_BASE_PATH={base_path}");
+    // Re-export so the SvelteKit build picks the same value out of process env.
+    unsafe {
+        env::set_var("RAY_EXOMEM_BASE_PATH", &base_path);
+    }
 
     // -----------------------------------------------------------------------
     // 0. Scan bootstrap/*.json for drop-in seed fixtures.

@@ -3,9 +3,10 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::{Method, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use crate::auth::store::AuthStore;
@@ -75,6 +76,36 @@ impl FromRequestParts<Arc<AppState>> for MaybeUser {
 
         Ok(MaybeUser(None))
     }
+}
+
+// ---------------------------------------------------------------------------
+// require_auth middleware
+// ---------------------------------------------------------------------------
+
+/// Reject requests that have no authenticated principal when auth is on.
+///
+/// Mounted on `/api`, `/mcp`, and `/events` so every protected route has
+/// a uniform 401 boundary. When `state.auth_store` is `None` (single-user
+/// dev mode) the middleware is a no-op. Login/info routes live under
+/// `/auth/*` and are not behind this layer.
+pub async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(auth_store) = state.auth_store.as_ref() else {
+        return next.run(req).await;
+    };
+
+    let (parts, body) = req.into_parts();
+    let authenticated = try_bearer(&parts, auth_store).await.is_some()
+        || try_session_cookie(&parts, auth_store).await.is_some();
+
+    if !authenticated {
+        return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
+    }
+
+    next.run(Request::from_parts(parts, body)).await
 }
 
 // ---------------------------------------------------------------------------

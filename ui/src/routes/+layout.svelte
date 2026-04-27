@@ -106,14 +106,14 @@
 </svelte:head>
 
 {#if auth.loading}
-	<div class="flex h-screen items-center justify-center bg-zinc-900 text-zinc-500">
+	<div class="flex h-screen items-center justify-center bg-background text-muted-foreground">
 		<p class="text-sm">Checking session...</p>
 	</div>
 {:else if isLoginRoute}
 	{@render children()}
 	<Toaster richColors position="bottom-right" />
 {:else if auth.isAuthenticated}
-	<div class="flex h-screen flex-col overflow-hidden bg-zinc-900 font-sans text-zinc-100">
+	<div class="flex h-screen flex-col overflow-hidden bg-background font-sans text-foreground">
 		<div class="flex min-h-0 flex-1">
 			<Drawer />
 			<div class="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -129,7 +129,7 @@
 			<Toaster richColors position="bottom-right" />
 	</div>
 {:else}
-	<div class="flex h-screen items-center justify-center bg-zinc-900 text-zinc-500">
+	<div class="flex h-screen items-center justify-center bg-background text-muted-foreground">
 		<p class="text-sm">Redirecting to sign in...</p>
 	</div>
 {/if}

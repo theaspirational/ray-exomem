@@ -36,18 +36,18 @@
 					onclick={() => goChild(ch)}
 				>
 					<Card
-						class="border-zinc-700 bg-zinc-900/50 transition-colors hover:border-zinc-500 hover:bg-zinc-800/40"
+						class="border-border bg-card/50 transition-colors hover:border-primary/50 hover:bg-secondary/40"
 						size="sm"
 					>
 						<div class="flex items-center gap-2">
 							{#if ch.kind === 'folder'}
-								<Folder class="mt-0.5 size-4 shrink-0 text-amber-400/90" />
+								<Folder class="mt-0.5 size-4 shrink-0 text-foreground/60" />
 							{:else}
-								<Brain class="mt-0.5 size-4 shrink-0 text-emerald-400/90" />
+								<Brain class="mt-0.5 size-4 shrink-0 text-foreground/60" />
 							{/if}
 							<div class="min-w-0 flex-1">
-								<p class="truncate font-medium text-zinc-100">{ch.name}</p>
-								<p class="mt-0.5 text-[11px] text-zinc-500">
+								<p class="truncate font-medium text-foreground">{ch.name}</p>
+								<p class="mt-0.5 text-[11px] text-muted-foreground">
 									{#if ch.kind === 'exom'}
 										{ch.fact_count} facts
 									{:else}

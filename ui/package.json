@@ -6,7 +6,8 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
-		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && npm run check:palette",
+		"check:palette": "node scripts/check-palette.mjs"
 	},
 	"devDependencies": {
 		"@fontsource-variable/inter": "^5.2.8",

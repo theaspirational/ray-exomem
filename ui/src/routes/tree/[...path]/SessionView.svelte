@@ -11,7 +11,7 @@
 
 {#if sessionClosed}
 	<div
-		class="mb-4 rounded-md border border-amber-600/50 bg-amber-950/50 px-3 py-2.5 text-sm text-amber-100"
+		class="mb-4 rounded-md border border-primary/40 bg-primary/10 px-3 py-2.5 text-sm text-foreground"
 		role="status"
 	>
 		This session is closed. No further writes are accepted.

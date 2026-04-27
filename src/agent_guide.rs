@@ -38,14 +38,14 @@ const WORKFLOW: &str = r#"WORKFLOW (recommended)
 ----------------------
 1. Start everything (persistence + HTTP API + web UI) in the background — this is the normal flow:
      ray-exomem daemon
-   Open http://127.0.0.1:9780/ray-exomem/ in a browser. Default bind: 127.0.0.1:9780.
+   Open http://127.0.0.1:9780{base}/ in a browser. Default bind: 127.0.0.1:9780.
    Stops any previous daemon using the same data dir. PID: <data-dir>/ray-exomem.pid
    (default data dir: ~/.ray-exomem).
 
 2. Use CLI subcommands that take --addr (default 127.0.0.1:9780) to talk to the same daemon:
      ray-exomem status
      ray-exomem eval '(+ 1 2)'
-     ray-exomem assert sky-color blue --exom main
+     ray-exomem assert sky-color blue --exom <your-exom-path>
 
 3. Stop the daemon:
      ray-exomem stop
@@ -76,7 +76,7 @@ serve                 Same as daemon but runs in the foreground (blocks). --no-p
 
 stop                  Read PID from default data dir and stop that process.
 
-status                GET /api/status?exom=… (default exom: main).
+status                GET /api/status?exom=… (exom is required; the daemon does not auto-create a default).
 
 assert <pred> <val>   Uses POST /api/actions/assert-fact whenever metadata flags such as
                       --source, --confidence, --valid-from, or --valid-to are provided.
@@ -100,7 +100,7 @@ why <fact-id>         GET /api/explain?predicate=<id> (provenance / explanation)
 
 why-not --predicate P [--value V]  Scans exported active facts and reports whether a match exists.
 
-watch                 Stream GET /ray-exomem/events (SSE: `event: memory` JSON for mutations,
+watch                 Stream GET {base}/events (SSE: `event: memory` JSON for mutations,
                       plus heartbeats; optional filters exom/branch/actor/predicate, `since=<id>`).
 
 lint-memory           Hygiene: duplicate (predicate,value) / distinct fact_ids, oversized values,
@@ -153,10 +153,13 @@ guide [--topic …]     Print this reference (section or full)."#;
 
 const HTTP: &str = r##"HTTP API (daemon)
 -----------------
-All requests use the path prefix /ray-exomem on the server bind address (e.g.
-http://127.0.0.1:9780/ray-exomem/api/...). The Rust CLI client prepends this prefix.
+All requests are nested under the daemon's BASE_PATH (default `/`, set via
+$RAY_EXOMEM_BASE_PATH at build time, e.g. `/ray-exomem`). The current build
+mounts at: `{base}/`. So `GET /api/status` below means
+`http://<bind>{base}/api/status`. The Rust CLI client prepends the prefix.
 
-Common query param: exom=<name> (default exom name: main).
+Common query param: exom=<slash/path>. The daemon does not auto-create a
+default exom — every per-exom request must spell out which exom it targets.
 
 GET  /api/status         (stats.sym_entries, rules, current_branch, server.build.identity)
 GET  /api/schema?include_samples=true&sample_limit=…
@@ -186,12 +189,12 @@ POST /api/exoms/<name>/manage
 GET  /events?exom=&branch=&actor=&predicate=&since= (SSE; `event: memory` + JSON body with
      id/op/exom/branch/actor; predicate set on fact upserts/eval asserts; heartbeats)
 
-UI static assets: GET /ray-exomem/… (SvelteKit base path /ray-exomem).
+UI static assets: GET {base}/… (SvelteKit base path matches BASE_PATH).
 
 For quick checks:
-  curl -s "http://127.0.0.1:9780/ray-exomem/api/status?exom=main"
+  curl -s "http://127.0.0.1:9780{base}/api/status?exom=<your-exom-path>"
 
-Queryable system predicates in the main exom datom store:
+Queryable system predicates in every exom's datom store:
   fact/predicate, fact/value,
   fact/provenance, fact/valid_from, fact/valid_to, fact/created_by,
   fact/superseded_by, fact/revoked_by,
@@ -248,9 +251,11 @@ pub fn doctrine() -> &'static str {
     DOCTRINE
 }
 
-/// Render a section or the full guide.
+/// Render a section or the full guide. `{base}` placeholders are replaced
+/// with the daemon's BASE_PATH (set via $RAY_EXOMEM_BASE_PATH at build time;
+/// empty when mounted at root).
 pub fn render(topic: GuideTopic) -> String {
-    match topic {
+    let raw = match topic {
         GuideTopic::All => full_guide_string(),
         GuideTopic::Overview => OVERVIEW.to_string(),
         GuideTopic::Workflow => WORKFLOW.to_string(),
@@ -258,7 +263,8 @@ pub fn render(topic: GuideTopic) -> String {
         GuideTopic::Http => HTTP.to_string(),
         GuideTopic::Env => ENV.to_string(),
         GuideTopic::Limitations => LIMITATIONS.to_string(),
-    }
+    };
+    raw.replace("{base}", crate::server::BASE_PATH)
 }
 
 #[cfg(test)]
@@ -270,7 +276,7 @@ mod tests {
         let g = render(GuideTopic::All);
         for needle in [
             "ray-exomem daemon",
-            "/ray-exomem/api/status",
+            "/api/status",
             "RAYFORCE2_DIR",
             "LIMITATIONS",
             "eval ",
@@ -296,6 +302,7 @@ mod tests {
         let full = render(GuideTopic::All);
         assert!(full.len() > render(GuideTopic::Overview).len());
         assert!(full.contains(OVERVIEW));
-        assert!(full.contains(HTTP));
+        // HTTP has `{base}` placeholders; render(Http) applies the same substitution.
+        assert!(full.contains(&render(GuideTopic::Http)));
     }
 }

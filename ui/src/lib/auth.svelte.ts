@@ -16,7 +16,7 @@ interface AuthSessionResponse {
 }
 
 function authApiBase(): string {
-	return getExomemBaseUrl().replace('/ray-exomem', '');
+	return getExomemBaseUrl();
 }
 
 class AuthState {

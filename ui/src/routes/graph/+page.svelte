@@ -2,7 +2,7 @@
 	import { browser } from '$app/environment';
 	import * as d3 from 'd3';
 	import { Maximize2, RefreshCw, ZoomIn, ZoomOut } from '@lucide/svelte';
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 
 	import {
 		collectExomNodes,
@@ -138,36 +138,40 @@
 		return map;
 	});
 
-	let fetchGeneration = 0;
+	const inFlight = new Set<string>();
 	$effect(() => {
 		if (!browser) return;
 		const paths = visibleExomPaths;
-		const gen = ++fetchGeneration;
-		const missing = paths.filter((p) => graphCache[p] === undefined);
-		if (paths.length === 0) {
-			graphLoading = false;
-			return;
-		}
-		if (missing.length === 0) {
-			graphLoading = false;
-			return;
-		}
-		graphLoading = true;
-		graphError = null;
-		void (async () => {
-			for (const p of missing) {
-				if (gen !== fetchGeneration) return;
-				try {
-					const g = await fetchRelationGraph(p);
-					if (gen !== fetchGeneration) return;
-					graphCache = { ...graphCache, [p]: g };
-				} catch (e) {
-					if (gen !== fetchGeneration) return;
-					graphError = e instanceof Error ? e.message : 'Failed to load graph';
-				}
+
+		untrack(() => {
+			const missing = paths.filter(
+				(p) => graphCache[p] === undefined && !inFlight.has(p)
+			);
+			if (paths.length === 0) {
+				graphLoading = false;
+				return;
 			}
-			if (gen === fetchGeneration) graphLoading = false;
-		})();
+			if (missing.length === 0) {
+				if (inFlight.size === 0) graphLoading = false;
+				return;
+			}
+			graphLoading = true;
+			graphError = null;
+			for (const p of missing) {
+				inFlight.add(p);
+				void (async () => {
+					try {
+						const g = await fetchRelationGraph(p);
+						graphCache = { ...graphCache, [p]: g };
+					} catch (e) {
+						graphError = e instanceof Error ? e.message : 'Failed to load graph';
+					} finally {
+						inFlight.delete(p);
+						if (inFlight.size === 0) graphLoading = false;
+					}
+				})();
+			}
+		});
 	});
 
 	const DEFAULTS = {

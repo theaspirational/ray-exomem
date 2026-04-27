@@ -263,15 +263,17 @@ enum SessionCmd {
     name = "ray-exomem",
     version = env!("CARGO_PKG_VERSION"),
     about = "Native rayforce2 exomemory front-end — Rayfall list-style syntax only",
-    long_about = "ray-exomem persists memory as a tree of folders and exoms.\n\n\
-                  Tree:        work/team/project/repo/main          (the project's main exom)\n\
-                               work/team/project/repo/sessions/<id> (per-session exoms)\n\
-                  CLI paths:   work::team::project::repo::main      (`::`  ==  `/`)\n\
-                  Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)\n\
-                  Writes:      always require --actor <name>\n\
-                  Full agent workflow:   ray-exomem guide\n\n\
-                  Quick start (UI + JSON API):  ray-exomem daemon\n\
-                  Then open http://127.0.0.1:9780/ray-exomem/  —  stop with: ray-exomem stop",
+    long_about = concat!(
+        "ray-exomem persists memory as a tree of folders and exoms.\n\n",
+        "                  Tree:        work/team/project/repo/main          (the project's main exom)\n",
+        "                               work/team/project/repo/sessions/<id> (per-session exoms)\n",
+        "                  CLI paths:   work::team::project::repo::main      (`::`  ==  `/`)\n",
+        "                  Branches:    per-exom; write only to your own (TOFU + orchestrator-allocated)\n",
+        "                  Writes:      always require --actor <name>\n",
+        "                  Full agent workflow:   ray-exomem guide\n\n",
+        "                  Quick start (UI + JSON API):  ray-exomem daemon\n",
+        "                  Then open http://127.0.0.1:9780", env!("RAY_EXOMEM_BASE_PATH"), "/  —  stop with: ray-exomem stop"
+    ),
     after_long_help = "Quick links:\n  \
         ray-exomem daemon             background UI + API (recommended)\n  \
         ray-exomem guide              full CLI + HTTP + env reference\n  \
@@ -310,11 +312,14 @@ enum Commands {
     },
 
     /// Start the web UI and HTTP API in the background (normal use). Replaces any prior daemon for the same data dir.
-    #[command(after_long_help = "Examples:\n  \
-            ray-exomem daemon\n  \
-            ray-exomem daemon --bind 0.0.0.0:9780 --data-dir ~/.ray-exomem\n\n\
-            Open http://<bind>/ray-exomem/ in a browser. JSON API: /ray-exomem/api/.\n\
-            Stop with: ray-exomem stop")]
+    #[command(after_long_help = concat!(
+        "Examples:\n  ",
+        "ray-exomem daemon\n  ",
+        "ray-exomem daemon --bind 0.0.0.0:9780 --data-dir ~/.ray-exomem\n\n",
+        "Open http://<bind>", env!("RAY_EXOMEM_BASE_PATH"), "/ in a browser. ",
+        "JSON API: ", env!("RAY_EXOMEM_BASE_PATH"), "/api/.\n",
+        "Stop with: ray-exomem stop"
+    ))]
     Daemon {
         /// Bind address for the server.
         #[arg(long, default_value = ray_exomem::server::DEFAULT_BIND_ADDR)]
@@ -335,12 +340,15 @@ enum Commands {
     },
 
     /// Evaluate Rayfall source via the daemon (inline or from file).
-    #[command(after_long_help = "Examples:\n  \
-            ray-exomem eval '(+ 1 2)'\n  \
-            ray-exomem eval --file myscript.ray\n  \
-            echo '(+ 1 2)' | ray-exomem eval --file -\n  \
-            ray-exomem eval \"(query db (find ?x) (where (?x :edge ?y)))\" --addr 127.0.0.1:9780\n\n\
-            POSTs plain text to /ray-exomem/api/actions/eval. Requires `ray-exomem daemon`.")]
+    #[command(after_long_help = concat!(
+        "Examples:\n  ",
+        "ray-exomem eval '(+ 1 2)'\n  ",
+        "ray-exomem eval --file myscript.ray\n  ",
+        "echo '(+ 1 2)' | ray-exomem eval --file -\n  ",
+        "ray-exomem eval \"(query db (find ?x) (where (?x :edge ?y)))\" --addr 127.0.0.1:9780\n\n",
+        "POSTs plain text to ", env!("RAY_EXOMEM_BASE_PATH"), "/api/actions/eval. ",
+        "Requires `ray-exomem daemon`."
+    ))]
     Eval {
         /// Rayfall list-style source expression (omit when using --file).
         source: Option<String>,
@@ -1614,9 +1622,10 @@ fn main() {
             }
 
             eprintln!(
-                "[ray-exomem] Open http://{}:{}/ray-exomem/ in your browser",
+                "[ray-exomem] Open http://{}:{}{}/ in your browser",
                 bind.ip(),
-                bind.port()
+                bind.port(),
+                ray_exomem::server::BASE_PATH
             );
             if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
                 eprintln!("error: {}", err);
@@ -1645,9 +1654,10 @@ fn main() {
                     // Parent: print info and exit
                     eprintln!("[ray-exomem] Daemon started (pid {})", pid);
                     eprintln!(
-                        "[ray-exomem] Open http://{}:{}/ray-exomem/",
+                        "[ray-exomem] Open http://{}:{}{}/",
                         bind.ip(),
-                        bind.port()
+                        bind.port(),
+                        ray_exomem::server::BASE_PATH
                     );
                     eprintln!("[ray-exomem] Stop with: ray-exomem stop");
                     std::process::exit(0);

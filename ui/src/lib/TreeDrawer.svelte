@@ -168,8 +168,8 @@
 	}
 
 	function exomDotClass(kind: string): string {
-		if (kind === 'project_main' || kind === 'project-main') return 'fill-emerald-500 text-emerald-500';
-		if (kind === 'session') return 'fill-sky-500 text-sky-500';
+		if (kind === 'project_main' || kind === 'project-main') return 'fill-branch-active text-branch-active';
+		if (kind === 'session') return 'fill-fact-base text-fact-base';
 		return 'fill-muted-foreground text-muted-foreground';
 	}
 
@@ -178,7 +178,7 @@
 	}
 
 	function activeRowClass(): string {
-		return 'border-l-2 border-primary bg-card/50 pl-0.5';
+		return 'bg-primary/15 text-foreground';
 	}
 
 	function labelForSession(node: TreeExom): string {
@@ -268,9 +268,9 @@
 		</div>
 	{:else if root}
 		<div class="min-h-0 flex-1 overflow-y-auto thin-scrollbar px-0.5 py-0.5">
-			{#snippet treeNodes(nodes: TreeNode[], depth: number)}
+			{#snippet treeNodes(nodes: TreeNode[])}
 				{#each nodes as node (node.kind + '\0' + node.path)}
-					<div style="padding-left: {depth * 12}px">
+					<div>
 						{#if node.kind === 'folder'}
 							<ContextMenu>
 								<ContextMenuTrigger class="block w-full text-left">
@@ -324,8 +324,8 @@
 											{/if}
 										</div>
 										<CollapsibleContent>
-											<div class="border-l border-border pl-1.5">
-												{@render treeNodes(node.children, depth + 1)}
+											<div class="ml-[8px] border-l border-border/60 pl-2">
+												{@render treeNodes(node.children)}
 											</div>
 										</CollapsibleContent>
 									</Collapsible>
@@ -438,7 +438,7 @@
 						a project.
 					</p>
 				{:else}
-					{@render treeNodes(root.children, 0)}
+					{@render treeNodes(root.children)}
 				{/if}
 			{:else}
 				<p class="px-1 py-2 text-[11px] text-muted-foreground">Unexpected tree root (not a folder).</p>

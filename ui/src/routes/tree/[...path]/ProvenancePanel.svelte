@@ -285,7 +285,7 @@
 					{#each filteredFacts as item (item.key)}
 						<button
 							class="flex w-full items-start gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/30
-								{selectedFact?.key === item.key ? 'bg-primary/10 border-l-2 border-l-fact-derived' : ''}"
+								{selectedFact?.key === item.key ? 'bg-primary/15' : ''}"
 							onclick={() => selectAndExplain(item)}
 						>
 							<div class="min-w-0 flex-1">

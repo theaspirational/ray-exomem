@@ -159,37 +159,37 @@
 		if (!v) onClose();
 	}}
 >
-	<Dialog.Content class="max-h-[85vh] overflow-y-auto border-zinc-700 bg-zinc-900 text-zinc-100 sm:max-w-lg">
+	<Dialog.Content class="max-h-[85vh] overflow-y-auto border-border bg-card text-foreground sm:max-w-lg">
 		<Dialog.Header>
 			<Dialog.Title>Rename</Dialog.Title>
-			<Dialog.Description class="text-zinc-400">
-				Rename last segment of <span class="font-mono text-zinc-200">{path || '—'}</span>
+			<Dialog.Description class="text-foreground/70">
+				Rename last segment of <span class="font-mono text-foreground">{path || '—'}</span>
 			</Dialog.Description>
 		</Dialog.Header>
 
 		<div class="flex flex-col gap-3 py-2">
 			<div>
-				<label class="text-xs text-zinc-500" for="rename-seg">New segment name</label>
+				<label class="text-xs text-muted-foreground" for="rename-seg">New segment name</label>
 				<Input
 					id="rename-seg"
 					bind:value={newSegment}
-					class="mt-1 border-zinc-700 bg-zinc-950 font-mono text-sm"
+					class="mt-1 border-border bg-background font-mono text-sm"
 					autocomplete="off"
 				/>
 			</div>
 
 			{#if loading}
-				<div class="flex items-center gap-2 text-sm text-zinc-500">
+				<div class="flex items-center gap-2 text-sm text-muted-foreground">
 					<Loader2 class="size-4 animate-spin" />
 					Loading affected paths…
 				</div>
 			{:else if subtreeErr}
-				<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+				<div class="flex flex-col gap-2 border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 					<p>{subtreeErr}</p>
 					<Button
 						variant="outline"
 						size="sm"
-						class="w-fit border-red-800/60 text-red-100"
+						class="w-fit border-destructive/50 text-destructive hover:bg-destructive/15"
 						onclick={() => subtreeRetry++}
 					>
 						<RefreshCw class="mr-1 size-3" />
@@ -198,53 +198,52 @@
 				</div>
 			{:else if previewRowsAll.length > 0}
 				<div>
-					<p class="text-xs text-zinc-500">
+					<p class="text-xs text-muted-foreground">
 						This will change {previewRowsAll.length} path{previewRowsAll.length === 1 ? '' : 's'}:
 					</p>
-					<ul class="mt-2 max-h-40 overflow-y-auto thin-scrollbar rounded border border-zinc-800 bg-zinc-950/80 p-2 font-mono text-[11px] text-zinc-300">
+					<ul class="mt-2 max-h-40 overflow-y-auto thin-scrollbar border border-border/60 bg-background/60 p-2 font-mono text-[11px] text-foreground/80">
 						{#each previewRows as r (r.from)}
-							<li class="border-b border-zinc-800/80 py-1 last:border-0">
-								<div class="truncate text-zinc-500">{r.from}</div>
-								<div class="truncate text-emerald-400/90">→ {r.to}</div>
+							<li class="border-b border-border/40 py-1 last:border-0">
+								<div class="truncate text-muted-foreground">{r.from}</div>
+								<div class="truncate text-branch-active">→ {r.to}</div>
 							</li>
 						{/each}
 					</ul>
 					{#if previewExtra > 0}
-						<p class="mt-1 text-[11px] text-zinc-600">… and {previewExtra} more</p>
+						<p class="mt-1 text-[11px] text-muted-foreground">… and {previewExtra} more</p>
 					{/if}
 				</div>
 			{/if}
 
-			<div class="rounded-md border border-amber-900/40 bg-amber-950/20 p-3 text-sm text-amber-100/90">
-				<p class="font-medium text-amber-200/95">Running agents</p>
-				<p class="mt-1 text-xs leading-relaxed text-amber-100/80">
+			<div class="border border-primary/30 bg-primary/5 p-3 text-sm text-foreground">
+				<p class="font-medium">Running agents</p>
+				<p class="mt-1 text-xs leading-relaxed text-foreground/80">
 					Agents still using the old path may fail on their next write after this rename.
 				</p>
 				{#if activeSessions.length > 0}
-					<p class="mt-2 text-xs text-amber-100/85">
+					<p class="mt-2 text-xs text-foreground/80">
 						{activeSessions.length} session{activeSessions.length === 1 ? '' : 's'} with activity in the last 15 minutes:
 					</p>
-					<ul class="mt-1 space-y-1 text-xs text-zinc-300">
+					<ul class="mt-1 space-y-1 text-xs text-foreground/80">
 						{#each activeSessions as s (s.rel)}
 							<li class="flex flex-wrap items-center gap-1">
-								<span class="font-mono text-[11px] text-zinc-200">· {s.rel}</span>
+								<span class="font-mono text-[11px] text-foreground">· {s.rel}</span>
 								{#each s.branches as b (b)}
-									<Badge variant="outline" class="border-zinc-600 text-[10px] text-zinc-400">{b}</Badge>
+									<Badge variant="outline" class="text-[10px]">{b}</Badge>
 								{/each}
 							</li>
 						{/each}
 					</ul>
 				{:else}
-					<p class="mt-2 text-xs text-zinc-500">No recent session writes detected under this path.</p>
+					<p class="mt-2 text-xs text-muted-foreground">No recent session writes detected under this path.</p>
 				{/if}
 			</div>
 		</div>
 
 		<Dialog.Footer>
-			<Button variant="outline" class="border-zinc-600" onclick={() => (open = false)}>Cancel</Button>
+			<Button variant="outline" onclick={() => (open = false)}>Cancel</Button>
 			<Button
 				disabled={busy || !newSegment.trim() || loading}
-				class="bg-amber-800/90 text-amber-50 hover:bg-amber-700"
 				onclick={() => void confirm()}
 			>
 				{#if busy}<Loader2 class="mr-1 size-3 animate-spin" />{/if}

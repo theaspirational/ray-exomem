@@ -25,32 +25,29 @@ fn access_level_label(level: AccessLevel) -> &'static str {
 
 /// Resolve the effective access level for `user` at `path`.
 ///
+/// The role enum (`Regular`/`Admin`/`TopAdmin`) gates *operator* routes
+/// under `/auth/admin`; it confers no implicit access to user data.
+///
 /// Evaluation order:
-/// 1. Admin or TopAdmin -> FullAccess
-/// 2. Path is in the `public/` namespace -> FullAccess (shared workspace)
-/// 3. Path starts with user's email -> FullAccess (owner)
-/// 4. Share grants for (path, user.email) -> best match
-/// 5. Denied
+/// 1. Path is in the `public/` namespace -> FullAccess (shared workspace)
+/// 2. Path starts with user's email -> FullAccess (owner)
+/// 3. Share grants for (path, user.email) -> best match
+/// 4. Denied
 pub async fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
-    // 1. Admins get full access
-    if user.is_admin() {
-        return AccessLevel::FullAccess;
-    }
-
-    // 2. Public namespace — readable + writable by any authenticated user.
-    //    Membership in an allowed domain is enforced at login; if the user
-    //    holds a session, they're already cleared for collaborative writes
-    //    here.
+    // Public namespace — readable + writable by any authenticated user.
+    // Membership in an allowed domain is enforced at login; if the user
+    // holds a session, they're already cleared for collaborative writes
+    // here.
     if path == "public" || path.starts_with("public/") {
         return AccessLevel::FullAccess;
     }
 
-    // 3. Owner namespace
+    // Owner namespace
     if path == user.email || path.starts_with(&format!("{}/", user.email)) {
         return AccessLevel::FullAccess;
     }
 
-    // 4. Check share grants
+    // Share grants
     let grants = store.shares_for_grantee(&user.email).await;
     resolve_from_grants(path, &grants)
 }
@@ -217,21 +214,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_gets_full_access() {
+    async fn admin_role_does_not_grant_data_access() {
         let admin = user("admin@co.com", UserRole::Admin);
         let store = make_test_store();
         assert_eq!(
             resolve_access(&admin, "alice@co.com/proj", &store).await,
-            AccessLevel::FullAccess
+            AccessLevel::Denied
         );
     }
 
     #[tokio::test]
-    async fn top_admin_gets_full_access() {
+    async fn top_admin_role_does_not_grant_data_access() {
         let top = user("top@co.com", UserRole::TopAdmin);
         let store = make_test_store();
         assert_eq!(
             resolve_access(&top, "alice@co.com/proj", &store).await,
+            AccessLevel::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_still_owns_their_own_namespace() {
+        let admin = user("admin@co.com", UserRole::Admin);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(&admin, "admin@co.com/proj", &store).await,
             AccessLevel::FullAccess
         );
     }

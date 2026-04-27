@@ -49,23 +49,29 @@
 </script>
 
 <header
-	class="sticky top-0 z-20 flex h-11 shrink-0 items-center gap-2 border-b border-zinc-700 bg-zinc-900 px-3 font-sans text-zinc-100"
+	class="sticky top-0 z-20 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background px-3 font-sans text-foreground"
 >
+	<a
+		href="{base}/"
+		class="shrink-0 font-serif text-sm tracking-tight text-foreground hover:text-primary"
+		title="ray-exomem · welcome"
+	>ray-exomem</a>
+
 	<div class="relative">
 		<button
 			type="button"
-			class="flex size-6 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+			class="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground"
 			onclick={(e) => { e.stopPropagation(); overflowOpen = !overflowOpen; }}
 			aria-label="Navigate path"
 		>
 			<MoreHorizontal class="size-4" />
 		</button>
 		{#if overflowOpen}
-			<div class="absolute left-0 top-full z-30 mt-1 min-w-[12rem] rounded-md border border-zinc-700 bg-zinc-900 py-1 shadow-lg">
+			<div class="absolute left-0 top-full z-30 mt-1 min-w-[12rem] rounded-md border border-border bg-card py-1 shadow-lg">
 				{#each crumbs as c (c.href)}
 					<a
 						href={c.href}
-						class="block px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+						class="block px-3 py-1.5 text-xs text-foreground/80 hover:bg-secondary hover:text-foreground"
 						onclick={() => { overflowOpen = false; }}
 					>{c.label}</a>
 				{/each}
@@ -80,12 +86,12 @@
 	>
 		{#each crumbs as crumb, i (crumb.href)}
 			{#if i > 0}
-				<ChevronRight class="size-3.5 shrink-0 text-zinc-500" aria-hidden="true" />
+				<ChevronRight class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
 			{/if}
 			{@const isLast = i === crumbs.length - 1}
 			<a
 				href={crumb.href}
-				class="min-w-0 shrink truncate font-mono text-[11px] underline-offset-2 hover:underline {isLast ? 'text-zinc-100' : 'text-zinc-400'}"
+				class="min-w-0 shrink truncate font-mono text-[11px] underline-offset-2 hover:underline {isLast ? 'text-foreground' : 'text-foreground/60'}"
 			>{crumb.label}</a>
 		{/each}
 	</nav>
@@ -93,7 +99,7 @@
 	<div class="relative shrink-0">
 		<button
 			type="button"
-			class="flex size-7 items-center justify-center rounded-full bg-zinc-700 text-xs font-medium text-zinc-100 hover:bg-zinc-600"
+			class="flex size-7 items-center justify-center rounded-full bg-secondary text-xs font-medium text-foreground hover:bg-muted"
 			onclick={(e) => { e.stopPropagation(); userMenuOpen = !userMenuOpen; }}
 			aria-label="User menu"
 			title={auth.user?.display_name ?? auth.user?.email ?? 'User'}
@@ -101,15 +107,15 @@
 			{userInitial}
 		</button>
 		{#if userMenuOpen}
-			<div class="absolute right-0 top-full z-30 mt-1 min-w-[13rem] rounded-md border border-zinc-700 bg-zinc-900 py-1 shadow-lg">
+			<div class="absolute right-0 top-full z-30 mt-1 min-w-[13rem] rounded-md border border-border bg-card py-1 shadow-lg">
 				{#if auth.user?.email}
-					<div class="px-3 py-1.5 text-[11px] text-zinc-500 truncate" title={auth.user.email}>
+					<div class="px-3 py-1.5 text-[11px] text-muted-foreground truncate" title={auth.user.email}>
 						{auth.user.email}
 					</div>
 				{/if}
 				<button
 					type="button"
-					class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+					class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-secondary hover:text-foreground"
 					onclick={() => {
 						userMenuOpen = false;
 						welcomeSheetState.openSheet();
@@ -120,7 +126,7 @@
 				</button>
 				<a
 					href="{base}/profile"
-					class="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+					class="flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-secondary hover:text-foreground"
 					onclick={() => { userMenuOpen = false; }}
 				>
 					<User class="size-3.5" />
@@ -129,17 +135,17 @@
 				{#if auth.isAdmin}
 					<a
 						href="{base}/admin"
-						class="flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+						class="flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-secondary hover:text-foreground"
 						onclick={() => { userMenuOpen = false; }}
 					>
 						<Shield class="size-3.5" />
 						Admin
 					</a>
 				{/if}
-				<div class="my-1 border-t border-zinc-700"></div>
+				<div class="my-1 border-t border-border"></div>
 				<button
 					type="button"
-					class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+					class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-secondary hover:text-foreground"
 					onclick={() => { userMenuOpen = false; auth.logout(); }}
 				>
 					<LogOut class="size-3.5" />

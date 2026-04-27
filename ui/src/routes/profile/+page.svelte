@@ -185,26 +185,26 @@
 </svelte:head>
 
 <div class="mx-auto w-full max-w-2xl space-y-6 p-6">
-	<h1 class="text-lg font-semibold text-zinc-100">Profile</h1>
+	<h1 class="text-lg font-semibold text-foreground">Profile</h1>
 
 	<!-- User Info -->
-	<Card class="border-zinc-800 bg-zinc-900/80">
+	<Card class="border-border/60 bg-card/80">
 		<div class="space-y-3">
-			<h2 class="text-sm font-medium text-zinc-400">User Info</h2>
+			<h2 class="text-sm font-medium text-foreground/60">User Info</h2>
 			<div class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
-				<span class="text-zinc-500">Email</span>
-				<span class="text-zinc-100">{auth.user?.email ?? '--'}</span>
+				<span class="text-muted-foreground">Email</span>
+				<span class="text-foreground">{auth.user?.email ?? '--'}</span>
 
-				<span class="text-zinc-500">Display Name</span>
-				<span class="text-zinc-100">{auth.user?.display_name ?? '--'}</span>
+				<span class="text-muted-foreground">Display Name</span>
+				<span class="text-foreground">{auth.user?.display_name ?? '--'}</span>
 
-				<span class="text-zinc-500">Provider</span>
-				<span class="text-zinc-100">{auth.user?.provider ?? '--'}</span>
+				<span class="text-muted-foreground">Provider</span>
+				<span class="text-foreground">{auth.user?.provider ?? '--'}</span>
 
-				<span class="text-zinc-500">Role</span>
-				<span class="text-zinc-100">{auth.user?.role ?? '--'}</span>
+				<span class="text-muted-foreground">Role</span>
+				<span class="text-foreground">{auth.user?.role ?? '--'}</span>
 			</div>
-			<Separator class="bg-zinc-800" />
+			<Separator class="bg-secondary" />
 			<Button variant="destructive" size="sm" onclick={() => auth.logout()}>
 				<LogOut class="size-3.5" />
 				Logout
@@ -212,20 +212,20 @@
 		</div>
 	</Card>
 
-	<Card class="border-zinc-800 bg-zinc-900/80">
+	<Card class="border-border/60 bg-card/80">
 		<div class="space-y-4">
 			<div class="space-y-1">
-				<h2 class="text-sm font-medium text-zinc-400">Actor</h2>
-				<p class="text-xs text-zinc-500">
+				<h2 class="text-sm font-medium text-foreground/60">Actor</h2>
+				<p class="text-xs text-muted-foreground">
 					Used as write attribution from this browser. Default value is <span class="font-mono">user</span>.
 				</p>
 			</div>
 			<div class="space-y-2">
-				<label class="text-xs text-zinc-500" for="profile-actor">Actor name</label>
+				<label class="text-xs text-muted-foreground" for="profile-actor">Actor name</label>
 				<Input
 					id="profile-actor"
 					bind:value={actorValue}
-					class="border-zinc-700 bg-zinc-950 font-mono text-sm"
+					class="border-border bg-background font-mono text-sm"
 					placeholder="user"
 					autocomplete="username"
 					onkeydown={(e) => {
@@ -243,10 +243,10 @@
 	</Card>
 
 	<!-- API Keys -->
-	<Card class="border-zinc-800 bg-zinc-900/80">
+	<Card class="border-border/60 bg-card/80">
 		<div class="space-y-4">
 			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-medium text-zinc-400">API Keys</h2>
+				<h2 class="text-sm font-medium text-foreground/60">API Keys</h2>
 				<Button variant="outline" size="sm" onclick={openGenerateDialog}>
 					<Plus class="size-3.5" />
 					Generate New Key
@@ -254,27 +254,27 @@
 			</div>
 
 			{#if keysLoading}
-				<div class="flex items-center gap-2 py-4 text-sm text-zinc-500">
+				<div class="flex items-center gap-2 py-4 text-sm text-muted-foreground">
 					<Loader2 class="size-4 animate-spin" />
 					Loading keys...
 				</div>
 			{:else if keysError}
-				<p class="py-4 text-sm text-zinc-500">{keysError}</p>
+				<p class="py-4 text-sm text-muted-foreground">{keysError}</p>
 			{:else if keys.length === 0}
-				<div class="rounded-md border border-dashed border-zinc-800 py-6 text-center">
-					<Key class="mx-auto size-6 text-zinc-600" />
-					<p class="mt-2 text-sm text-zinc-500">No API keys yet</p>
-					<p class="mt-1 text-xs text-zinc-600">
+				<div class="rounded-md border border-dashed border-border/60 py-6 text-center">
+					<Key class="mx-auto size-6 text-muted-foreground/70" />
+					<p class="mt-2 text-sm text-muted-foreground">No API keys yet</p>
+					<p class="mt-1 text-xs text-muted-foreground/70">
 						Generate one to use with MCP clients or the API.
 					</p>
 				</div>
 			{:else}
-				<div class="divide-y divide-zinc-800 rounded-md border border-zinc-800">
+				<div class="divide-y divide-border/60 rounded-md border border-border/60">
 					{#each keys as key (key.key_id)}
 						<div class="flex items-center justify-between px-3 py-2.5">
 							<div class="min-w-0 flex-1">
-								<p class="truncate text-sm text-zinc-100">{key.label}</p>
-								<p class="text-xs text-zinc-500">
+								<p class="truncate text-sm text-foreground">{key.label}</p>
+								<p class="text-xs text-muted-foreground">
 									{key.key_id} &middot; Created {formatDate(key.created_at)}
 								</p>
 							</div>
@@ -288,7 +288,7 @@
 								{#if revoking === key.key_id}
 									<Loader2 class="size-3.5 animate-spin" />
 								{:else}
-									<Trash2 class="size-3.5 text-zinc-500 hover:text-red-400" />
+									<Trash2 class="size-3.5 text-muted-foreground hover:text-destructive" />
 								{/if}
 							</Button>
 						</div>
@@ -299,16 +299,16 @@
 	</Card>
 
 	<!-- MCP Configuration -->
-	<Card class="border-zinc-800 bg-zinc-900/80">
+	<Card class="border-border/60 bg-card/80">
 		<div class="space-y-3">
-			<h2 class="text-sm font-medium text-zinc-400">MCP Configuration</h2>
-			<p class="text-xs text-zinc-500">
+			<h2 class="text-sm font-medium text-foreground/60">MCP Configuration</h2>
+			<p class="text-xs text-muted-foreground">
 				Use this snippet in your MCP client configuration. Replace the API key placeholder with a
 				generated key.
 			</p>
 			<div class="relative">
 				<pre
-					class="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300"
+					class="overflow-x-auto rounded-md border border-border/60 bg-background p-3 text-xs text-foreground/80"
 				>{mcpConfigSnippet()}</pre>
 				<Button
 					variant="ghost"
@@ -326,7 +326,7 @@
 
 <!-- Generate Key Dialog -->
 <Dialog.Root bind:open={generateDialogOpen}>
-	<Dialog.Content class="border-zinc-800 bg-zinc-900 sm:max-w-md">
+	<Dialog.Content class="border-border/60 bg-card sm:max-w-md">
 		<Dialog.Header>
 			<Dialog.Title>
 				{#if generatedKey}
@@ -348,10 +348,10 @@
 			<div class="space-y-4">
 				<!-- Raw key -->
 				<div class="space-y-1.5">
-					<span class="text-xs font-medium text-zinc-400">API Key</span>
+					<span class="text-xs font-medium text-foreground/60">API Key</span>
 					<div class="relative">
 						<pre
-							class="overflow-x-auto rounded-md border border-amber-900/50 bg-amber-950/20 p-3 pr-10 text-xs text-amber-200 break-all whitespace-pre-wrap"
+							class="overflow-x-auto rounded-md border border-primary/40 bg-primary/10 p-3 pr-10 text-xs text-primary break-all whitespace-pre-wrap"
 						>{generatedKey.raw_key}</pre>
 						<Button
 							variant="ghost"
@@ -363,16 +363,16 @@
 							<Copy class="size-3" />
 						</Button>
 					</div>
-					<p class="text-xs text-amber-500/80">This key is shown only once.</p>
+					<p class="text-xs text-primary/80">This key is shown only once.</p>
 				</div>
 
 				<!-- MCP Config -->
 				{#if generatedKey.mcp_config}
 					<div class="space-y-1.5">
-						<span class="text-xs font-medium text-zinc-400">MCP Config</span>
+						<span class="text-xs font-medium text-foreground/60">MCP Config</span>
 						<div class="relative">
 							<pre
-								class="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 pr-10 text-xs text-zinc-300 break-all whitespace-pre-wrap"
+								class="overflow-x-auto rounded-md border border-border/60 bg-background p-3 pr-10 text-xs text-foreground/80 break-all whitespace-pre-wrap"
 							>{JSON.stringify(generatedKey.mcp_config, null, 2)}</pre>
 							<Button
 								variant="ghost"
@@ -404,7 +404,7 @@
 				class="space-y-4"
 			>
 				<div class="space-y-1.5">
-					<label for="key-label" class="text-xs font-medium text-zinc-400">Label</label>
+					<label for="key-label" class="text-xs font-medium text-foreground/60">Label</label>
 					<Input
 						id="key-label"
 						bind:value={newKeyLabel}

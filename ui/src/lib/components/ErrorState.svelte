@@ -11,13 +11,13 @@
 	} = $props();
 </script>
 
-<div class="flex flex-col gap-2 rounded-md border border-red-900/40 bg-red-950/25 px-3 py-2 text-sm text-red-200">
+<div class="flex flex-col gap-2 border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
 	<p>{message}</p>
 	{#if onRetry}
 		<Button
 			variant="outline"
 			size="sm"
-			class="w-fit border-red-800/60 text-red-100"
+			class="w-fit border-destructive/50 text-destructive hover:bg-destructive/15"
 			onclick={onRetry}
 		>
 			<RefreshCw class="mr-1 size-3" />

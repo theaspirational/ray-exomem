@@ -8,9 +8,10 @@ const config = {
 		runes: true
 	},
 	kit: {
-		// Must match ray-exomem daemon UI mount (see web.rs UI_MOUNT_PATH).
+		// Must match the daemon's BASE_PATH (server.rs::BASE_PATH, baked from
+		// $RAY_EXOMEM_BASE_PATH at build time). Empty = root mount.
 		paths: {
-			base: '/ray-exomem'
+			base: (process.env.RAY_EXOMEM_BASE_PATH || '').replace(/\/+$/, '')
 		},
 		adapter: adapter({
 			pages: 'build',

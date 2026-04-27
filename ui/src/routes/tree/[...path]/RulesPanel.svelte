@@ -413,10 +413,11 @@
 		<div class="flex flex-col gap-1.5">
 			{#each filteredRules as rule (rule.index)}
 				<div
-					class="rounded-lg border border-border/60 border-l-2 border-l-rule-accent bg-card/50 px-3 py-2"
+					class="border border-border/60 bg-card/50 px-3 py-2"
 				>
 					<div class="mb-1 flex items-center justify-between gap-2">
 						<div class="flex flex-wrap items-center gap-2">
+							<span class="inline-block size-1.5 rounded-full bg-rule-accent" aria-hidden="true"></span>
 							<span class="text-xs font-semibold text-rule-accent">{rule.head_predicate}</span>
 							{#if rule.uses_negation}
 								<span class="text-[10px] text-contra">negation</span>

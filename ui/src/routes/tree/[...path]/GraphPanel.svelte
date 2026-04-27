@@ -510,28 +510,28 @@
 
 <div class="flex h-[min(72vh,640px)] min-h-[360px] flex-col">
 	<!-- Minimal toolbar -->
-	<div class="flex items-center justify-between border-b border-zinc-800 px-3 py-1.5">
-		<div class="flex items-center gap-2 text-xs text-zinc-500">
+	<div class="flex items-center justify-between border-b border-border/60 px-3 py-1.5">
+		<div class="flex items-center gap-2 text-xs text-muted-foreground">
 			{#if graph}
 				<span class="tabular-nums">{graph.summary.node_count} nodes</span>
-				<span class="text-zinc-700">·</span>
+				<span class="text-muted-foreground/50">·</span>
 				<span class="tabular-nums">{graph.summary.edge_count} edges</span>
 			{/if}
 		</div>
 		<div class="flex items-center gap-0.5">
-			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={() => showControls = !showControls} title="Toggle controls">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={() => showControls = !showControls} title="Toggle controls">
 				<Settings2 class="size-3.5" />
 			</button>
-			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={zoomIn} title="Zoom in">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={zoomIn} title="Zoom in">
 				<ZoomIn class="size-3.5" />
 			</button>
-			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={zoomOut} title="Zoom out">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={zoomOut} title="Zoom out">
 				<ZoomOut class="size-3.5" />
 			</button>
-			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={zoomFit} title="Reset view">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={zoomFit} title="Reset view">
 				<Maximize2 class="size-3.5" />
 			</button>
-			<button type="button" class="flex size-7 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" onclick={loadGraph} disabled={loading} title="Reload">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={loadGraph} disabled={loading} title="Reload">
 				<RefreshCw class="size-3.5 {loading ? 'animate-spin' : ''}" />
 			</button>
 		</div>
@@ -565,7 +565,7 @@
 
 		<!-- Controls panel -->
 		{#if showControls && graph}
-			<div class="w-56 shrink-0 overflow-y-auto border-l border-zinc-800 bg-zinc-900/95 p-3 text-xs">
+			<div class="w-56 shrink-0 overflow-y-auto border-l border-border/60 bg-card/95 p-3 text-xs">
 				<!-- Forces section -->
 				<div class="flex items-center justify-between mb-3">
 					<p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Forces</p>
