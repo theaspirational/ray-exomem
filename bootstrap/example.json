@@ -41,7 +41,7 @@
     {
       "fact_id": "concept/exom#docs",
       "predicate": "concept/docs_url",
-      "value": "https://github.com/anthropics/ray-exomem",
+      "value": "https://github.com/theaspirational/ray-exomem",
       "confidence": 0.9,
       "provenance": "example:bootstrap",
       "valid_from": "2024-01-01T09:00:00Z",
