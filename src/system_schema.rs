@@ -503,16 +503,18 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
         ),
         (
             "fact-with-tx".to_string(),
-            "Joined fact row with provenance and transaction actor/time.".to_string(),
+            "Joined fact row with provenance and transaction time. \
+             Cap-limited to 8 columns (rayforce2 distinct/group cap on n_keys); \
+             join with `tx-row` if the actor or branch is also needed."
+                .to_string(),
             format!(
-                "(rule {exom} (fact-with-tx ?fact ?pred ?value ?confidence ?prov ?vf ?tx ?actor ?when) (?fact '{fp} ?pred) (?fact '{fv} ?value) (?fact '{fc} ?confidence) (?fact '{fprov} ?prov) (?fact '{fvt} ?vf) (?fact '{fcb} ?tx) (?tx '{ta} ?actor) (?tx '{tt} ?when))",
+                "(rule {exom} (fact-with-tx ?fact ?pred ?value ?confidence ?prov ?vf ?tx ?when) (?fact '{fp} ?pred) (?fact '{fv} ?value) (?fact '{fc} ?confidence) (?fact '{fprov} ?prov) (?fact '{fvt} ?vf) (?fact '{fcb} ?tx) (?tx '{tt} ?when))",
                 fp = attrs::fact::PREDICATE,
                 fv = attrs::fact::VALUE,
                 fc = attrs::fact::CONFIDENCE,
                 fprov = attrs::fact::PROVENANCE,
                 fvt = attrs::fact::VALID_FROM,
                 fcb = attrs::fact::CREATED_BY,
-                ta = attrs::tx::ACTOR,
                 tt = attrs::tx::TIME,
             ),
         ),

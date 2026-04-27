@@ -205,6 +205,15 @@ fn handle_tools_list() -> serde_json::Value {
 fn tool_definitions() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
+            "name": "guide",
+            "description": "Return the ray-exomem agent guide (markdown). Read this first in a fresh session — covers the tree model, typed values, write/read patterns, and the full tool reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        serde_json::json!({
             "name": "query",
             "description": "Run a Rayfall query against an exom",
             "inputSchema": {
@@ -218,16 +227,34 @@ fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "assert_fact",
-            "description": "Assert or replace a fact in an exom",
+            "description": "Assert or replace a fact in an exom. Re-asserting an existing fact_id supersedes the previous tuple.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "exom": { "type": "string", "description": "Exom name" },
-                    "predicate": { "type": "string", "description": "Fact predicate" },
-                    "value": { "type": "string", "description": "Fact value" },
-                    "fact_id": { "type": "string", "description": "Fact ID (defaults to predicate)" }
+                    "exom": { "type": "string", "description": "Exom name (slash or :: form)." },
+                    "predicate": { "type": "string", "description": "Fact predicate, e.g. `entity/name`." },
+                    "value": { "description": "Typed value. JSON number → I64, JSON string → auto-detected (numeric round-trip → I64, else Str), `{\"$sym\": \"...\"}` → Sym." },
+                    "fact_id": { "type": "string", "description": "Stable fact id; defaults to the predicate. Use `<entity>#<property>` for multi-instance entities." },
+                    "confidence": { "type": "number", "description": "0.0..1.0; defaults to 1.0." },
+                    "source": { "type": "string", "description": "Provenance tag (where this fact came from). Defaults to 'mcp'." },
+                    "valid_from": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact starts being true. Defaults to now." },
+                    "valid_to": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact stops being true. Open-ended if omitted." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to the authenticated user's email, else 'mcp'." }
                 },
                 "required": ["exom", "predicate", "value"]
+            }
+        }),
+        serde_json::json!({
+            "name": "retract_fact",
+            "description": "Retract the active tuple for `fact_id`. Closes valid_to to now and marks the fact revoked. History is preserved; fact_history still returns the closed tuple.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "exom": { "type": "string", "description": "Exom name." },
+                    "fact_id": { "type": "string", "description": "Fact id to retract." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email, else 'mcp'." }
+                },
+                "required": ["exom", "fact_id"]
             }
         }),
         serde_json::json!({
@@ -376,8 +403,10 @@ async fn handle_tool_call(
         .unwrap_or(serde_json::json!({}));
 
     let content = match tool_name {
+        "guide" => Ok(AGENT_GUIDE_BODY.to_string()),
         "query" => tool_query(state, &arguments),
         "assert_fact" => tool_assert_fact(state, &arguments).await,
+        "retract_fact" => tool_retract_fact(state, &arguments).await,
         "list_exoms" => tool_list_exoms(state),
         "exom_status" => tool_exom_status(state, &arguments),
         "eval" => tool_eval(state, &arguments),
@@ -531,7 +560,7 @@ async fn tool_assert_fact(
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
-    let predicate = require_str(args, "predicate")?;
+    let predicate = require_str(args, "predicate")?.to_string();
     // MCP accepts typed JSON values (20 / "text" / {"$sym": "foo"}) plus bare
     // strings for legacy clients. Bare strings run through `FactValue::auto`
     // so numeric input like "75" is stored as I64, enabling datalog cmp rules
@@ -551,18 +580,32 @@ async fn tool_assert_fact(
                 message: format!("invalid 'value': {e}"),
             })?,
     };
-    let fact_id = get_str(args, "fact_id").unwrap_or(predicate).to_string();
+    let fact_id = get_str(args, "fact_id").unwrap_or(&predicate).to_string();
+
+    let confidence = args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let source = get_str(args, "source").unwrap_or("mcp").to_string();
+    let valid_from = get_str(args, "valid_from").map(str::to_string);
+    let valid_to = get_str(args, "valid_to").map(str::to_string);
+    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
 
     let ctx = crate::context::MutationContext {
-        actor: "mcp".into(),
+        actor,
         session: None,
         model: None,
         user_email: None,
     };
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        es.brain
-            .assert_fact(&fact_id, predicate, value, 1.0, "mcp", None, None, &ctx)
+        es.brain.assert_fact(
+            &fact_id,
+            &predicate,
+            value.clone(),
+            confidence,
+            &source,
+            valid_from.as_deref(),
+            valid_to.as_deref(),
+            &ctx,
+        )
     })
     .await;
 
@@ -572,6 +615,42 @@ async fn tool_assert_fact(
             "tx_id": tx_id,
             "fact_id": fact_id,
             "predicate": predicate,
+            "confidence": confidence,
+            "source": source,
+        })
+        .to_string()),
+        Err(e) => Err(JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        }),
+    }
+}
+
+async fn tool_retract_fact(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let exom_slash = exom_slug(args);
+    let fact_id = require_str(args, "fact_id")?.to_string();
+    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
+
+    let ctx = crate::context::MutationContext {
+        actor,
+        session: None,
+        model: None,
+        user_email: None,
+    };
+
+    let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
+        es.brain.retract_fact(&fact_id, &ctx)
+    })
+    .await;
+
+    match result {
+        Ok(tx_id) => Ok(serde_json::json!({
+            "ok": true,
+            "tx_id": tx_id,
+            "fact_id": fact_id,
         })
         .to_string()),
         Err(e) => Err(JsonRpcError {

@@ -132,36 +132,31 @@ fn main() {
             // Auto-clone into OUT_DIR for cargo install
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
             let cloned = out_dir.join("rayforce2");
+            // Tracking the fork branch fix/eval-error-detail (over master)
+            // for the eval-error-detail surfacing fixes; PR upstream pending.
+            const RAYFORCE2_REPO: &str = "https://github.com/theaspirational/rayforce2.git";
+            const RAYFORCE2_REF: &str = "fix/eval-error-detail";
             if !cloned.join("Makefile").exists() {
-                eprintln!("[build.rs] fetching rayforce2 master...");
+                eprintln!("[build.rs] fetching rayforce2 {RAYFORCE2_REF}...");
                 let _ = std::fs::remove_dir_all(&cloned);
                 std::fs::create_dir_all(&cloned).expect("failed to create rayforce2 clone dir");
-                // PR #7 (feature/datalog-aggregates) was merged to master as
-                // dda2b98 with follow-up Copilot review hardening. We track
-                // master directly; sibling checkouts also need to be on
-                // master (>= dda2b98).
                 run("git", &["init"], &cloned, "rayforce2 init");
                 run(
                     "git",
-                    &[
-                        "remote",
-                        "add",
-                        "origin",
-                        "https://github.com/RayforceDB/rayforce2.git",
-                    ],
+                    &["remote", "add", "origin", RAYFORCE2_REPO],
                     &cloned,
                     "rayforce2 remote add",
                 );
                 let fetch_status = Command::new("git")
-                    .args(["fetch", "--depth", "1", "origin", "master"])
+                    .args(["fetch", "--depth", "1", "origin", RAYFORCE2_REF])
                     .current_dir(&cloned)
                     .status()
                     .expect("failed to run git fetch — is git installed?");
                 if !fetch_status.success() {
                     panic!(
-                        "rayforce2 not found at ../rayforce2 and fetching RayforceDB/rayforce2 master failed.\n\
+                        "rayforce2 not found at ../rayforce2 and fetching {RAYFORCE2_REPO} {RAYFORCE2_REF} failed.\n\
                          Either:\n  \
-                         - Check out rayforce2 alongside this repo (master >= dda2b98), or\n  \
+                         - Check out rayforce2 alongside this repo on the same ref, or\n  \
                          - Set RAYFORCE2_DIR=/path/to/rayforce2"
                     );
                 }
@@ -169,7 +164,7 @@ fn main() {
                     "git",
                     &["checkout", "--detach", "FETCH_HEAD"],
                     &cloned,
-                    "rayforce2 checkout master",
+                    "rayforce2 checkout",
                 );
             }
             cloned

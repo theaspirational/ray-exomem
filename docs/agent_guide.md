@@ -213,7 +213,7 @@ Useful relations to remember (full list via `schema.builtin_views`):
 
 - `fact-row(?fact ?pred ?value)`
 - `fact-meta(?fact ?confidence ?prov ?valid_from ?tx)`
-- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?actor ?when)`
+- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?when)` — join with `tx-row` if you also need `?actor` or `?branch`. Capped at 8 columns by the engine's group/distinct op.
 - `tx-row(?tx ?id ?actor ?action ?when ?branch)`
 - `observation-row(?obs ?source_type ?content ?tx)`
 - `belief-row(?belief ?claim ?status ?tx)`
