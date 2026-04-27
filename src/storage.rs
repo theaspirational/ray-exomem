@@ -1791,6 +1791,7 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
             TxAction::AssertFact => "assert-fact",
             TxAction::RetractFact => "retract-fact",
             TxAction::ReviseBelief => "revise-belief",
+            TxAction::RevokeBelief => "revoke-belief",
             TxAction::CreateBranch => "create-branch",
             TxAction::Merge => "merge",
         })
@@ -1852,6 +1853,7 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
             "assert-fact" => TxAction::AssertFact,
             "retract-fact" => TxAction::RetractFact,
             "revise-belief" => TxAction::ReviseBelief,
+            "revoke-belief" => TxAction::RevokeBelief,
             "create-branch" => TxAction::CreateBranch,
             "merge" => TxAction::Merge,
             other => bail!("unknown tx action: {}", other),

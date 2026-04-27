@@ -125,24 +125,32 @@ Use `assert_fact`. Each call is one tuple. Patterns:
 { "exom": "public/work/...", "predicate": "service/status", "fact_id": "service/auth#status", "value": {"$sym": "active"} }
 ```
 
-What MCP `assert_fact` does **not** currently expose (use the HTTP API for
-these, or wait for the tool surface to grow):
+Optional fields on `assert_fact`:
 
-- caller-supplied `valid_from`, `valid_to`, `confidence`, `source/provenance`,
-  `actor`, `branch`. The tool hardcodes `actor=mcp`, `source=mcp`,
-  `confidence=1.0`, and stamps `valid_from = now()`.
+- `confidence` (0.0..1.0, default `1.0`)
+- `source` — provenance tag (default `"mcp"`)
+- `valid_from` / `valid_to` — ISO-8601 wall-clock bounds (default
+  `valid_from = now()`, open-ended `valid_to`)
+- `actor` — attribution (default authenticated user's email, else `"mcp"`)
 
-When you need to record uncertain or time-bounded knowledge through MCP, encode
-it in your predicates (`belief/...`, `observation/...`) until per-call
-confidence/provenance lands in the tool schema.
+`created_at` (the daemon's tx-time) is always set independently to wall-clock
+now — that's the bitemporal split. Backfilling `valid_from` to a historical
+date is supported and recommended when seeding from older sources.
+
+All write tools (`assert_fact`, `retract_fact`, `observe`, `believe`,
+`revoke_belief`) accept an optional `branch` argument. The exom's current
+branch is restored after the write, so other callers see the cursor
+unchanged. Branch ownership is still TOFU-enforced — writing to a branch
+claimed by a different actor returns `branch_owned`.
 
 ### Re-asserting and retracting
 
 Re-asserting with the same `fact_id` supersedes — the engine closes the prior
-tuple's `valid_to` and writes a new tuple. There is no MCP `retract` tool yet;
-to mark a fact gone, write a tombstone value (`"deleted"`, `{"$sym": "void"}`,
-…) under a convention your queries respect, or use the HTTP
-`/api/actions/retract-fact` endpoint.
+tuple's `valid_to` and writes a new tuple, preserving history.
+
+`retract_fact { exom, fact_id, actor? }` closes the active tuple's
+`valid_to = now()` and marks the fact revoked. `fact_history` still returns
+the closed tuple, so retract is non-destructive.
 
 ---
 
@@ -226,10 +234,52 @@ Runs raw Rayfall (any form, not just `(query ...)`). Power tool. Bypasses the
 canonical-query lowering, so it doesn't auto-inject rules — `query` is what
 you want for ordinary reads.
 
-### `assert_fact` `{ exom, predicate, value, fact_id? }`
+### `assert_fact` `{ exom, predicate, value, fact_id?, confidence?, source?, valid_from?, valid_to?, actor? }`
 
-Returns `{ ok, tx_id, fact_id, predicate }`. See §3 for value typing and the
-parameters MCP currently does not expose.
+Returns `{ ok, tx_id, fact_id, predicate, confidence, source }`. See §3 for
+value typing and how the optional fields map onto the bitemporal model.
+
+### `retract_fact` `{ exom, fact_id, actor? }`
+
+Closes the active tuple's `valid_to` to now and marks the fact revoked.
+History is preserved — `fact_history` still returns the closed tuple.
+Returns `{ ok, tx_id, fact_id }`.
+
+### `observe` `{ exom, obs_id, source_type, source_ref?, content, confidence?, tags?, valid_from?, valid_to?, actor? }`
+
+Record an observation — raw evidence captured from a source. Cheaper than a
+fact: an observation doesn't claim truth, it records what was seen. Use it
+when you've read a doc, a chat, or a code snippet and want to remember the
+quote/summary without committing to the claim being true.
+
+- `source_type`: `notion-page`, `github-pr`, `chat`, `manual`, etc.
+- `source_ref`: the stable id within that source (page id, PR number, ...).
+- `content`: the observed material (a quote or summary).
+- `confidence` defaults to 0.8.
+
+Returns `{ ok, tx_id, obs_id }`. Read back with the `observation-row` builtin
+view via `query`.
+
+### `believe` `{ exom, belief_id, claim_text, confidence?, rationale?, supports?, valid_from?, valid_to?, actor? }`
+
+Record (or revise) a belief — a claim the agent considers true, with rationale
+and confidence. Re-believing the same `claim_text` supersedes the prior active
+belief (the prior one transitions to status `superseded`, history preserved).
+
+- `claim_text`: natural-language claim.
+- `supports`: list of fact ids or observation ids that back the claim.
+- `confidence` defaults to 0.7.
+
+Returns `{ ok, tx_id, belief_id }`. Read back with `belief-row` via `query`.
+
+### `revoke_belief` `{ exom, belief_id, actor? }`
+
+Withdraw an active belief without supplying a replacement claim. Sets status
+to `revoked`, closes `valid_to` to now, drops the belief from `current_beliefs`
+but keeps it visible via `belief-row` (with `status="revoked"`) and
+`belief_history`. Errors if the belief id isn't currently active. Use re-`believe`
+with a new `claim_text` instead when you do have a replacement — that emits a
+`superseded` transition.
 
 ### `list_branches` `{ exom }`
 
@@ -239,14 +289,34 @@ stays on `main`.
 
 ### `create_branch` `{ exom, branch_name }`
 
-Creates a new branch off the current one. Note: the MCP write tools do not
-let you target a specific branch — they always write to the exom's current
-branch. To do branch-isolated work today, drive the daemon via HTTP.
+Creates a new branch off the current one. All write tools (`assert_fact`,
+`retract_fact`, `observe`, `believe`, `revoke_belief`) accept an optional
+`branch` argument that targets the write at a specific branch without
+disturbing the exom's current-branch cursor for other callers — the switch
+is held only for the duration of the write under an exclusive exom lock.
+Branch ownership is still enforced by TOFU: writes to a branch claimed by a
+different actor return `branch_owned`.
 
-### `start_session` `{ project_path, session_type?, label? }`
+### `session_new` `{ project_path, session_type, label, actor?, agents? }`
 
-**Currently a stub.** Returns `{ status: "stub" }`. Don't depend on this.
-Sessions are created via HTTP `POST /api/actions/session-new` for now.
+Create a new session exom under `<project>/sessions/<id>`. `session_type` is
+`"single"` (only `main` branch) or `"multi"` (one branch per agent plus
+`main` for the orchestrator). The orchestrator (`actor`) is added to the
+agent list automatically and gets `main`. Returns `{ ok, session_path }`.
+
+`label` must be non-empty and contain no `/`, `::`, or whitespace.
+
+### `session_join` `{ session_path, actor? }`
+
+Claim a pre-allocated branch under TOFU. Returns the branch claimed.
+First-writer-wins: a second actor calling `session_join` with the same
+actor id will succeed (idempotent), but a different actor trying to write
+to that branch later gets `branch_owned`.
+
+### `session_close` `{ session_path, actor? }`
+
+Asserts `session/closed_at = now`. Subsequent writes to the session exom
+fail with `session_closed`. Reverse by retracting `session/closed_at`.
 
 ### `export` `{ exom, format? }`
 
@@ -278,21 +348,18 @@ audits, not for incremental sync.
 | `rayforce2 err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce2 upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
 | `missing required parameter: <name>` | MCP arg validation | Add the missing field. |
 | `invalid 'value'` | `value` JSON couldn't deserialize as a `FactValue` | Send a JSON number, string, or `{"$sym": "..."}`. Anything else (arrays, nested objects without `$sym`) is rejected. |
-| `branch_owned` (writes via HTTP) | Another actor already claimed the branch under TOFU | Write to your own branch, or via MCP, which is locked to the exom's current branch. |
+| `branch_owned` | Another actor already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). |
+| `session_closed` | The session exom has `session/closed_at` set; writes are rejected | Retract `session/closed_at` to reopen, or pick a different session. |
 
 ---
 
 ## 7. Out-of-scope today (file an issue or use HTTP)
 
-- Asserting with `confidence`, `provenance`, explicit `valid_from`/`valid_to`,
-  or a non-`mcp` actor → use `POST /api/actions/assert-fact`.
-- Retract → use `POST /api/actions/retract-fact`.
-- Branch-targeted writes → use `POST /api/actions/eval` or
-  `assert-fact` with the `branch` field.
-- Real session lifecycle (create / close / archive / join) → use the
-  `/api/actions/session-*` endpoints.
-- Observations and beliefs as first-class entities → only readable through
-  Datalog views currently.
+- Session `archive` and `rename` (the `session/archived_at` and `session/label`
+  predicates exist; you can write them through `assert_fact`, but there's no
+  convenience tool yet).
+- Branch-level operations beyond create/list (rename, diff, merge).
+- Group-based access — sharing private `{email}/...` paths is per-email today.
 
 When the MCP tool surface grows to cover any of these, this guide is the
 right place to document it.

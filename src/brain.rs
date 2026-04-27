@@ -110,6 +110,7 @@ pub enum TxAction {
     AssertFact,
     RetractFact,
     ReviseBelief,
+    RevokeBelief,
     CreateBranch,
     Merge,
 }
@@ -121,6 +122,7 @@ impl std::fmt::Display for TxAction {
             TxAction::AssertFact => write!(f, "assert-fact"),
             TxAction::RetractFact => write!(f, "retract-fact"),
             TxAction::ReviseBelief => write!(f, "revise-belief"),
+            TxAction::RevokeBelief => write!(f, "revoke-belief"),
             TxAction::CreateBranch => write!(f, "create-branch"),
             TxAction::Merge => write!(f, "merge"),
         }
@@ -600,6 +602,46 @@ impl Brain {
             rationale: rationale.into(),
         };
         self.beliefs.push(belief);
+        self.rebuild_splay(DirtyTable::Belief)?;
+        Ok(tx_id)
+    }
+
+    /// Withdraw an active belief without supplying a replacement claim. Sets
+    /// status to `Revoked`, closes `valid_to` to the tx time, and emits a
+    /// `RevokeBelief` transaction. History is preserved — `belief_history`
+    /// still returns the revoked tuple, and `belief-row` exposes it with
+    /// `status = "revoked"`. `current_beliefs` (and thus `beliefs_on_branch`)
+    /// drops it.
+    ///
+    /// Errors if there's no active belief with that id on the current branch.
+    pub fn revoke_belief(
+        &mut self,
+        belief_id: &str,
+        ctx: &MutationContext,
+    ) -> Result<TxId> {
+        if !self
+            .beliefs
+            .iter()
+            .any(|b| b.belief_id == belief_id && b.status == BeliefStatus::Active)
+        {
+            bail!("no active belief with id '{}'", belief_id);
+        }
+        let (tx_id, tx_time) = self.alloc_tx(
+            TxAction::RevokeBelief,
+            vec![belief_id.into()],
+            &format!("revoke: {}", belief_id),
+            ctx,
+        )?;
+        if let Some(b) = self
+            .beliefs
+            .iter_mut()
+            .find(|b| b.belief_id == belief_id && b.status == BeliefStatus::Active)
+        {
+            b.status = BeliefStatus::Revoked;
+            if b.valid_to.is_none() {
+                b.valid_to = Some(tx_time);
+            }
+        }
         self.rebuild_splay(DirtyTable::Belief)?;
         Ok(tx_id)
     }
@@ -2313,6 +2355,30 @@ mod tests {
         let on_exp = brain.facts_on_branch("exp");
         assert_eq!(on_exp.len(), 1);
         assert_eq!(on_exp[0].value, "red");
+    }
+
+    #[test]
+    fn revoke_belief_drops_from_current_keeps_history() {
+        let mut brain = Brain::new();
+        let ctx = MutationContext::default();
+        brain
+            .revise_belief("b1", "claim", 0.9, vec![], "rationale", None, None, &ctx)
+            .unwrap();
+        assert_eq!(brain.current_beliefs().len(), 1);
+
+        let tx = brain.revoke_belief("b1", &ctx).unwrap();
+        assert!(tx > 0);
+        // Dropped from current view
+        assert_eq!(brain.current_beliefs().len(), 0);
+        // History preserved with revoked status and closed valid_to
+        let stored = &brain.beliefs[0];
+        assert_eq!(stored.status, BeliefStatus::Revoked);
+        assert!(stored.valid_to.is_some());
+
+        // Re-revoking the same id errors (no longer active)
+        assert!(brain.revoke_belief("b1", &ctx).is_err());
+        // Revoking a nonexistent id errors
+        assert!(brain.revoke_belief("ghost", &ctx).is_err());
     }
 
     #[test]
