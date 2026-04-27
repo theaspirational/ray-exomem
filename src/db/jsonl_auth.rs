@@ -10,7 +10,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 
 use crate::auth::UserRole;
-use crate::db::{ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser};
+use crate::db::{
+    AllowedEmail, ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser,
+};
 
 pub struct JsonlAuthDb {
     jsonl_path: PathBuf,
@@ -19,6 +21,7 @@ pub struct JsonlAuthDb {
     api_key_by_hash: Mutex<HashMap<String, String>>,
     share_grants: Mutex<Vec<ShareGrant>>,
     allowed_domains: Mutex<Vec<String>>,
+    allowed_emails: Mutex<HashMap<String, String>>,
     top_admin: Mutex<Option<String>>,
     admins: Mutex<HashSet<String>>,
     sessions: DashMap<String, SessionRow>,
@@ -33,6 +36,7 @@ impl JsonlAuthDb {
             api_key_by_hash: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             top_admin: Mutex::new(None),
             admins: Mutex::new(HashSet::new()),
             sessions: DashMap::new(),
@@ -228,6 +232,24 @@ impl JsonlAuthDb {
             "domain-revoke" => {
                 if let Some(domain) = entry.get("domain").and_then(|v| v.as_str()) {
                     self.allowed_domains.lock().unwrap().retain(|d| d != domain);
+                }
+            }
+            "allowed-email" => {
+                if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
+                    let alias = entry
+                        .get("alias")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.allowed_emails
+                        .lock()
+                        .unwrap()
+                        .insert(email.to_string(), alias);
+                }
+            }
+            "allowed-email-revoke" => {
+                if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
+                    self.allowed_emails.lock().unwrap().remove(email);
                 }
             }
             "user-deactivate" => {
@@ -645,9 +667,57 @@ impl AuthDb for JsonlAuthDb {
         Ok(self.allowed_domains.lock().unwrap().clone())
     }
 
+    async fn add_allowed_email(&self, email: &str, alias: &str) -> anyhow::Result<()> {
+        let email = email.trim().to_lowercase();
+        if email.is_empty() {
+            return Ok(());
+        }
+        let alias = alias.trim();
+        let entry = serde_json::json!({
+            "kind": "allowed-email",
+            "email": email,
+            "alias": alias,
+        });
+        self.append_entry(&entry)?;
+        self.apply_entry(&entry);
+        Ok(())
+    }
+
+    async fn remove_allowed_email(&self, email: &str) -> anyhow::Result<()> {
+        let entry = serde_json::json!({
+            "kind": "allowed-email-revoke",
+            "email": email,
+        });
+        self.append_entry(&entry)?;
+        self.apply_entry(&entry);
+        Ok(())
+    }
+
+    async fn list_allowed_emails(&self) -> anyhow::Result<Vec<AllowedEmail>> {
+        let map = self.allowed_emails.lock().unwrap();
+        let mut out: Vec<AllowedEmail> = map
+            .iter()
+            .map(|(email, alias)| AllowedEmail {
+                email: email.clone(),
+                alias: alias.clone(),
+            })
+            .collect();
+        drop(map);
+        out.sort_by(|a, b| a.email.cmp(&b.email));
+        Ok(out)
+    }
+
     async fn factory_reset(&self) -> anyhow::Result<()> {
-        // Preserve allowed_domains across the reset; everything else goes.
+        // Preserve login policy (allowed_domains + allowed_emails) across the
+        // reset; everything else goes.
         let domains: Vec<String> = self.allowed_domains.lock().unwrap().clone();
+        let emails: Vec<(String, String)> = self
+            .allowed_emails
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(e, a)| (e.clone(), a.clone()))
+            .collect();
 
         self.users.lock().unwrap().clear();
         self.api_keys.lock().unwrap().clear();
@@ -667,6 +737,14 @@ impl AuthDb for JsonlAuthDb {
             .open(&self.jsonl_path)?;
         for d in domains {
             let entry = serde_json::json!({ "kind": "domain", "domain": d });
+            writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+        }
+        for (email, alias) in emails {
+            let entry = serde_json::json!({
+                "kind": "allowed-email",
+                "email": email,
+                "alias": alias,
+            });
             writeln!(file, "{}", serde_json::to_string(&entry)?)?;
         }
         Ok(())

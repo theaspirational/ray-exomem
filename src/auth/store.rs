@@ -17,6 +17,9 @@ pub struct AuthStore {
     pub session_cache: DashMap<String, User>,
     pub api_key_cache: DashMap<String, User>,
     pub allowed_domains: Mutex<Vec<String>>,
+    /// Per-email signup allowlist (email -> alias/description). Complementary
+    /// to `allowed_domains` — a login is permitted if either list matches.
+    pub allowed_emails: Mutex<HashMap<String, String>>,
     /// In-memory share grants until persisted to the system exom (see TODO on create_share).
     pub share_grants: Mutex<Vec<ShareGrant>>,
     // Persistent indexes (populated from JSONL replay)
@@ -101,6 +104,7 @@ impl AuthStore {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
@@ -135,6 +139,7 @@ impl AuthStore {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
@@ -187,26 +192,23 @@ impl AuthStore {
         Ok(())
     }
 
-    /// Empty list = allow all; otherwise check email domain against allowed list.
-    pub async fn check_domain(&self, email: &str) -> bool {
-        if let Some(ref db) = self.auth_db {
-            let db = db.clone();
-            let Ok(domains) = db.list_domains().await else {
-                return false;
-            };
-            if domains.is_empty() {
-                return true;
-            }
-            let Some(domain) = email.rsplit('@').next() else {
-                return false;
-            };
-            return domains.iter().any(|d| d == domain);
-        }
-        let domains = self.allowed_domains.lock().unwrap();
-        if domains.is_empty() {
+    /// Login policy: when both lists are empty, allow all (dev mode);
+    /// otherwise admit `email` if either its domain is in `allowed_domains`
+    /// **or** its address is in `allowed_emails`.
+    pub async fn is_login_allowed(&self, email: &str) -> bool {
+        let email_lower = email.to_lowercase();
+        let domains = self.list_allowed_domains().await;
+        let emails = self.list_allowed_emails().await;
+
+        if domains.is_empty() && emails.is_empty() {
             return true;
         }
-        let Some(domain) = email.rsplit('@').next() else {
+
+        if emails.iter().any(|e| e.email == email_lower) {
+            return true;
+        }
+
+        let Some(domain) = email_lower.rsplit('@').next() else {
             return false;
         };
         domains.iter().any(|d| d == domain)
@@ -727,6 +729,24 @@ impl AuthStore {
                     self.allowed_domains.lock().unwrap().retain(|d| d != domain);
                 }
             }
+            "allowed-email" => {
+                if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
+                    let alias = entry
+                        .get("alias")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.allowed_emails
+                        .lock()
+                        .unwrap()
+                        .insert(email.to_string(), alias);
+                }
+            }
+            "allowed-email-revoke" => {
+                if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
+                    self.allowed_emails.lock().unwrap().remove(email);
+                }
+            }
             "user-deactivate" => {
                 if let Some(email) = entry.get("email").and_then(|v| v.as_str()) {
                     if let Some(user) = self.users.lock().unwrap().get_mut(email) {
@@ -1107,6 +1127,74 @@ impl AuthStore {
         self.apply_entry(&entry);
     }
 
+    /// Clone the current allowed-emails list (sorted by email).
+    pub async fn list_allowed_emails(&self) -> Vec<crate::db::AllowedEmail> {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            return match db.list_allowed_emails().await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("auth: list_allowed_emails: {e}");
+                    Vec::new()
+                }
+            };
+        }
+        let map = self.allowed_emails.lock().unwrap();
+        let mut out: Vec<crate::db::AllowedEmail> = map
+            .iter()
+            .map(|(email, alias)| crate::db::AllowedEmail {
+                email: email.clone(),
+                alias: alias.clone(),
+            })
+            .collect();
+        drop(map);
+        out.sort_by(|a, b| a.email.cmp(&b.email));
+        out
+    }
+
+    /// Add (or update) an allow-listed individual email with a human alias.
+    pub async fn add_allowed_email(&self, email: &str, alias: &str) {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            let email = email.to_string();
+            let alias = alias.to_string();
+            if let Err(e) = db.add_allowed_email(&email, &alias).await {
+                eprintln!("auth: add_allowed_email: {e}");
+            }
+            return;
+        }
+        let email_norm = email.trim().to_lowercase();
+        if email_norm.is_empty() {
+            return;
+        }
+        let alias_norm = alias.trim().to_string();
+        let entry = serde_json::json!({
+            "kind": "allowed-email",
+            "email": email_norm,
+            "alias": alias_norm,
+        });
+        let _ = self.append_entry(&entry);
+        self.apply_entry(&entry);
+    }
+
+    /// Remove an allow-listed individual email.
+    pub async fn remove_allowed_email(&self, email: &str) {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            let email = email.to_string();
+            if let Err(e) = db.remove_allowed_email(&email).await {
+                eprintln!("auth: remove_allowed_email: {e}");
+            }
+            return;
+        }
+        let entry = serde_json::json!({
+            "kind": "allowed-email-revoke",
+            "email": email,
+        });
+        let _ = self.append_entry(&entry);
+        self.apply_entry(&entry);
+    }
+
     /// Remove an allowed domain (persists to JSONL).
     pub async fn remove_domain(&self, domain: &str) {
         if let Some(ref db) = self.auth_db {
@@ -1299,18 +1387,35 @@ mod tests {
     use crate::db::{jsonl_auth::JsonlAuthDb, AuthDb, StoredUser as DbStoredUser};
 
     #[tokio::test]
-    async fn check_domain_empty_allows_all() {
+    async fn is_login_allowed_empty_allows_all() {
         let store = make_test_store(&[]);
-        assert!(store.check_domain("alice@anything.com").await);
-        assert!(store.check_domain("bob@other.org").await);
+        assert!(store.is_login_allowed("alice@anything.com").await);
+        assert!(store.is_login_allowed("bob@other.org").await);
     }
 
     #[tokio::test]
-    async fn check_domain_restricts() {
+    async fn is_login_allowed_restricts_by_domain() {
         let store = make_test_store(&["company.com".into(), "other.co".into()]);
-        assert!(store.check_domain("alice@company.com").await);
-        assert!(store.check_domain("bob@other.co").await);
-        assert!(!store.check_domain("eve@evil.org").await);
+        assert!(store.is_login_allowed("alice@company.com").await);
+        assert!(store.is_login_allowed("bob@other.co").await);
+        assert!(!store.is_login_allowed("eve@evil.org").await);
+    }
+
+    #[tokio::test]
+    async fn is_login_allowed_admits_individual_email() {
+        let store = make_test_store(&["company.com".into()]);
+        store.add_allowed_email("contractor@vendor.io", "Q4 contractor").await;
+        assert!(store.is_login_allowed("alice@company.com").await);
+        assert!(store.is_login_allowed("contractor@vendor.io").await);
+        assert!(!store.is_login_allowed("eve@vendor.io").await);
+    }
+
+    #[tokio::test]
+    async fn is_login_allowed_only_emails_no_domains() {
+        let store = make_test_store(&[]);
+        store.add_allowed_email("solo@vendor.io", "solo").await;
+        assert!(store.is_login_allowed("solo@vendor.io").await);
+        assert!(!store.is_login_allowed("anyone@anywhere.org").await);
     }
 
     #[test]
@@ -1371,6 +1476,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
@@ -1428,6 +1534,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
@@ -1465,6 +1572,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
@@ -1489,6 +1597,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(Vec::new()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),
@@ -1591,6 +1700,7 @@ mod tests {
             session_cache: DashMap::new(),
             api_key_cache: DashMap::new(),
             allowed_domains: Mutex::new(domains.to_vec()),
+            allowed_emails: Mutex::new(HashMap::new()),
             share_grants: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             api_keys: Mutex::new(HashMap::new()),

@@ -24,7 +24,7 @@ Unit tests (`cargo test`) are not a substitute for this — the bug classes that
 3. **Redeploy** — `ln -f target/release/ray-exomem ~/.local/bin/ray-exomem` (must be `ln -f`, not `cp` — see the macOS `com.apple.provenance` gotcha below).
 4. **Relaunch with env** — `set -a; source .env; set +a; nohup ~/.local/bin/ray-exomem serve --bind 127.0.0.1:9780 --auth-provider google --google-client-id "$GOOGLE_CLIENT_ID" --allowed-domains "$ALLOWED_DOMAINS" --database-url "$DATABASE_URL" > /tmp/ray-exomem.log 2>&1 &`.
 5. **Verify liveness** — `curl -s http://127.0.0.1:9780/auth/info` should return the auth provider config. `/auth/info` and `/auth/login` are the only routes that work without a session/bearer; everything under `/api`, `/mcp`, and `/events` 401s without auth.
-6. **Exercise the change** — for unauth-checked routes, `curl` is fine; for everything else, drive the change via the UI in a browser (https://devmem.trydev.app) or include `Authorization: Bearer <api-key>` in your curl. Logs tail at `/tmp/ray-exomem.log`.
+6. **Exercise the change** — for unauth-checked routes, `curl` is fine; for everything else, drive the change via the UI in a browser at your dev hostname or include `Authorization: Bearer <api-key>` in your curl. Logs tail at `/tmp/ray-exomem.log`.
 
 > **CLI / curl auth gap.** The `ray-exomem` CLI and the legacy `curl /api/status` probe both rely on unauthenticated access to `/api`. With `auth_store` configured (the default dev setup) the daemon now 401s those calls. Workarounds until CLI auth lands as a follow-up: (a) drive changes via the UI; (b) supply a bearer token from `/auth/api-keys`; or (c) run the daemon without `--auth-provider` for pure CLI/single-user work.
 
@@ -50,17 +50,17 @@ ray-exomem stop
 
 Use `ray-exomem serve --bind 127.0.0.1:9780` for foreground debugging.
 
-## Local dev with Cloudflare tunnel
+## Local dev with an HTTPS tunnel
 
-Developer runs local daemon + Cloudflare tunnel, reached at **https://devmem.trydev.app/**. Assume this is the live test surface, not a bare `localhost`.
+Run the local daemon behind an HTTPS tunnel (Cloudflare Tunnel, ngrok, etc.) so Google OAuth's GSI id_token flow can call back to a real TLS hostname. Treat that hostname — not bare `localhost` — as the live test surface.
 
 The whole app (UI, `/api`, `/auth`, `/auth/admin`, `/mcp`, `/events`) mounts under a single configurable base path: `server::BASE_PATH`, baked at compile time from `$RAY_EXOMEM_BASE_PATH`. Empty (default) = root. To host under e.g. `somesite.com/ray-exomem/`, set `RAY_EXOMEM_BASE_PATH=/ray-exomem` before `cargo build` — build.rs propagates the same value to the SvelteKit build (its `paths.base`) so the embedded UI's asset URLs match.
 
 Components:
 
-- **Postgres**: container `ddd-postgres-1` (`postgres:17-alpine`, port 5432). ray-exomem uses role `ray_exomem` / db `ray_exomem`. Superuser for admin: `rapidcrm`.
+- **Postgres**: any Postgres 16+ reachable at `DATABASE_URL`. ray-exomem connects as role `ray_exomem` to db `ray_exomem`; whichever role you use to bootstrap needs `CREATE ROLE` + `CREATE DATABASE` privileges.
 - **`.env` at repo root** (gitignored) holds `GOOGLE_CLIENT_ID`, `ALLOWED_DOMAINS`, `DATABASE_URL`. No dotenv loader in Rust — export with `set -a; source .env; set +a` before launching.
-- **Build**: Postgres backend is feature-gated → `cargo build --release --features postgres`.
+- **Build**: `cargo build --release --bin ray-exomem` (the `postgres` feature is on by default).
 - **Daemon** (foreground, backgrounded via shell):
   ```bash
   set -a; source .env; set +a
@@ -68,13 +68,12 @@ Components:
     --auth-provider google --google-client-id "$GOOGLE_CLIENT_ID" \
     --allowed-domains "$ALLOWED_DOMAINS" --database-url "$DATABASE_URL"
   ```
-  Note: the `daemon` subcommand lacks the auth flags, so local dev uses `serve`.
-- **Cloudflare tunnel**: named `devmem` (id `1bc8be11-197d-4f57-8115-4af051fa626a`), config at `~/.cloudflared/devmem.yml`, ingress → `http://localhost:9780`. Run with `cloudflared --config ~/.cloudflared/devmem.yml tunnel run devmem`. The older `ridtech` tunnel is unrelated.
-- **Google OAuth console**: `https://devmem.trydev.app` must be listed under *Authorized JavaScript origins* for the client ID. GSI id_token flow → no redirect URI needed.
+  Note: the `daemon` subcommand lacks the auth flags, so dev uses `serve`.
+- **Tunnel**: point the tunnel ingress at `http://127.0.0.1:9780` (or whatever `--bind` you chose). Cloudflare Tunnel works well; any provider that gives a stable HTTPS hostname does.
+- **Google OAuth console**: your tunnel hostname must be listed under *Authorized JavaScript origins* for the client ID. GSI id_token flow → no redirect URI needed.
 
-Gotchas specific to this setup:
+Gotchas:
 
-- `cloudflared tunnel route dns <name> <host>` can silently target whichever tunnel appears first in `~/.cloudflared/config.yml`. Always pass `--config ~/.cloudflared/devmem.yml` (and `--overwrite-dns` when re-routing) so the CNAME points at the intended tunnel.
 - Fresh persistent state boots with an empty `tree/`. There is no auto-created bare `main` exom — under the privacy model nobody would own it, so the only effect would be an unreachable directory. Exoms enter the tree explicitly via `init`, `exom-new`, or first authenticated login (which seeds `{email}/main`). `factory-reset` likewise leaves the tree empty.
 - When changing auth/postgres flags, fully stop the daemon (`ray-exomem stop`) before restarting — the new `serve` invocation will not take over a daemonised instance bound to the same port.
 
@@ -128,7 +127,7 @@ ray-exomem query --exom work::team::project::repo::main --json
 - Queries are lowered/re-written before eval so exom-scoped rules are injected correctly.
 - Splay tables under each `tree/<exom-path>/` directory are the source of truth on disk. There are no JSONL sidecars for facts/txs/observations/beliefs/branches; `auth.jsonl` is a separate subsystem and still exists.
 - The daemon nests all routes (`/api`, `/auth`, `/mcp`, `/events`, UI fallback) under `server::BASE_PATH`. Default mount is root; override via `RAY_EXOMEM_BASE_PATH` at build time.
-- A fresh persistent data dir auto-creates bare `tree/main`; projects and sessions are additional tree nodes layered on top.
+- A fresh persistent data dir boots with an empty `tree/`. Namespaces, projects, and sessions enter the tree explicitly via `init`, `exom-new`, or first authenticated login — never via auto-create.
 - After state changes, runtime bindings must be refreshed.
 
 ## Files worth knowing

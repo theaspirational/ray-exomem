@@ -1,68 +1,144 @@
 # ray-exomem
 
-Persistent external memory for agents and operators.
+> **WIP / unstable:** this project is under active development. The HTTP API,
+> CLI behavior, MCP tools, storage layout, auth flows, and UI surfaces can
+> change unexpectedly until the project declares a stable compatibility
+> contract. Treat this README as the current working state, not a promise of
+> backward compatibility.
 
-`ray-exomem` stores facts, observations, beliefs, rules, transactions, and
-branches inside a tree of folders and exoms, then exposes that state through a
-native Rayfall/Datalog CLI, HTTP API, and embedded Svelte UI.
+Persistent external memory for LLM agents and operators.
 
-Built on [rayforce2](https://github.com/RayforceDB/rayforce2), which provides
-the Rayfall evaluator, Datalog engine, symbol table, and columnar storage.
+`ray-exomem` is a Rust daemon, CLI, HTTP API, MCP endpoint, and embedded
+Svelte UI for storing and querying agent memory. The storage model is a tree of
+folders and exoms; each exom is an isolated knowledge base with facts, rules,
+branches, observations, beliefs, and transactions.
 
-## Current State
+Rayfall parsing, Datalog evaluation, symbol interning, and columnar persistence
+come from [rayforce2](https://github.com/RayforceDB/rayforce2). This crate adds
+the daemon, tree/session workflow, auth/access layer, API, UI, and agent-facing
+commands.
 
-The repo is currently centered on the newer tree/session model:
+## Current Model
 
-- Tree paths on disk and in the UI: `work/team/project/repo/main`
-- CLI tree paths: `work::team::project::repo::main`
-- Projects scaffold to `main` plus `sessions/`
-- Sessions are exoms created under `<project>/sessions/<id>`
+The active model is tree-first:
 
-Some legacy flat-exom helpers still exist in the CLI for compatibility, but
-they are not the recommended path anymore. In particular:
+- Folders are grouping nodes. They do not store facts.
+- Exoms are leaf knowledge bases. A directory is an exom when it contains
+  `exom.json`.
+- Projects are scaffolded folders with a `main` exom and a `sessions/` folder.
+- Session exoms live under `<project>/sessions/<session-id>`.
+- Branches live inside one exom. They are used for parallel work, hypothetical
+  changes, and multi-agent coordination.
 
-- Prefer `ray-exomem inspect`, `init`, `exom-new`, and `session ...`
-- Prefer `GET /api/tree` over `/api/exoms`
-- `POST /api/actions/start-session` is removed
+Fresh persistent state starts empty. There is no auto-created root `main` exom
+anymore. Create exoms explicitly with `init` or `exom-new`, or enable auth and
+let first login seed `{email}/main`.
 
-## Quick Start
+Path forms:
 
-Build and install locally:
+```text
+CLI:       work::team::project::repo::main
+Disk/API:  work/team/project/repo/main
+```
+
+Default data directory:
+
+```text
+~/.ray-exomem/
+```
+
+Representative layout after creating a project and a session:
+
+```text
+~/.ray-exomem/
+  sym
+  sym.lk
+  tree/
+    work/
+      team/
+        project/
+          repo/
+            main/
+              exom.json
+              fact/
+              tx/
+              branch/
+            sessions/
+              20260411T143215Z_multi_agent_landing-page/
+                exom.json
+```
+
+Memory data is stored in rayforce2 splay tables under each exom directory.
+There are no JSONL sidecars for facts, transactions, observations, beliefs, or
+branches. Auth state is separate: JSONL by default, or Postgres when configured.
+
+## Build
+
+Requirements:
+
+- Rust toolchain
+- Node.js and npm for the embedded Svelte build
+- C compiler and `make`
+- git
+
+Build the release binary:
 
 ```bash
-cargo build --release
+cargo build --release --bin ray-exomem
 ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
 ```
 
-Start the daemon:
+Use `ln -f`, not `cp`, when deploying the binary on macOS. Copied binaries can
+inherit `com.apple.provenance` metadata and hang silently.
+
+`build.rs` also builds the Svelte UI and rayforce2 C library. It uses
+`RAYFORCE2_DIR` when set, otherwise it looks for a sibling `../rayforce2`, and
+falls back to fetching rayforce2 master.
+
+The server base path is baked at compile time:
+
+```bash
+# Default: mount at /
+cargo build --release --bin ray-exomem
+
+# Mount UI/API under /ray-exomem/
+RAY_EXOMEM_BASE_PATH=/ray-exomem cargo build --release --bin ray-exomem
+```
+
+The same base path is passed to SvelteKit so UI asset URLs match the daemon.
+
+## Quick Start
+
+Start a foreground server for debugging:
+
+```bash
+ray-exomem serve --bind 127.0.0.1:9780
+```
+
+Start a background daemon for normal unauthenticated local use:
 
 ```bash
 ray-exomem daemon
 ```
 
-Open the UI at:
+Open the UI at the base path baked into the binary:
 
 ```text
-http://127.0.0.1:9780/ray-exomem/
+http://127.0.0.1:9780/
+http://127.0.0.1:9780/ray-exomem/   # if built with RAY_EXOMEM_BASE_PATH=/ray-exomem
 ```
 
-Stop it with:
+Stop the daemon:
 
 ```bash
 ray-exomem stop
 ```
 
-Inspect the local tree:
-
-```bash
-ray-exomem inspect
-```
-
-Scaffold a project and query its main exom:
+Create a project and inspect the tree:
 
 ```bash
 ray-exomem init work::team::project::repo
-ray-exomem query --exom work::team::project::repo::main --json
+ray-exomem inspect work::team::project::repo --depth 3
 ```
 
 Create a session exom under that project:
@@ -75,278 +151,206 @@ ray-exomem session new work::team::project::repo \
   --agents agent-a,agent-b
 ```
 
-Useful entry points:
+Query the project main exom:
 
 ```bash
-ray-exomem --help
-ray-exomem guide
-ray-exomem guide --topic cli
-```
-
-## Conceptual Model
-
-### Folder
-
-A grouping node in the tree. Folders contain other folders and exoms but do not
-store facts themselves.
-
-### Exom
-
-A leaf knowledge base with facts, rules, branches, transactions, observations,
-and beliefs. Exoms are identified by tree path.
-
-### Project
-
-A scaffolded folder with:
-
-- `main/` as the project's main exom
-- `sessions/` as a folder for per-session exoms
-
-Created with:
-
-```bash
-ray-exomem init <path>
-```
-
-### Session Exom
-
-An exom under `<project>/sessions/<session-id>` used for isolated work, handoff,
-or multi-agent coordination. Created with:
-
-```bash
-ray-exomem session new <project-path> --name <label> --actor <name> ...
-```
-
-### Branch
-
-A branch inside one exom. Branches are used for hypothetical reasoning,
-parallel work, and session ownership.
-
-## Paths and Persistence
-
-CLI paths use `::` separators:
-
-```text
-work::team::project::repo::main
-```
-
-Disk and UI paths use `/` separators:
-
-```text
-work/team/project/repo/main
-```
-
-The default data root is:
-
-```text
-~/.ray-exomem/
-```
-
-High-level layout:
-
-```text
-~/.ray-exomem/
-  sym
-  sym.lk
-  tree/
-    main/
-      exom.json
-    work/
-      team/
-        project/
-          repo/
-            main/
-              exom.json
-            sessions/
-              20260411T143215Z_multi_agent_landing-page/
-                exom.json
-```
-
-Notes:
-
-- A directory is an exom when it contains `exom.json`
-- A fresh persistent store auto-creates a bare `main` exom
-- `rules.ray` and the `fact/`, `tx/`, `observation/`, `belief/`, and `branch/`
-  splay directories appear lazily as data is written
-- Auth state is separate from exom storage
-
-## CLI Overview
-
-Tree and session commands:
-
-- `ray-exomem inspect [path]`
-- `ray-exomem init <path>`
-- `ray-exomem exom-new <path>`
-- `ray-exomem session new ...`
-- `ray-exomem session rename ...`
-- `ray-exomem session close ...`
-- `ray-exomem session archive ...`
-
-Daemon-backed knowledge commands:
-
-- `ray-exomem status`
-- `ray-exomem query --exom <path>`
-- `ray-exomem expand-query --request ...`
-- `ray-exomem eval ...`
-- `ray-exomem assert ...`
-- `ray-exomem retract ...`
-- `ray-exomem history <fact-id>`
-- `ray-exomem why <fact-id>`
-- `ray-exomem why-not --predicate ...`
-- `ray-exomem branch <subcommand> ...`
-- `ray-exomem coord <subcommand> ...`
-- `ray-exomem export`
-- `ray-exomem import`
-- `ray-exomem watch`
-- `ray-exomem lint-memory`
-
-Examples:
-
-```bash
-ray-exomem assert project/status active \
-  --exom work::team::project::repo::main \
-  --source kickoff-notes
-
-ray-exomem branch list --exom work::team::project::repo::main
-
 ray-exomem query \
   --exom work::team::project::repo::main \
   --request '(query work/team/project/repo/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
   --json
 ```
 
-Two CLI caveats worth knowing:
+Important CLI caveat: several older daemon-backed CLI commands still prepend
+`/ray-exomem` internally. If the binary was built at the default root mount,
+direct HTTP calls hit `/api/...`, but those older CLI commands may still expect
+the server to be mounted at `/ray-exomem`. Until the CLI prefix is cleaned up,
+either build with `RAY_EXOMEM_BASE_PATH=/ray-exomem` for full CLI compatibility
+or use direct HTTP/UI against the compiled base path.
 
-- Some older commands still use `--addr 127.0.0.1:9780`
-- Newer tree/session commands route through the global `--daemon-url`
+## CLI Surface
 
-## HTTP API
+Offline/local commands:
 
-Base prefix:
+- `ray-exomem run <file>` evaluates a Rayfall file in-process with no shared KB.
+- `ray-exomem init <path>` creates `<path>/main` plus `<path>/sessions/`.
+- `ray-exomem exom-new <path>` creates a bare exom.
+- `ray-exomem inspect [path]` reads the local tree from disk.
+- `ray-exomem guide` prints the long agent/operator reference.
 
-```text
-/ray-exomem/api
+Daemon-backed commands:
+
+- `status`, `facts`, `query`, `expand-query`, `eval`
+- `assert`, `retract`, `history`, `why`, `why-not`
+- `branch <list|create|switch|diff|merge|delete>`
+- `coord <claim|release|depend|agent-session|...>`
+- `session <new|join|rename|close|archive>`
+- `export`, `import`, `watch`, `lint-memory`, `doctor`
+
+Prefer declaring all participants up front with `session new --agents ...`.
+The `session add-agent` CLI path is still not a reliable automation surface.
+
+Mutating commands should include an actor:
+
+```bash
+ray-exomem assert project/status active \
+  --exom work::team::project::repo::main \
+  --actor orchestrator \
+  --source kickoff-notes
 ```
 
-Common endpoints:
+Fact values are typed at the API/brain layer. Numeric strings are auto-typed as
+`i64` unless `--as-str` is passed; `--as-sym` and `--as-i64` are also available.
+Typed facts populate `facts_i64`, `facts_str`, and `facts_sym` EDBs for native
+Datalog rules.
+
+## HTTP, UI, SSE, and MCP
+
+All daemon routes are mounted under `server::BASE_PATH`, compiled from
+`RAY_EXOMEM_BASE_PATH`. With the default build, `BASE_PATH` is empty:
+
+```text
+GET http://127.0.0.1:9780/api/status
+GET http://127.0.0.1:9780/events
+POST http://127.0.0.1:9780/mcp
+```
+
+With `RAY_EXOMEM_BASE_PATH=/ray-exomem`:
+
+```text
+GET http://127.0.0.1:9780/ray-exomem/api/status
+GET http://127.0.0.1:9780/ray-exomem/events
+POST http://127.0.0.1:9780/ray-exomem/mcp
+```
+
+Canonical API routes:
 
 - `GET /api/status`
 - `GET /api/tree`
+- `GET /api/welcome/summary`
 - `GET /api/guide`
 - `POST /api/actions/init`
 - `POST /api/actions/exom-new`
 - `POST /api/actions/session-new`
+- `POST /api/actions/session-join`
+- `POST /api/actions/branch-create`
 - `POST /api/actions/rename`
 - `POST /api/actions/assert-fact`
-- `GET|POST /api/query`
+- `POST /api/query`
 - `POST /api/expand-query`
 - `POST /api/actions/eval`
 - `GET /api/facts`
+- `GET /api/facts/valid-at`
+- `GET /api/facts/bitemporal`
 - `GET /api/facts/{id}`
-- `GET /api/branches`
-- `POST /api/branches`
+- `GET|POST /api/branches`
+- `GET|DELETE /api/branches/{id}`
 - `POST /api/branches/{id}/switch`
 - `GET /api/branches/{id}/diff`
 - `POST /api/branches/{id}/merge`
 - `GET /api/explain`
 - `GET /api/schema`
 - `GET /api/graph`
+- `GET /api/relation-graph`
+- `GET /api/clusters`
+- `GET /api/clusters/{id}`
 - `GET /api/provenance`
 - `GET /api/logs`
 - `GET /api/actions/export`
 - `GET /api/actions/export-json`
 - `POST /api/actions/import-json`
+- `POST /api/actions/retract-all`
+- `POST /api/actions/wipe`
+- `POST /api/actions/factory-reset`
+- `GET /api/derived/{pred}`
+- `GET /api/beliefs/{id}/support`
 
-Removed/legacy endpoints:
+Removed legacy routes:
 
-- `/api/exoms` returns `410 gone`; use `/api/tree`
-- `/api/actions/start-session` returns `410 gone`; use `/api/actions/session-new`
+- `GET|POST /api/exoms` returns `410 gone`; use `GET /api/tree`.
+- `POST /api/actions/start-session` returns `410 gone`; use
+  `POST /api/actions/session-new`.
 
-SSE endpoints:
+The embedded UI is served by the same daemon and includes tree, exom, query,
+graph, guide, login, profile, and admin surfaces. Server-Sent Events stream from
+`/events`. The MCP Streamable HTTP endpoint is `/mcp`.
 
-- `GET /ray-exomem/events`
-- `GET /sse`
+## Auth and Local Development
 
-## Web UI
+Unauthenticated single-user mode is the default when no auth provider is set.
+When auth is enabled, `/auth/info` and `/auth/login` stay public, while `/api`,
+`/mcp`, and `/events` require a session cookie or bearer API key.
 
-The embedded UI is served under `/ray-exomem/`.
-
-Current top-level surfaces include:
-
-- Tree browser under `/ray-exomem/tree/...`
-- Exom view with facts, branches, history, graph, and rules
-- Full-page query editor at `/ray-exomem/query`
-- Full-page graph view at `/ray-exomem/graph`
-- Guide at `/ray-exomem/guide`
-
-When auth is enabled, the app also exposes login, profile, and admin surfaces.
-
-## Architecture
-
-`ray-exomem` owns:
-
-- daemon lifecycle
-- tree/exom/session scaffolding
-- HTTP API and UI serving
-- mutation orchestration through `brain.rs`
-- persistence wiring for exom splay tables
-- auth, API keys, shares, and admin flows
-
-`rayforce2` owns:
-
-- Rayfall parsing and evaluation
-- Datalog fixpoint computation
-- symbol interning
-- columnar relation storage
-- query planning and execution
-
-Key files:
-
-- `src/main.rs` — CLI surface and daemon startup
-- `src/server.rs` — HTTP API, SSE, UI hosting
-- `src/brain.rs` — mutation model and history
-- `src/scaffold.rs` — `init` and bare-exom creation
-- `src/tree.rs` — tree traversal and node classification
-- `src/path.rs` — tree path parsing and validation
-- `src/system_schema.rs` — builtin derived views and ontology/schema output
-- `ui/src/routes/tree/[...path]/` — tree, folder, and exom UI
-
-## Build and Dev Notes
-
-Requirements:
-
-- Rust
-- Node.js + npm
-- C compiler
-- git
-
-Build:
+Google-authenticated local dev uses `serve`, not `daemon`, because the auth
+provider flags are currently wired on `serve`:
 
 ```bash
-cargo build --release
-```
+set -a
+source .env
+set +a
 
-Run tests:
-
-```bash
-cargo test
-cd ui && npm run check && npm run build
-```
-
-Use foreground mode for debugging:
-
-```bash
-ray-exomem serve --bind 127.0.0.1:9780
-```
-
-Authenticated local dev currently uses `serve`, not `daemon`, because the auth
-flags are wired there:
-
-```bash
-set -a; source .env; set +a
 ray-exomem serve --bind 127.0.0.1:9780 \
   --auth-provider google \
   --google-client-id "$GOOGLE_CLIENT_ID" \
   --allowed-domains "$ALLOWED_DOMAINS" \
   --database-url "$DATABASE_URL"
 ```
+
+Auth persistence:
+
+- Without `--database-url`, auth state lives in `_system/auth/auth.jsonl`.
+- With `--database-url`, users, sessions, API keys, domains, and shares use
+  Postgres.
+- Exom memory data always lives in local rayforce2 splay tables.
+
+`ray-exomem daemon` currently does not expose the auth provider flags. Use
+foreground `serve` for authenticated development and deployment until that is
+wired through.
+
+## Bootstrap Seeds
+
+`bootstrap/*.json` files are embedded into the binary at build time. On login,
+each seed scaffolds `<seed.path>/main` and seeds it once. Numeric JSON values
+become typed `I64` facts, which is required for numeric Datalog rules using
+`facts_i64`.
+
+See `bootstrap/README.md` and `bootstrap/example.json` for the fixture schema.
+
+## Development
+
+Useful checks:
+
+```bash
+cargo test
+cd ui && npm run check && npm run build
+```
+
+For server, storage, auth, backend, or rayforce2 FFI changes, unit tests are not
+enough. Follow the live daemon rebuild/redeploy loop in `CLAUDE.md` and exercise
+the change against the running daemon.
+
+Useful source files:
+
+- `src/main.rs` - CLI and daemon lifecycle
+- `src/server.rs` - HTTP API, SSE, MCP mount, UI hosting
+- `src/brain.rs` - core memory model and mutations
+- `src/scaffold.rs` - project and exom creation
+- `src/tree.rs` - tree walking and node classification
+- `src/path.rs` - tree path parsing and validation
+- `src/auth/routes.rs` - auth/login/bootstrap routes
+- `src/storage.rs` - splay persistence and decoded query tables
+- `src/rayfall_ast.rs` - Rayfall parsing/lowering helpers
+- `src/system_schema.rs` - builtin views and schema output
+- `ui/src/lib/exomem.svelte.ts` - UI API client
+
+## Operational Notes
+
+- The project is Rayfall-native. Legacy `.dl` / Teide inputs are rejected.
+- If `rayforce2` changed and behavior looks stale, run
+  `cargo clean && cargo build --release --bin ray-exomem`.
+- The embedded UI is built into the binary at compile time.
+- `ray-exomem daemon` forks and redirects output. Use `serve` when you need logs
+  in the terminal.
+- The symbol table is part of persistent identity. Do not wipe `~/.ray-exomem/sym`
+  reflexively; persisted splay rows encode symbol IDs by slot.
+- Startup runs a sym rewrite compatibility pass and an engine health probe over
+  loaded exoms to surface rayforce2 symbol-layout problems early.

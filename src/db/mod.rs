@@ -61,6 +61,12 @@ pub struct ShareGrant {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AllowedEmail {
+    pub email: String,
+    pub alias: String,
+}
+
 // ---------------------------------------------------------------------------
 // Traits
 // ---------------------------------------------------------------------------
@@ -121,8 +127,15 @@ pub trait AuthDb: Send + Sync {
 
     async fn list_domains(&self) -> anyhow::Result<Vec<String>>;
 
+    async fn add_allowed_email(&self, email: &str, alias: &str) -> anyhow::Result<()>;
+
+    async fn remove_allowed_email(&self, email: &str) -> anyhow::Result<()>;
+
+    async fn list_allowed_emails(&self) -> anyhow::Result<Vec<AllowedEmail>>;
+
     /// Wipe all user-derived auth state (users, sessions, api keys, shares).
-    /// `allowed_domains` is preserved so login policy survives the reset.
+    /// `allowed_domains` and `allowed_emails` are preserved so login policy
+    /// survives the reset.
     async fn factory_reset(&self) -> anyhow::Result<()>;
 }
 

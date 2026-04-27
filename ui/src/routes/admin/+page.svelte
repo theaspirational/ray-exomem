@@ -35,7 +35,7 @@
 		{ id: 'sessions', label: 'Sessions' },
 		{ id: 'api-keys', label: 'API Keys' },
 		{ id: 'shares', label: 'Shares' },
-		{ id: 'domains', label: 'Domains' },
+		{ id: 'signup', label: 'Sign-up' },
 		{ id: 'admins', label: 'Admins', topAdminOnly: true },
 		{ id: 'developer', label: 'Developer', topAdminOnly: true },
 		{ id: 'system', label: 'System', topAdminOnly: true }
@@ -359,6 +359,89 @@
 		}
 	}
 
+	// --- Allowed emails ---
+	interface AllowedEmail {
+		email: string;
+		alias: string;
+	}
+	let allowedEmails = $state<AllowedEmail[]>([]);
+	let emailsLoading = $state(false);
+	let emailsError = $state<string | null>(null);
+	let newEmail = $state('');
+	let newEmailAlias = $state('');
+	let emailAdding = $state(false);
+	let emailRemoving = $state<string | null>(null);
+
+	async function fetchAllowedEmails() {
+		emailsLoading = true;
+		emailsError = null;
+		try {
+			const resp = await fetch(`${authApiBase()}/auth/admin/allowed-emails`, {
+				credentials: 'include'
+			});
+			if (resp.ok) {
+				const body = await resp.json();
+				allowedEmails = body.emails ?? [];
+			} else {
+				emailsError = 'Failed to load allowed emails';
+			}
+		} catch {
+			emailsError = 'Failed to load allowed emails';
+		} finally {
+			emailsLoading = false;
+		}
+	}
+
+	async function addAllowedEmail() {
+		const email = newEmail.trim();
+		if (!email) return;
+		emailAdding = true;
+		try {
+			const resp = await fetch(`${authApiBase()}/auth/admin/allowed-emails`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({ email, alias: newEmailAlias.trim() })
+			});
+			if (!resp.ok) {
+				const body = await resp.json().catch(() => ({}));
+				toast.error(body.message || 'Failed to add email');
+				return;
+			}
+			toast.success(`Added ${email}`);
+			newEmail = '';
+			newEmailAlias = '';
+			await fetchAllowedEmails();
+		} catch {
+			toast.error('Failed to add email');
+		} finally {
+			emailAdding = false;
+		}
+	}
+
+	async function removeAllowedEmail(email: string) {
+		emailRemoving = email;
+		try {
+			const resp = await fetch(
+				`${authApiBase()}/auth/admin/allowed-emails/${encodeURIComponent(email)}`,
+				{
+					method: 'DELETE',
+					credentials: 'include'
+				}
+			);
+			if (!resp.ok) {
+				toast.error('Failed to remove email');
+				return;
+			}
+			allowedEmails = allowedEmails.filter((e) => e.email !== email);
+			toast.success(`Removed ${email}`);
+		} catch {
+			toast.error('Failed to remove email');
+		} finally {
+			emailRemoving = null;
+		}
+	}
+
 	// --- Admins ---
 	let adminEmail = $state('');
 	let adminGranting = $state(false);
@@ -521,8 +604,9 @@
 			case 'shares':
 				fetchShares();
 				break;
-			case 'domains':
+			case 'signup':
 				fetchDomains();
+				fetchAllowedEmails();
 				break;
 			case 'admins':
 				fetchUsers();
@@ -839,65 +923,168 @@
 			{/if}
 		</Tabs.Content>
 
-		<!-- Domains Tab -->
-		<Tabs.Content value="domains" class="pt-4">
-			<div class="space-y-4">
-				<form
-					onsubmit={(e) => {
-						e.preventDefault();
-						addDomain();
-					}}
-					class="flex items-center gap-2"
-				>
-					<Input
-						bind:value={newDomain}
-						placeholder="example.com"
-						disabled={domainAdding}
-						class="max-w-xs border-border bg-background text-sm"
-					/>
-					<Button type="submit" size="sm" disabled={domainAdding || !newDomain.trim()}>
-						{#if domainAdding}
-							<Loader2 class="size-3.5 animate-spin" />
-						{:else}
-							<Plus class="size-3.5" />
-						{/if}
-						Add
-					</Button>
-				</form>
+		<!-- Sign-up Tab -->
+		<Tabs.Content value="signup" class="pt-4">
+			<div class="space-y-8">
+				<p class="text-xs text-muted-foreground">
+					Anyone matching either list below can sign in. Both empty = open sign-up.
+				</p>
 
-				{#if domainsLoading}
-					<div class="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-						<Loader2 class="size-4 animate-spin" />
-						Loading domains...
+				<section class="space-y-4">
+					<div>
+						<h2 class="text-sm font-semibold text-foreground">Allowed domains</h2>
+						<p class="mt-0.5 text-xs text-muted-foreground">
+							Wildcard match — any address whose domain matches is admitted.
+						</p>
 					</div>
-				{:else if domainsError}
-					<p class="py-8 text-sm text-muted-foreground">{domainsError}</p>
-				{:else if domains.length === 0}
-					<div class="rounded-md border border-dashed border-border/60 py-8 text-center">
-						<p class="text-sm text-muted-foreground">No allowed domains configured</p>
+					<form
+						onsubmit={(e) => {
+							e.preventDefault();
+							addDomain();
+						}}
+						class="flex items-center gap-2"
+					>
+						<Input
+							bind:value={newDomain}
+							placeholder="example.com"
+							disabled={domainAdding}
+							class="max-w-xs border-border bg-background text-sm"
+						/>
+						<Button type="submit" size="sm" disabled={domainAdding || !newDomain.trim()}>
+							{#if domainAdding}
+								<Loader2 class="size-3.5 animate-spin" />
+							{:else}
+								<Plus class="size-3.5" />
+							{/if}
+							Add domain
+						</Button>
+					</form>
+
+					{#if domainsLoading}
+						<div class="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+							<Loader2 class="size-4 animate-spin" />
+							Loading domains...
+						</div>
+					{:else if domainsError}
+						<p class="py-6 text-sm text-muted-foreground">{domainsError}</p>
+					{:else if domains.length === 0}
+						<div class="rounded-md border border-dashed border-border/60 py-6 text-center">
+							<p class="text-sm text-muted-foreground">No allowed domains configured</p>
+						</div>
+					{:else}
+						<div class="divide-y divide-border/60 rounded-md border border-border/60">
+							{#each domains as domain (domain)}
+								<div class="flex items-center justify-between px-3 py-2.5">
+									<span class="font-mono text-sm text-foreground/80">{domain}</span>
+									<Button
+										variant="ghost"
+										size="icon-sm"
+										disabled={domainRemoving === domain}
+										onclick={() => removeDomain(domain)}
+										title="Remove domain"
+									>
+										{#if domainRemoving === domain}
+											<Loader2 class="size-3.5 animate-spin" />
+										{:else}
+											<Trash2 class="size-3.5 text-muted-foreground hover:text-destructive" />
+										{/if}
+									</Button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</section>
+
+				<section class="space-y-4">
+					<div>
+						<h2 class="text-sm font-semibold text-foreground">Allowed emails</h2>
+						<p class="mt-0.5 text-xs text-muted-foreground">
+							Individual addresses outside the domain wildcard. The alias is a human
+							label (e.g. role, contractor name) shown only here.
+						</p>
 					</div>
-				{:else}
-					<div class="divide-y divide-border/60 rounded-md border border-border/60">
-						{#each domains as domain (domain)}
-							<div class="flex items-center justify-between px-3 py-2.5">
-								<span class="font-mono text-sm text-foreground/80">{domain}</span>
-								<Button
-									variant="ghost"
-									size="icon-sm"
-									disabled={domainRemoving === domain}
-									onclick={() => removeDomain(domain)}
-									title="Remove domain"
-								>
-									{#if domainRemoving === domain}
-										<Loader2 class="size-3.5 animate-spin" />
-									{:else}
-										<Trash2 class="size-3.5 text-muted-foreground hover:text-destructive" />
-									{/if}
-								</Button>
-							</div>
-						{/each}
-					</div>
-				{/if}
+					<form
+						onsubmit={(e) => {
+							e.preventDefault();
+							addAllowedEmail();
+						}}
+						class="flex flex-wrap items-center gap-2"
+					>
+						<Input
+							bind:value={newEmail}
+							placeholder="user@example.com"
+							type="email"
+							disabled={emailAdding}
+							class="max-w-xs border-border bg-background text-sm"
+						/>
+						<Input
+							bind:value={newEmailAlias}
+							placeholder="alias (e.g. Q4 contractor)"
+							disabled={emailAdding}
+							class="max-w-xs border-border bg-background text-sm"
+						/>
+						<Button type="submit" size="sm" disabled={emailAdding || !newEmail.trim()}>
+							{#if emailAdding}
+								<Loader2 class="size-3.5 animate-spin" />
+							{:else}
+								<Plus class="size-3.5" />
+							{/if}
+							Add email
+						</Button>
+					</form>
+
+					{#if emailsLoading}
+						<div class="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+							<Loader2 class="size-4 animate-spin" />
+							Loading allowed emails...
+						</div>
+					{:else if emailsError}
+						<p class="py-6 text-sm text-muted-foreground">{emailsError}</p>
+					{:else if allowedEmails.length === 0}
+						<div class="rounded-md border border-dashed border-border/60 py-6 text-center">
+							<p class="text-sm text-muted-foreground">No individual emails allow-listed</p>
+						</div>
+					{:else}
+						<div class="overflow-x-auto rounded-md border border-border/60">
+							<table class="w-full text-sm">
+								<thead>
+									<tr class="border-b border-border/60 text-left text-xs text-muted-foreground">
+										<th class="px-3 py-2 font-medium">Email</th>
+										<th class="px-3 py-2 font-medium">Alias</th>
+										<th class="px-3 py-2 font-medium text-right">Actions</th>
+									</tr>
+								</thead>
+								<tbody class="divide-y divide-border/60">
+									{#each allowedEmails as entry (entry.email)}
+										<tr class="text-foreground/80">
+											<td class="px-3 py-2 font-mono text-xs">{entry.email}</td>
+											<td class="px-3 py-2 text-xs text-foreground/70">
+												{entry.alias || '--'}
+											</td>
+											<td class="px-3 py-2 text-right">
+												<Button
+													variant="ghost"
+													size="icon-sm"
+													disabled={emailRemoving === entry.email}
+													onclick={() => removeAllowedEmail(entry.email)}
+													title="Remove email"
+												>
+													{#if emailRemoving === entry.email}
+														<Loader2 class="size-3.5 animate-spin" />
+													{:else}
+														<Trash2
+															class="size-3.5 text-muted-foreground hover:text-destructive"
+														/>
+													{/if}
+												</Button>
+											</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					{/if}
+				</section>
 			</div>
 		</Tabs.Content>
 

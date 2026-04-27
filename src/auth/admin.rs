@@ -34,6 +34,8 @@ pub fn admin_router() -> Router<Arc<AppState>> {
         .route("/shares", get(list_all_shares))
         .route("/allowed-domains", get(list_domains).post(add_domain))
         .route("/allowed-domains/{domain}", delete(remove_domain))
+        .route("/allowed-emails", get(list_emails).post(add_email))
+        .route("/allowed-emails/{email}", delete(remove_email))
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +107,13 @@ struct GrantAdminRequest {
 #[derive(Deserialize)]
 struct AddDomainRequest {
     domain: String,
+}
+
+#[derive(Deserialize)]
+struct AddEmailRequest {
+    email: String,
+    #[serde(default)]
+    alias: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +359,63 @@ async fn remove_domain(
     let store = require_auth_store(&state)?;
 
     store.remove_domain(&domain).await;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /auth/admin/allowed-emails
+async fn list_emails(
+    State(state): State<Arc<AppState>>,
+    user: User,
+) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&user)?;
+    let store = require_auth_store(&state)?;
+    let emails: Vec<serde_json::Value> = store
+        .list_allowed_emails()
+        .await
+        .into_iter()
+        .map(|e| serde_json::json!({ "email": e.email, "alias": e.alias }))
+        .collect();
+    Ok(Json(serde_json::json!({ "emails": emails })))
+}
+
+/// POST /auth/admin/allowed-emails
+async fn add_email(
+    State(state): State<Arc<AppState>>,
+    user: User,
+    Json(body): Json<AddEmailRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_top_admin(&user)?;
+    let store = require_auth_store(&state)?;
+
+    let email = body.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Err(ApiError::new("invalid_email", "email must not be empty").with_status(400));
+    }
+    if !email.contains('@') {
+        return Err(
+            ApiError::new("invalid_email", "email must contain '@'").with_status(400),
+        );
+    }
+    let alias = body.alias.trim().to_string();
+
+    store.add_allowed_email(&email, &alias).await;
+
+    Ok(Json(
+        serde_json::json!({ "ok": true, "email": email, "alias": alias }),
+    ))
+}
+
+/// DELETE /auth/admin/allowed-emails/:email
+async fn remove_email(
+    State(state): State<Arc<AppState>>,
+    user: User,
+    AxumPath(email): AxumPath<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_top_admin(&user)?;
+    let store = require_auth_store(&state)?;
+
+    store.remove_allowed_email(&email).await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use crate::auth::UserRole;
-use crate::db::{ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser};
+use crate::db::{
+    AllowedEmail, ApiKeyWithUser, AuthDb, SessionRow, ShareGrant, StoredApiKey, StoredUser,
+};
 
 pub struct PgAuthDb {
     pool: PgPool,
@@ -416,6 +418,47 @@ impl AuthDb for PgAuthDb {
             .await?;
         rows.iter()
             .map(|r| r.try_get::<String, _>("domain").map_err(Into::into))
+            .collect()
+    }
+
+    async fn add_allowed_email(&self, email: &str, alias: &str) -> anyhow::Result<()> {
+        let email = email.trim().to_lowercase();
+        if email.is_empty() {
+            return Ok(());
+        }
+        let alias = alias.trim();
+        sqlx::query(
+            r#"
+            INSERT INTO allowed_emails (email, alias) VALUES ($1, $2)
+            ON CONFLICT (email) DO UPDATE SET alias = EXCLUDED.alias
+            "#,
+        )
+        .bind(&email)
+        .bind(alias)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_allowed_email(&self, email: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM allowed_emails WHERE email = $1")
+            .bind(email)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_allowed_emails(&self) -> anyhow::Result<Vec<AllowedEmail>> {
+        let rows = sqlx::query("SELECT email, alias FROM allowed_emails ORDER BY email")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(AllowedEmail {
+                    email: r.try_get("email")?,
+                    alias: r.try_get("alias")?,
+                })
+            })
             .collect()
     }
 }

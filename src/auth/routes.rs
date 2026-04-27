@@ -622,12 +622,14 @@ async fn login(
         ApiError::new("invalid_token", format!("token validation failed: {e}")).with_status(401)
     })?;
 
-    // Check domain restriction.
-    if !store.check_domain(&identity.email).await {
+    // Check sign-up allowlist (domain wildcard or individual email).
+    if !store.is_login_allowed(&identity.email).await {
         return Err(
-            ApiError::new("domain_not_allowed", "your email domain is not allowed")
+            ApiError::new("login_not_allowed", "your email is not allowed to sign in")
                 .with_status(403)
-                .with_suggestion("contact an administrator to add your domain"),
+                .with_suggestion(
+                    "contact an administrator to add your domain or email to the allowlist",
+                ),
         );
     }
 
