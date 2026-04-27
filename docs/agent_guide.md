@@ -1,350 +1,298 @@
-# Ray-exomem agent guide
+# Ray-exomem agent guide (MCP)
 
-Ray-exomem persists memory as a tree of folders and exoms.
+Ray-exomem is a persistent, bitemporal knowledge base for agents. This guide
+describes the MCP interface — the canonical way for an agent to read, write,
+and reason over an exom.
 
-```
-Tree:        work/team/project/repo/main              (project main exom)
-             work/team/project/repo/sessions/<id>     (per-session exoms)
-CLI paths:   work::team::project::repo::main          (`::` == `/`)
-UI / API:    http://127.0.0.1:9780/ray-exomem/
-Writes:      pass --actor <name> on mutating commands
-```
+The CLI exists for human / dev workflows and is intentionally out of scope
+here. Agents should not call CLI binaries.
 
 ---
 
-## 1. Model
+## 1. Connecting
 
-There are exactly two node kinds in the tree:
+Ray-exomem speaks MCP over Streamable HTTP at `<base>/mcp`.
 
-- **Folder** — grouping only. Holds child folders and child exoms. No facts or branches.
-- **Exom** — a leaf knowledge base. Holds facts, rules, branches, observations, beliefs, and transactions.
+For the hosted instance:
 
-A directory is an exom if and only if it contains `exom.json`.
+```
+https://mem.trydev.app/mcp
+Authorization: Bearer <api-key>
+```
 
-Rules worth remembering:
+Issue an API key from the user's session (`/auth/api-keys`). Local dev runs at
+`http://127.0.0.1:9780/mcp` with the same auth contract.
 
-- Exoms are leaves. You cannot nest anything inside an existing exom.
-- `init <path>` scaffolds a project by creating `<path>/main` plus `<path>/sessions/`.
-- `exom-new <path>` creates a bare exom with no `main`/`sessions` scaffold.
-- A fresh persistent store auto-creates a bare `main` exom at `~/.ray-exomem/tree/main`.
+The server advertises tools via standard MCP `tools/list`. The current toolset
+is fixed at compile time and listed in §4.
 
 ---
 
-## 2. Paths And Command Modes
+## 2. The model
 
-### Paths
+```
+Tree:        public/work/<team>/<project>/<topic>/main      (project main exom)
+             public/work/.../<project>/sessions/<id>        (per-session exom)
+             {email}/...                                    (private user namespace)
+```
 
-- CLI paths use `::`: `work::team::project::repo::main`
-- Disk, UI, and HTTP paths use `/`: `work/team/project/repo/main`
-- `--exom <path>` must point at a leaf exom path
-- `--branch <name>` is available on branch/coord commands and on some writes such as `assert`, `retract`, `observe`, and `eval`
-- `query` does **not** currently accept `--branch`
+Two node kinds, no others:
 
-### Command modes
+- **Folder** — grouping. Holds child folders and child exoms. No facts.
+- **Exom** — leaf knowledge base. Holds facts, observations, beliefs, branches,
+  rules, transactions. Marked on disk by `exom.json`. **Cannot nest anything
+  inside an exom.**
 
-There are two important execution modes:
+Facts are **bitemporal**:
 
-- **Offline / local tree commands**: `inspect`, `init`, `exom-new`
-  These read or write the local data dir directly.
-- **Daemon-backed commands**: `status`, `query`, `eval`, `assert`, `retract`, `branch`, `session`, `watch`, and most API-backed workflows
-  These require `ray-exomem daemon` or `ray-exomem serve`.
+- `valid_from` / `valid_to` — the wall-clock window the fact is true in the
+  modelled world.
+- `created_at` (tx-time) — when the daemon recorded the fact.
 
-CLI transport is mixed right now:
+A new assert with the same `fact_id` supersedes the previous tuple by closing
+its `valid_to` and creating a new tuple. History is preserved.
 
-- Newer tree/session commands route through the global `--daemon-url`
-- Older commands still use `--addr 127.0.0.1:9780`
+### Permissions
+
+| First path segment | Default access for an authenticated user |
+|--------------------|------------------------------------------|
+| `public/...`       | Read + Write for everyone in the allowed domain. |
+| `{email}/...`      | Owner has full access; everyone else denied unless explicitly shared. |
+| Anything else      | Admin-only. |
+
+Bootstrap fixtures seed under `public/...`; private agent state belongs under
+`{user-email}/...`.
+
+### Fact identity
+
+A fact is a tuple `(fact_id, predicate, value)`. `fact_id` is the addressable
+key that supports replace / retract. Convention used in seeds:
+
+```
+<entity>#<property>           e.g. concept/verb#name
+```
+
+Pick one and stick with it within a topic. If you omit `fact_id` on assert it
+defaults to the predicate name — fine for singletons, dangerous when you have
+multiple instances.
+
+### Typed values
+
+Values are `I64 | Str | Sym`. The MCP `assert_fact` tool accepts:
+
+- a JSON number → stored as `I64` (enables `<` / `>` / `sum` in Datalog).
+- a JSON string → run through `FactValue::auto` (parses to `I64` if it
+  round-trips, else `Str`). So `"75"` lands as `I64(75)`, `"green"` as
+  `Str("green")`.
+- `{"$sym": "active"}` → stored as a `Sym` (interned, identity-compared).
+
+Strings that should remain strings even though they look numeric (`"007"`,
+`"+5"`, `"7.5"`) auto-detect to `Str` because they don't round-trip. If you
+need numeric reasoning, send a JSON number.
 
 ---
 
-## 3. Starting Work
+## 3. Authoring patterns
 
-```bash
-# See the local tree
-ray-exomem inspect
+### Predicates
 
-# Scaffold a project
-ray-exomem init work::team::project::repo
+User predicates are free-form `<namespace>/<name>`. Common namespaces seen in
+seeds:
 
-# That creates:
-#   ~/.ray-exomem/tree/work/team/project/repo/main/
-#   ~/.ray-exomem/tree/work/team/project/repo/sessions/
+- `entity/name`, `entity/type` — universal handles.
+- `concept/summary`, `concept/docs_url` — for definitional knowledge.
+- domain-specific (`feature/...`, `service/...`, `task/status`, etc.).
 
-# Create a bare exom instead of a full project
-ray-exomem exom-new work::scratch
+Reserved namespaces (you query them, you don't assert into them):
+`fact/*`, `tx/*`, `obs/*`, `belief/*`, `branch/*`, `session/*`, `claim/*`,
+`task/*`, `agent/*`. Use `schema` to enumerate the full list for the running
+build.
 
-# Inspect a subtree
-ray-exomem inspect work::team::project::repo --depth 3
+### Writing knowledge
+
+Use `assert_fact`. Each call is one tuple. Patterns:
+
+```jsonc
+// canonical: entity/property
+{ "exom": "public/work/...", "predicate": "entity/name",   "fact_id": "service/auth#name", "value": "auth-gateway" }
+{ "exom": "public/work/...", "predicate": "entity/type",   "fact_id": "service/auth#type", "value": "service" }
+{ "exom": "public/work/...", "predicate": "service/owner", "fact_id": "service/auth#owner", "value": "platform-team" }
+
+// numeric, becomes I64 — supports cmp/agg in Datalog
+{ "exom": "public/work/...", "predicate": "service/sla_p99_ms", "fact_id": "service/auth#sla", "value": 250 }
+
+// symbol — for status enums you'll join on
+{ "exom": "public/work/...", "predicate": "service/status", "fact_id": "service/auth#status", "value": {"$sym": "active"} }
 ```
 
-Projects nest freely. `init work::ath` and `init work::team::project::repo` can coexist.
+What MCP `assert_fact` does **not** currently expose (use the HTTP API for
+these, or wait for the tool surface to grow):
+
+- caller-supplied `valid_from`, `valid_to`, `confidence`, `source/provenance`,
+  `actor`, `branch`. The tool hardcodes `actor=mcp`, `source=mcp`,
+  `confidence=1.0`, and stamps `valid_from = now()`.
+
+When you need to record uncertain or time-bounded knowledge through MCP, encode
+it in your predicates (`belief/...`, `observation/...`) until per-call
+confidence/provenance lands in the tool schema.
+
+### Re-asserting and retracting
+
+Re-asserting with the same `fact_id` supersedes — the engine closes the prior
+tuple's `valid_to` and writes a new tuple. There is no MCP `retract` tool yet;
+to mark a fact gone, write a tombstone value (`"deleted"`, `{"$sym": "void"}`,
+…) under a convention your queries respect, or use the HTTP
+`/api/actions/retract-fact` endpoint.
 
 ---
 
-## 4. Sessions
+## 4. Tool reference
 
-### Session id format
+All tools live under the MCP namespace `ray-exomem` (e.g.
+`mcp__ray-exomem__query` from a Claude client). Argument names match the
+schemas the server exposes.
 
-Session exoms live under:
+### `list_exoms`
 
-```text
-<project>/sessions/<YYYYMMDDTHHMMSSZ>_<multi|single>_agent_<label>
+No args. Returns every exom the authenticated user can see. Cheap; use it as
+the first call in a fresh session.
+
+### `exom_status` `{ exom }`
+
+Returns `{ exom, current_branch, facts, beliefs, transactions }`. Lazy-loads
+the exom into memory on first call.
+
+### `schema` `{ exom }`
+
+Returns the full ontology: `system_attributes`, `coordination_attributes`,
+`builtin_views` (with the rule body of each — handy for query authoring), and
+`user_predicates` (the deduplicated list of free-form predicates currently
+asserted in this exom). This is the right call to discover what's already
+modeled before you assert.
+
+### `explain` `{ exom, predicate? | fact_id? }`
+
+Spot-checking surface — does **not** route through Rayfall, so it works even
+when the engine query path is being upgraded.
+
+- With `predicate`: returns every current fact under that predicate (id,
+  value, confidence).
+- With `fact_id`: returns the tx-history events that touched that fact.
+
+### `fact_history` `{ exom, id }`
+
+Bitemporal history for a single `fact_id`: each tuple's `value`, `confidence`,
+`valid_from`, `valid_to`, `created_at`. Use this to verify timestamps after a
+write, or to read time-travel slices.
+
+### `query` `{ exom, query }`
+
+Run one Rayfall (Datalog) form. The form must be a single `(query <exom-path>
+(find ?vars) (where (<relation> ...)))`. The exom path inside the query must
+match `exom`. Examples:
+
+```scheme
+; All current facts as (id, predicate, value) triples
+(query public/work/ath/lynx/theplatform/concepts/main
+       (find ?fact ?pred ?value)
+       (where (fact-row ?fact ?pred ?value)))
+
+; Names of language concepts
+(query public/work/ath/lynx/theplatform/concepts/main
+       (find ?id ?name)
+       (where (entity/type ?id "language-concept")
+              (entity/name ?id ?name)))
+
+; Numeric filter — works only when value is I64
+(query public/work/ath/.../main
+       (find ?id ?ms)
+       (where (service/sla_p99_ms ?id ?ms) (< ?ms 500)))
 ```
 
-Example:
+Useful relations to remember (full list via `schema.builtin_views`):
 
-```text
-work/team/project/repo/sessions/20260411T143215Z_multi_agent_landing-page
-```
+- `fact-row(?fact ?pred ?value)`
+- `fact-meta(?fact ?confidence ?prov ?valid_from ?tx)`
+- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?actor ?when)`
+- `tx-row(?tx ?id ?actor ?action ?when ?branch)`
+- `observation-row(?obs ?source_type ?content ?tx)`
+- `belief-row(?belief ?claim ?status ?tx)`
+- `branch-row(?branch ?id ?name ?archived ?created_tx)`
+- typed EDBs: `facts_i64`, `facts_str`, `facts_sym` — `(facts_i64 ?e ?a ?v)` etc.
 
-The session id directory is immutable. Use the display label, not the directory name, when you want a human-facing rename.
+### `eval` `{ source, exom? }`
 
-### Create a session
+Runs raw Rayfall (any form, not just `(query ...)`). Power tool. Bypasses the
+canonical-query lowering, so it doesn't auto-inject rules — `query` is what
+you want for ordinary reads.
 
-```bash
-ray-exomem session new work::team::project::repo \
-  --multi \
-  --name landing-page \
-  --actor orchestrator \
-  --agents agent_a,agent_b
-```
+### `assert_fact` `{ exom, predicate, value, fact_id? }`
 
-This creates a session exom under `.../sessions/...` and pre-creates:
+Returns `{ ok, tx_id, fact_id, predicate }`. See §3 for value typing and the
+parameters MCP currently does not expose.
 
-- branch `main` for the orchestrator
-- branch `agent_a`
-- branch `agent_b`
+### `list_branches` `{ exom }`
 
-Single-agent session:
+Returns each branch with `branch_id`, `name`, `parent_branch_id`,
+`is_current`. Branches are light copy-on-write namespaces; most agent work
+stays on `main`.
 
-```bash
-ray-exomem session new work::team::project::repo \
-  --single \
-  --name exploration \
-  --actor solo
-```
+### `create_branch` `{ exom, branch_name }`
 
-### Session lifecycle
+Creates a new branch off the current one. Note: the MCP write tools do not
+let you target a specific branch — they always write to the exom's current
+branch. To do branch-isolated work today, drive the daemon via HTTP.
 
-```bash
-# Change the display label
-ray-exomem session rename \
-  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
-  --label new-label \
-  --actor orchestrator
+### `start_session` `{ project_path, session_type?, label? }`
 
-# Close the session (future writes rejected)
-ray-exomem session close \
-  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
-  --actor orchestrator
+**Currently a stub.** Returns `{ status: "stub" }`. Don't depend on this.
+Sessions are created via HTTP `POST /api/actions/session-new` for now.
 
-# Archive the session (hidden from default inspect/tree views)
-ray-exomem session archive \
-  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
-  --actor orchestrator
-```
+### `export` `{ exom, format? }`
 
-There is no dedicated reopen/unarchive command today. Reversal means retracting
-`session/closed_at` or `session/archived_at` through the normal mutation path.
-
-### Join a pre-allocated session branch
-
-```bash
-ray-exomem session join \
-  work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
-  --actor agent_a
-```
-
-That claims the branch named `agent_a`. The orchestrator already owns `main`
-after `session new` and should not call `session join`.
-
-### Practical caveat
-
-Prefer listing all participant branches up front with `session new --agents ...`.
-The mid-session `session add-agent` flow is still settling, so avoid depending
-on it in automation until it is cleaned up.
+`format = "json"` (default) or `"jsonl"`. Dumps current facts. Useful for
+audits, not for incremental sync.
 
 ---
 
-## 5. Branching And Ownership
+## 5. Discoverability flow for a fresh agent
 
-Branch rules:
-
-1. Session creation pre-allocates branches.
-2. The orchestrator gets `main`.
-3. Non-orchestrator participants get branches named after their actor ids.
-4. First writer claims an unclaimed branch (TOFU).
-5. Later writes from a different actor are rejected with `branch_owned`.
-6. Closed sessions reject all writes.
-
-Useful commands:
-
-```bash
-# List branches on an exom
-ray-exomem branch list --exom work::team::project::repo::main
-
-# Diff a branch against main
-ray-exomem branch diff agent_a \
-  --exom work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
-  --base main
-```
-
-Important limitation:
-
-- `ray-exomem query` does not currently support `--branch`
-- If you need branch-specific reads from the CLI, you must either:
-  switch the current branch explicitly first, or
-  use the HTTP API directly for branch-scoped facts
-
-The API supports branch-scoped fact reads via:
-
-```text
-GET /ray-exomem/api/facts?exom=<path>&branch=<branch>
-```
+1. `list_exoms` → which exom am I working in?
+2. `exom_status { exom }` → does it have data already? what branch am I on?
+3. `schema { exom }` → what predicates and views are modeled? what do I have to
+   join against?
+4. Read with `query` (or `explain` for quick lookups).
+5. Write with `assert_fact`. Use stable `fact_id`s so future agents (and
+   future-you) can supersede in place.
+6. Verify with `fact_history { exom, id }`.
 
 ---
 
-## 6. Reading And Writing
+## 6. Errors you'll see
 
-### Simple reads
-
-```bash
-# Default logical fact listing
-ray-exomem query \
-  --exom work::team::project::repo::main \
-  --json
-
-# Explicit Rayfall query using the derived fact-row view
-ray-exomem query \
-  --exom work::team::project::repo::main \
-  --request '(query work/team/project/repo/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
-  --json
-
-# Fact history and explanation
-ray-exomem history project/status --exom work::team::project::repo::main --json
-ray-exomem why project/status --exom work::team::project::repo::main --json
-```
-
-### Writes
-
-```bash
-# Assert a fact
-ray-exomem assert project/status active \
-  --exom work::team::project::repo::main \
-  --actor orchestrator \
-  --source kickoff-notes
-
-# Assert on a branch
-ray-exomem assert task/status done \
-  --exom work::team::project::repo::sessions::20260411T143215Z_multi_agent_landing-page \
-  --branch agent_a \
-  --actor agent_a
-
-# Retract by stable fact id
-ray-exomem retract project/status \
-  --exom work::team::project::repo::main \
-  --actor orchestrator
-```
-
-### Eval and file input
-
-`eval` is not the same as `query` here:
-
-- `eval` uses a literal source argument or `--file <path>`
-- `query` and `expand-query` accept `@file` or `-`
-
-Multi-line commands are preferred for readability. Use shell continuations for
-long CLI calls, and use `@file`, `--file`, or stdin for non-trivial Rayfall.
-
-Examples:
-
-```bash
-# Eval from a file
-ray-exomem eval \
-  --exom work::team::project::repo::main \
-  --actor orchestrator \
-  --file queries/seed.ray
-
-# Eval from stdin
-cat queries/seed.ray | ray-exomem eval \
-  --exom work::team::project::repo::main \
-  --actor orchestrator \
-  --file -
-
-# Query from a file
-ray-exomem query \
-  --exom work::team::project::repo::main \
-  --request @queries/list-facts.ray \
-  --json
-```
-
----
-
-## 7. Common Errors
-
-| Code | Cause | Fix |
+| Code / message | Cause | Fix |
 |---|---|---|
-| `bad_path` | Invalid path syntax or reserved segment usage | Fix the path; for exoms use `ray-exomem exom-new <path>` |
-| `cannot_nest_inside_exom` | Path crosses an existing exom | Choose a path that does not traverse an exom leaf |
-| `already_exists_different` | A folder/exom already exists at that location with the wrong kind | Pick a new path or remove the conflicting node |
-| `no_such_exom` | `--exom` does not point to an existing exom | `ray-exomem init <project>` or `ray-exomem exom-new <path>` |
-| `actor_required` | Missing actor on a write or session join | Pass `--actor <name>` |
-| `branch_not_in_exom` | Branch was never allocated in that exom | Pre-allocate it during `session new --agents ...` |
-| `branch_owned` | Another actor already claimed the branch | Write to your own branch |
-| `session_closed` | Session was closed | Retract `session/closed_at` to reopen |
-| `not_orchestrator` | Non-orchestrator tried to create a session branch directly | Only the session initiator may allocate branches |
-| `session_id_immutable` | Tried to rename a session directory | Use `session rename` / `session/label` instead |
-| `namespace_root_immutable` | Tried to rename a user namespace root in authenticated mode | Rename a descendant instead |
+| `unknown exom '<path>'` | Path not loaded / doesn't exist | Check `list_exoms`; the path is case-sensitive and uses `/`. |
+| `query missing database name` | Sent `(query (find ...) ...)` with no exom path inside the form | Add the exom path: `(query <exom> (find ...) (where ...))`. |
+| `rayforce2 err type` / `err arity` | Malformed Rayfall (wrong arity for a relation, mismatched parens) | Check `schema.builtin_views` for the right arity; `query` requires `(find ...) (where ...)`. |
+| `rayforce2 err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce2 upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
+| `missing required parameter: <name>` | MCP arg validation | Add the missing field. |
+| `invalid 'value'` | `value` JSON couldn't deserialize as a `FactValue` | Send a JSON number, string, or `{"$sym": "..."}`. Anything else (arrays, nested objects without `$sym`) is rejected. |
+| `branch_owned` (writes via HTTP) | Another actor already claimed the branch under TOFU | Write to your own branch, or via MCP, which is locked to the exom's current branch. |
 
 ---
 
-## 8. Cheat Sheet
+## 7. Out-of-scope today (file an issue or use HTTP)
 
-```bash
-# --- Daemon ---
-ray-exomem daemon
-ray-exomem stop
+- Asserting with `confidence`, `provenance`, explicit `valid_from`/`valid_to`,
+  or a non-`mcp` actor → use `POST /api/actions/assert-fact`.
+- Retract → use `POST /api/actions/retract-fact`.
+- Branch-targeted writes → use `POST /api/actions/eval` or
+  `assert-fact` with the `branch` field.
+- Real session lifecycle (create / close / archive / join) → use the
+  `/api/actions/session-*` endpoints.
+- Observations and beliefs as first-class entities → only readable through
+  Datalog views currently.
 
-# --- Tree ---
-ray-exomem inspect
-ray-exomem init work::team::project::repo
-ray-exomem exom-new work::scratch
-
-# --- Sessions ---
-ray-exomem session new work::team::project::repo \
-  --multi \
-  --name sprint-42 \
-  --actor orchestrator \
-  --agents agent_a,agent_b
-
-ray-exomem session join \
-  work::team::project::repo::sessions::20260411T143215Z_multi_agent_sprint-42 \
-  --actor agent_a
-
-ray-exomem session rename \
-  work::team::project::repo::sessions::20260411T143215Z_multi_agent_sprint-42 \
-  --label sprint-42b \
-  --actor orchestrator
-
-# --- Reads ---
-ray-exomem query --exom work::team::project::repo::main --json
-ray-exomem history project/status --exom work::team::project::repo::main --json
-ray-exomem why project/status --exom work::team::project::repo::main --json
-
-# --- Writes ---
-ray-exomem assert project/status active \
-  --exom work::team::project::repo::main \
-  --actor orchestrator
-
-ray-exomem retract project/status \
-  --exom work::team::project::repo::main \
-  --actor orchestrator
-
-# --- Branches ---
-ray-exomem branch list --exom work::team::project::repo::main
-ray-exomem branch diff agent_a \
-  --exom work::team::project::repo::sessions::20260411T143215Z_multi_agent_sprint-42 \
-  --base main
-
-# --- Reference ---
-ray-exomem guide
-```
+When the MCP tool surface grows to cover any of these, this guide is the
+right place to document it.

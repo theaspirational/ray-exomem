@@ -87,7 +87,8 @@ pub async fn mcp_handler(
         "initialize" => handle_initialize(),
         "notifications/initialized" => Ok(serde_json::json!({})),
         "tools/list" => Ok(handle_tools_list()),
-        "resources/list" => Ok(serde_json::json!({ "resources": [] })),
+        "resources/list" => Ok(handle_resources_list()),
+        "resources/read" => handle_resources_read(req.params),
         "prompts/list" => Ok(serde_json::json!({ "prompts": [] })),
         "tools/call" => handle_tool_call(&state, req.params).await,
         _ => Err(JsonRpcError {
@@ -146,6 +147,50 @@ fn handle_initialize() -> Result<serde_json::Value, JsonRpcError> {
             "name": "ray-exomem",
             "version": crate::frontend_version()
         }
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// resources/list + resources/read
+// ---------------------------------------------------------------------------
+
+const AGENT_GUIDE_URI: &str = "exomem://docs/agent_guide";
+const AGENT_GUIDE_BODY: &str = include_str!("../docs/agent_guide.md");
+
+fn handle_resources_list() -> serde_json::Value {
+    serde_json::json!({
+        "resources": [{
+            "uri": AGENT_GUIDE_URI,
+            "name": "Ray-exomem agent guide",
+            "description": "How to use the ray-exomem MCP — tree model, typed values, tool reference, common errors.",
+            "mimeType": "text/markdown"
+        }]
+    })
+}
+
+fn handle_resources_read(
+    params: Option<serde_json::Value>,
+) -> Result<serde_json::Value, JsonRpcError> {
+    let uri = params
+        .as_ref()
+        .and_then(|p| p.get("uri"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "missing 'uri' parameter".into(),
+        })?;
+    if uri != AGENT_GUIDE_URI {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: format!("unknown resource: {uri}"),
+        });
+    }
+    Ok(serde_json::json!({
+        "contents": [{
+            "uri": AGENT_GUIDE_URI,
+            "mimeType": "text/markdown",
+            "text": AGENT_GUIDE_BODY,
+        }]
     }))
 }
 
