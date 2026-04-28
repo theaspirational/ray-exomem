@@ -595,6 +595,21 @@ async fn login(
     let store = require_auth_store(&state)?;
     let provider = require_auth_provider(&state)?;
 
+    if let Some(ref name) = body.provider {
+        if name != provider.provider_name() {
+            return Err(
+                ApiError::new(
+                    "provider_mismatch",
+                    format!(
+                        "login body requested provider {name:?} but server is configured for {}",
+                        provider.provider_name()
+                    ),
+                )
+                .with_status(400),
+            );
+        }
+    }
+
     // Validate the token.
     let identity = provider.validate_token(&body.id_token).await.map_err(|e| {
         ApiError::new("invalid_token", format!("token validation failed: {e}")).with_status(401)

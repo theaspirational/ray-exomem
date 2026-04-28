@@ -55,12 +55,36 @@ jobs:
             target/release/$BINARY_NAME \
             ${SERVER_USER}@${SERVER_HOST}:/home/${SERVER_USER}/apps/ray-exomem/bin/${BINARY_NAME}.new
 
-          # Atomic swap + restart
+          # Atomic swap + restart, then wait up to 60s for the unit to settle.
+          # Schema-change deploys can stretch boot time because load_tree_exoms_into
+          # iterates every exom and logs WARNINGs on column-shape mismatch before
+          # the daemon reaches `active`. A flat sleep+is-active races that.
           ssh -i ~/.ssh/deploy_key ${SERVER_USER}@${SERVER_HOST} '
+            set -e
             cd ~/apps/ray-exomem/bin
             mv ray-exomem.new ray-exomem
             chmod +x ray-exomem
             systemctl --user restart ray-exomem.service
-            sleep 2
-            systemctl --user is-active ray-exomem.service
+
+            for i in $(seq 1 60); do
+              state=$(systemctl --user is-active ray-exomem.service || true)
+              case "$state" in
+                active)
+                  echo "ray-exomem.service active after ${i}s"
+                  exit 0
+                  ;;
+                failed)
+                  echo "ray-exomem.service failed:"
+                  systemctl --user status ray-exomem.service --no-pager || true
+                  journalctl --user -u ray-exomem.service -n 80 --no-pager || true
+                  exit 1
+                  ;;
+              esac
+              sleep 1
+            done
+
+            echo "timeout: ray-exomem.service still ${state} after 60s"
+            systemctl --user status ray-exomem.service --no-pager || true
+            journalctl --user -u ray-exomem.service -n 80 --no-pager || true
+            exit 1
           '
