@@ -138,10 +138,27 @@ now — that's the bitemporal split. Backfilling `valid_from` to a historical
 date is supported and recommended when seeding from older sources.
 
 All write tools (`assert_fact`, `retract_fact`, `observe`, `believe`,
-`revoke_belief`) accept an optional `branch` argument. The exom's current
-branch is restored after the write, so other callers see the cursor
-unchanged. Branch ownership is still TOFU-enforced — writing to a branch
-claimed by a different actor returns `branch_owned`.
+`revoke_belief`, `create_branch`, `session_close`) accept an optional
+`branch` argument. The exom's current branch is restored after the write,
+so other callers see the cursor unchanged. Branch ownership is still
+TOFU-enforced — writing to a branch claimed by a different actor returns
+`branch_owned`.
+
+### Attribution: who-and-with-what
+
+Every write records three identity layers on the underlying tx:
+
+- `actor` — defaults to the authenticated user's email. Override (e.g.
+  `actor: "audit-bot"`) when the writer is a sub-system, not the user.
+- `user_email` — always the authenticated user. Load-bearing for
+  permission checks; not caller-controlled.
+- `agent` — optional, write-only. Pass the LLM identity (e.g.
+  `agent: "claude-opus-4-7"`) and it lands in the tx's `model` field. The
+  UI uses this to render `via <agent>` next to the actor.
+
+Recommended pattern for an MCP client: pass `agent` on every write, leave
+`actor` to default to the user's email. That gives the cleanest "by
+alice@lynx via claude-opus-4-7" attribution.
 
 ### Re-asserting and retracting
 
@@ -197,7 +214,15 @@ write, or to read time-travel slices.
 
 Run one Rayfall (Datalog) form. The form must be a single `(query <exom-path>
 (find ?vars) (where (<relation> ...)))`. The exom path inside the query must
-match `exom`. Examples:
+match `exom`.
+
+**Predicate names are values, not relations.** Storage is EAV: a fact like
+`entity/name = "verb"` lives as two triples (`?fact 'fact/predicate
+"entity/name"`, `?fact 'fact/value "verb"`). The string `"entity/name"` is
+*data*, not a registered relation. Querying `(entity/name ?id ?v)` directly
+is a category error — the engine has no such relation and returns an
+"unknown relation" error suggesting `fact-row`. Project through one of the
+builtin views instead.
 
 ```scheme
 ; All current facts as (id, predicate, value) triples
@@ -205,16 +230,21 @@ match `exom`. Examples:
        (find ?fact ?pred ?value)
        (where (fact-row ?fact ?pred ?value)))
 
-; Names of language concepts
+; Filter by predicate — pin ?pred to a string literal
+(query public/work/ath/lynx/theplatform/concepts/main
+       (find ?id ?value)
+       (where (fact-row ?id "entity/name" ?value)))
+
+; Names of language concepts (two predicates, joined on ?id)
 (query public/work/ath/lynx/theplatform/concepts/main
        (find ?id ?name)
-       (where (entity/type ?id "language-concept")
-              (entity/name ?id ?name)))
+       (where (fact-row ?id "entity/type" "language-concept")
+              (fact-row ?id "entity/name" ?name)))
 
-; Numeric filter — works only when value is I64
-(query public/work/ath/.../main
+; Numeric filter — values typed as I64 land in the typed EDB
+(query public/work/ath/lynx/theplatform/concepts/main
        (find ?id ?ms)
-       (where (service/sla_p99_ms ?id ?ms) (< ?ms 500)))
+       (where (facts_i64 ?id "service/sla_p99_ms" ?ms) (< ?ms 500)))
 ```
 
 Useful relations to remember (full list via `schema.builtin_views`):

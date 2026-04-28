@@ -55,6 +55,42 @@
       "provenance": "example:bootstrap",
       "valid_from": "2024-01-01T09:00:00Z",
       "tx_time": "2024-01-01T09:00:00Z"
+    },
+    {
+      "fact_id": "guide/datalog-compared#type",
+      "predicate": "entity/type",
+      "value": "guide",
+      "confidence": 1.0,
+      "provenance": "example:bootstrap",
+      "valid_from": "2026-04-28T00:00:00Z",
+      "tx_time": "2026-04-28T00:00:00Z"
+    },
+    {
+      "fact_id": "guide/datalog-compared#name",
+      "predicate": "entity/name",
+      "value": "Datalog: ray-exomem vs Datomic",
+      "confidence": 1.0,
+      "provenance": "example:bootstrap",
+      "valid_from": "2026-04-28T00:00:00Z",
+      "tx_time": "2026-04-28T00:00:00Z"
+    },
+    {
+      "fact_id": "guide/datalog-compared#summary",
+      "predicate": "concept/summary",
+      "value": "Side-by-side comparison of ray-exomem's Datalog with Datomic. Covers EAV storage, bitemporal time, the predicate-as-value gotcha, rules, aggregation, branches, and negation — with real-life query examples in both dialects.",
+      "confidence": 0.95,
+      "provenance": "example:bootstrap",
+      "valid_from": "2026-04-28T00:00:00Z",
+      "tx_time": "2026-04-28T00:00:00Z"
+    },
+    {
+      "fact_id": "guide/datalog-compared#docs",
+      "predicate": "concept/docs_url",
+      "value": "https://github.com/theaspirational/ray-exomem/blob/main/docs/datalog_compared.md",
+      "confidence": 1.0,
+      "provenance": "example:bootstrap",
+      "valid_from": "2026-04-28T00:00:00Z",
+      "tx_time": "2026-04-28T00:00:00Z"
     }
   ],
   "observations": [

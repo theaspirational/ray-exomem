@@ -79,7 +79,7 @@ impl JsonRpcResponse {
 
 pub async fn mcp_handler(
     State(state): State<Arc<AppState>>,
-    _user: User,
+    user: User,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     let id = req.id.clone();
@@ -90,7 +90,7 @@ pub async fn mcp_handler(
         "resources/list" => Ok(handle_resources_list()),
         "resources/read" => handle_resources_read(req.params),
         "prompts/list" => Ok(serde_json::json!({ "prompts": [] })),
-        "tools/call" => handle_tool_call(&state, req.params).await,
+        "tools/call" => handle_tool_call(&state, &user, req.params).await,
         _ => Err(JsonRpcError {
             code: -32601,
             message: format!("method not found: {}", req.method),
@@ -239,7 +239,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "source": { "type": "string", "description": "Provenance tag (where this fact came from). Defaults to 'mcp'." },
                     "valid_from": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact starts being true. Defaults to now." },
                     "valid_to": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact stops being true. Open-ended if omitted." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to the authenticated user's email, else 'mcp'." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to the authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional but recommended — it's how the UI shows `via <agent>` on writes." },
                     "branch": { "type": "string", "description": "Target branch for the write. Defaults to the exom's current branch (usually `main`). The exom is restored to its prior branch after the write." }
                 },
                 "required": ["exom", "predicate", "value"]
@@ -253,7 +254,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name." },
                     "fact_id": { "type": "string", "description": "Fact id to retract." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email, else 'mcp'." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "fact_id"]
@@ -274,7 +276,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Free-form tags to aid retrieval." },
                     "valid_from": { "type": "string", "description": "ISO-8601; when the observed thing started being true. Defaults to now." },
                     "valid_to": { "type": "string", "description": "ISO-8601; when it stopped. Open-ended if omitted." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to 'mcp'." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "obs_id", "source_type", "content"]
@@ -294,7 +297,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "supports": { "type": "array", "items": { "type": "string" }, "description": "Fact ids or observation ids that support the claim." },
                     "valid_from": { "type": "string", "description": "ISO-8601; when the claim starts being true. Defaults to now." },
                     "valid_to": { "type": "string", "description": "ISO-8601; when it stops. Open-ended if omitted." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to 'mcp'." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "belief_id", "claim_text"]
@@ -308,7 +312,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name." },
                     "belief_id": { "type": "string", "description": "Belief id to revoke. Must currently be active on the target branch." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to 'mcp'." },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "belief_id"]
@@ -389,7 +394,9 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name" },
-                    "branch_name": { "type": "string", "description": "New branch name" }
+                    "branch_name": { "type": "string", "description": "New branch name" },
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx. Optional." }
                 },
                 "required": ["exom", "branch_name"]
             }
@@ -428,7 +435,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "session_path": { "type": "string", "description": "Full path to the session exom." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email, else 'mcp'." }
+                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
+                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." }
                 },
                 "required": ["session_path"]
             }
@@ -465,6 +473,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
 
 async fn handle_tool_call(
     state: &AppState,
+    user: &User,
     params: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, JsonRpcError> {
     let params = params.ok_or_else(|| JsonRpcError {
@@ -488,21 +497,21 @@ async fn handle_tool_call(
     let content = match tool_name {
         "guide" => Ok(AGENT_GUIDE_BODY.to_string()),
         "query" => tool_query(state, &arguments),
-        "assert_fact" => tool_assert_fact(state, &arguments).await,
-        "retract_fact" => tool_retract_fact(state, &arguments).await,
-        "observe" => tool_observe(state, &arguments).await,
-        "believe" => tool_believe(state, &arguments).await,
-        "revoke_belief" => tool_revoke_belief(state, &arguments).await,
+        "assert_fact" => tool_assert_fact(state, user, &arguments).await,
+        "retract_fact" => tool_retract_fact(state, user, &arguments).await,
+        "observe" => tool_observe(state, user, &arguments).await,
+        "believe" => tool_believe(state, user, &arguments).await,
+        "revoke_belief" => tool_revoke_belief(state, user, &arguments).await,
         "list_exoms" => tool_list_exoms(state),
         "exom_status" => tool_exom_status(state, &arguments),
         "eval" => tool_eval(state, &arguments),
         "explain" => tool_explain(state, &arguments),
         "fact_history" => tool_fact_history(state, &arguments),
         "list_branches" => tool_list_branches(state, &arguments),
-        "create_branch" => tool_create_branch(state, &arguments).await,
-        "session_new" => tool_session_new(state, &arguments),
-        "session_join" => tool_session_join(state, &arguments),
-        "session_close" => tool_session_close(state, &arguments).await,
+        "create_branch" => tool_create_branch(state, user, &arguments).await,
+        "session_new" => tool_session_new(state, user, &arguments),
+        "session_join" => tool_session_join(state, user, &arguments),
+        "session_close" => tool_session_close(state, user, &arguments).await,
         "schema" => tool_schema(state, &arguments),
         "export" => tool_export(state, &arguments),
         _ => Err(JsonRpcError {
@@ -534,6 +543,32 @@ fn exom_slug(args: &serde_json::Value) -> String {
     match raw.parse::<crate::path::TreePath>() {
         Ok(tp) => tp.to_slash_string(),
         Err(_) => raw.to_string(),
+    }
+}
+
+/// Build a write-side `MutationContext` for an authenticated MCP call.
+///
+/// Attribution rules:
+/// * `actor` defaults to the authenticated user's email; an explicit
+///   `actor` arg can override (useful for bots, audit-trail labels, etc.).
+/// * `user_email` is always set to the authenticated user — it's the
+///   load-bearing identity for permission checks and UI display.
+/// * `model` is the agent identity the *MCP client* declared (e.g.
+///   `"claude-opus-4-7"`). The server can't infer it; the calling client
+///   passes it as an `agent` arg. Optional.
+fn mcp_mutation_ctx(user: &User, args: &serde_json::Value) -> crate::context::MutationContext {
+    let actor = get_str(args, "actor")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| user.email.clone());
+    let model = get_str(args, "agent")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    crate::context::MutationContext {
+        actor,
+        session: None,
+        model,
+        user_email: Some(user.email.clone()),
     }
 }
 
@@ -609,11 +644,17 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
     let exom_slash = exom_slug(args);
 
     let exoms = state.exoms.lock().unwrap();
-    let expanded = crate::server::expand_query(&exoms, &state.engine, query_str, None, "mcp/query")
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: e.to_string(),
-        })?;
+    let expanded = crate::server::expand_query_validated(
+        &exoms,
+        &state.engine,
+        query_str,
+        None,
+        "mcp/query",
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e.to_string(),
+    })?;
 
     if let Err(e) = crate::server::bind_typed_facts_for_exom(
         &state.engine,
@@ -670,6 +711,7 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
 
 async fn tool_assert_fact(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
@@ -699,15 +741,9 @@ async fn tool_assert_fact(
     let source = get_str(args, "source").unwrap_or("mcp").to_string();
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
-    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
     let branch = get_str(args, "branch").map(str::to_string);
 
-    let ctx = crate::context::MutationContext {
-        actor,
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         with_optional_branch(es, branch.as_deref(), |es| {
@@ -745,19 +781,14 @@ async fn tool_assert_fact(
 
 async fn tool_retract_fact(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let fact_id = require_str(args, "fact_id")?.to_string();
-    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
     let branch = get_str(args, "branch").map(str::to_string);
 
-    let ctx = crate::context::MutationContext {
-        actor,
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         with_optional_branch(es, branch.as_deref(), |es| {
@@ -782,6 +813,7 @@ async fn tool_retract_fact(
 
 async fn tool_observe(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
@@ -801,15 +833,9 @@ async fn tool_observe(
         .unwrap_or_default();
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
-    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
     let branch = get_str(args, "branch").map(str::to_string);
 
-    let ctx = crate::context::MutationContext {
-        actor,
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         with_optional_branch(es, branch.as_deref(), |es| {
@@ -844,6 +870,7 @@ async fn tool_observe(
 
 async fn tool_believe(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
@@ -862,15 +889,9 @@ async fn tool_believe(
         .unwrap_or_default();
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
-    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
     let branch = get_str(args, "branch").map(str::to_string);
 
-    let ctx = crate::context::MutationContext {
-        actor,
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         with_optional_branch(es, branch.as_deref(), |es| {
@@ -904,19 +925,14 @@ async fn tool_believe(
 
 async fn tool_revoke_belief(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let belief_id = require_str(args, "belief_id")?.to_string();
-    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
     let branch = get_str(args, "branch").map(str::to_string);
 
-    let ctx = crate::context::MutationContext {
-        actor,
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         with_optional_branch(es, branch.as_deref(), |es| {
@@ -1061,17 +1077,13 @@ fn tool_list_branches(state: &AppState, args: &serde_json::Value) -> Result<Stri
 
 async fn tool_create_branch(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let branch_name = require_str(args, "branch_name")?;
 
-    let ctx = crate::context::MutationContext {
-        actor: "mcp".into(),
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.create_branch(branch_name, branch_name, &ctx)
@@ -1092,7 +1104,7 @@ async fn tool_create_branch(
     }
 }
 
-fn tool_session_new(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
+fn tool_session_new(state: &AppState, user: &User, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let project_path_str = require_str(args, "project_path")?;
     let project_path: crate::path::TreePath =
         project_path_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
@@ -1110,7 +1122,11 @@ fn tool_session_new(state: &AppState, args: &serde_json::Value) -> Result<String
         }
     };
     let label = require_str(args, "label")?;
-    let actor = get_str(args, "actor").unwrap_or("mcp");
+    let actor_owned = get_str(args, "actor")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| user.email.clone());
+    let actor = actor_owned.as_str();
     let agents: Vec<String> = args
         .get("agents")
         .and_then(|v| v.as_array())
@@ -1151,14 +1167,18 @@ fn tool_session_new(state: &AppState, args: &serde_json::Value) -> Result<String
     }
 }
 
-fn tool_session_join(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
+fn tool_session_join(state: &AppState, user: &User, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let session_path_str = require_str(args, "session_path")?;
     let session_path: crate::path::TreePath =
         session_path_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
             code: -32602,
             message: format!("invalid session_path: {e}"),
         })?;
-    let actor = get_str(args, "actor").unwrap_or("mcp");
+    let actor_owned = get_str(args, "actor")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| user.email.clone());
+    let actor = actor_owned.as_str();
 
     let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -1186,6 +1206,7 @@ fn tool_session_join(state: &AppState, args: &serde_json::Value) -> Result<Strin
 
 async fn tool_session_close(
     state: &AppState,
+    user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let session_path_str = require_str(args, "session_path")?;
@@ -1195,14 +1216,8 @@ async fn tool_session_close(
             message: format!("invalid session_path: {e}"),
         })?;
     let exom_slash = session_path.to_slash_string();
-    let actor = get_str(args, "actor").unwrap_or("mcp").to_string();
 
-    let ctx = crate::context::MutationContext {
-        actor,
-        session: None,
-        model: None,
-        user_email: None,
-    };
+    let ctx = mcp_mutation_ctx(user, args);
 
     let now = crate::brain::now_iso();
     let closed_at = now.clone();

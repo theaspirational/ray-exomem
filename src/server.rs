@@ -1909,6 +1909,28 @@ pub fn expand_query(
     expand_canonical_query(exoms, engine, source.to_string(), &query)
 }
 
+/// Like `expand_query`, but also runs `validate_query_body` so the caller
+/// gets `unknown relation 'X' (did you mean 'Y'?)` instead of a silent
+/// empty table when the query references a relation the engine hasn't been
+/// taught about. Use this for callers (MCP, ad-hoc tools) that want the
+/// same friendly diagnostics the HTTP `/api/query` route gives.
+pub fn expand_query_validated(
+    exoms: &HashMap<String, ExomState>,
+    engine: &crate::backend::RayforceEngine,
+    source: &str,
+    default_exom: Option<&str>,
+    surface: &str,
+) -> anyhow::Result<ExpandedQuery> {
+    let query = lower_query_request(source, default_exom, surface)?;
+    let expanded = expand_canonical_query(exoms, engine, source.to_string(), &query)?;
+    let es = exoms
+        .get(&expanded.exom_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", expanded.exom_name))?;
+    let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
+    validate_query_body(&query, &known)?;
+    Ok(expanded)
+}
+
 /// Body-position operators that aren't relation references. Logical
 /// compounds descend into their children; comparison and `between` are
 /// terminal (their args are values, not predicate names).
