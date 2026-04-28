@@ -146,6 +146,7 @@ mod tests {
             display_name: "Test".into(),
             provider: "mock".into(),
             session_id: None,
+            api_key_label: None,
             role,
         }
     }

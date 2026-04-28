@@ -19,7 +19,12 @@ pub struct User {
     pub email: String,
     pub display_name: String,
     pub provider: String,
+    /// Cookie-auth session id. Mutually exclusive with `api_key_label`.
     pub session_id: Option<String>,
+    /// Bearer-auth API key label. Mutually exclusive with `session_id`.
+    /// Surfaced as the default `agent` for writes when no explicit `agent`
+    /// arg/header is provided.
+    pub api_key_label: Option<String>,
     pub role: UserRole,
 }
 
@@ -99,6 +104,7 @@ mod tests {
             display_name: "Alice".into(),
             provider: "mock".into(),
             session_id: None,
+            api_key_label: None,
             role: UserRole::Regular,
         };
         assert!(!regular.is_admin());

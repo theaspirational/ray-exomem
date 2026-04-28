@@ -111,6 +111,15 @@ fn main() {
         run("npm", &["install"], &ui_dir, "UI deps");
     }
 
+    // Wipe ui/build/ so SvelteKit's adapter-static doesn't accumulate stale
+    // content-hashed chunks from prior builds. The adapter copies from
+    // .svelte-kit/output into ui/build/ but never prunes orphans.
+    let ui_build = ui_dir.join("build");
+    if ui_build.exists() {
+        fs::remove_dir_all(&ui_build)
+            .unwrap_or_else(|e| panic!("failed to clean ui/build/: {e}"));
+    }
+
     eprintln!("[build.rs] npm run build in ui/");
     run("npm", &["run", "build"], &ui_dir, "UI build");
     assert!(

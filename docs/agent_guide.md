@@ -131,43 +131,51 @@ Optional fields on `assert_fact`:
 - `source` — provenance tag (default `"mcp"`)
 - `valid_from` / `valid_to` — ISO-8601 wall-clock bounds (default
   `valid_from = now()`, open-ended `valid_to`)
-- `actor` — attribution (default authenticated user's email, else `"mcp"`)
+- `agent`, `model` — three-axis attribution (see below)
 
 `created_at` (the daemon's tx-time) is always set independently to wall-clock
 now — that's the bitemporal split. Backfilling `valid_from` to a historical
 date is supported and recommended when seeding from older sources.
 
 All write tools (`assert_fact`, `retract_fact`, `observe`, `believe`,
-`revoke_belief`, `create_branch`, `session_close`) accept an optional
-`branch` argument. The exom's current branch is restored after the write,
-so other callers see the cursor unchanged. Branch ownership is still
-TOFU-enforced — writing to a branch claimed by a different actor returns
-`branch_owned`.
+`revoke_belief`, `create_branch`, `session_close`, `session_new`,
+`session_join`) accept an optional `branch` argument. The exom's current
+branch is restored after the write, so other callers see the cursor
+unchanged. Branch ownership is TOFU-enforced — writing to a branch claimed
+by a different user returns `branch_owned`.
 
-### Attribution: who-and-with-what
+### Attribution: three independent axes
 
-Every write records three identity layers on the underlying tx:
+Every write records `(user_email, agent, model)` on the underlying tx:
 
-- `actor` — defaults to the authenticated user's email. Override (e.g.
-  `actor: "audit-bot"`) when the writer is a sub-system, not the user.
-- `user_email` — always the authenticated user. Load-bearing for
-  permission checks; not caller-controlled.
-- `agent` — optional, write-only. Pass the LLM identity (e.g.
-  `agent: "claude-opus-4-7"`) and it lands in the tx's `model` field. The
-  UI uses this to render `via <agent>` next to the actor.
+- `user_email` — DB-bound identity from auth. Always the authenticated user;
+  load-bearing for permission checks; not caller-controlled.
+- `agent` — the tool/integration making the call (e.g. `cursor`,
+  `claude-code-cli`). Falls back to the API key's label for Bearer auth;
+  cookie-auth UI writes leave it `None`. An explicit `agent` arg always
+  wins over the key label.
+- `model` — the LLM identity (e.g. `claude-opus-4-7`). Explicit only — no
+  fallback.
 
-Recommended pattern for an MCP client: pass `agent` on every write, leave
-`actor` to default to the user's email. That gives the cleanest "by
-alice@lynx via claude-opus-4-7" attribution.
+UI render: `by {user_email} via {agent} using {model}`, with `via`/`using`
+elided when those fields are `None`. System-internal writes (no user) render
+as `by system`.
+
+**Multi-subagent contract (important).** When a single MCP client (e.g. one
+Claude Code CLI process) hosts many subagents (`general-purpose`,
+`code-reviewer`, `ui-sketcher`, etc.) authenticated by one API key, the
+client must inject `agent: "<subagent-name>"` on every tool call to
+disambiguate. Without it, all subagent writes appear under the API key's
+label. The daemon cannot infer this — it's a contract on the orchestrator.
 
 ### Re-asserting and retracting
 
 Re-asserting with the same `fact_id` supersedes — the engine closes the prior
 tuple's `valid_to` and writes a new tuple, preserving history.
 
-`retract_fact { exom, fact_id, actor? }` closes the active tuple's
-`valid_to = now()` and marks the fact revoked. `fact_history` still returns
-the closed tuple, so retract is non-destructive.
+`retract_fact { exom, fact_id, agent?, model?, branch? }` closes the active
+tuple's `valid_to = now()` and marks the fact revoked. `fact_history` still
+returns the closed tuple, so retract is non-destructive.
 
 ---
 
@@ -251,8 +259,8 @@ Useful relations to remember (full list via `schema.builtin_views`):
 
 - `fact-row(?fact ?pred ?value)`
 - `fact-meta(?fact ?confidence ?prov ?valid_from ?tx)`
-- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?when)` — join with `tx-row` if you also need `?actor` or `?branch`. Capped at 8 columns by the engine's group/distinct op.
-- `tx-row(?tx ?id ?actor ?action ?when ?branch)`
+- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?when)` — join with `tx-row` if you also need `?agent` or `?branch`. Capped at 8 columns by the engine's group/distinct op.
+- `tx-row(?tx ?id ?agent ?action ?when ?branch)`
 - `observation-row(?obs ?source_type ?content ?tx)`
 - `belief-row(?belief ?claim ?status ?tx)`
 - `branch-row(?branch ?id ?name ?archived ?created_tx)`
@@ -264,18 +272,18 @@ Runs raw Rayfall (any form, not just `(query ...)`). Power tool. Bypasses the
 canonical-query lowering, so it doesn't auto-inject rules — `query` is what
 you want for ordinary reads.
 
-### `assert_fact` `{ exom, predicate, value, fact_id?, confidence?, source?, valid_from?, valid_to?, actor? }`
+### `assert_fact` `{ exom, predicate, value, fact_id?, confidence?, source?, valid_from?, valid_to?, agent?, model?, branch? }`
 
 Returns `{ ok, tx_id, fact_id, predicate, confidence, source }`. See §3 for
 value typing and how the optional fields map onto the bitemporal model.
 
-### `retract_fact` `{ exom, fact_id, actor? }`
+### `retract_fact` `{ exom, fact_id, agent?, model?, branch? }`
 
 Closes the active tuple's `valid_to` to now and marks the fact revoked.
 History is preserved — `fact_history` still returns the closed tuple.
 Returns `{ ok, tx_id, fact_id }`.
 
-### `observe` `{ exom, obs_id, source_type, source_ref?, content, confidence?, tags?, valid_from?, valid_to?, actor? }`
+### `observe` `{ exom, obs_id, source_type, source_ref?, content, confidence?, tags?, valid_from?, valid_to?, agent?, model?, branch? }`
 
 Record an observation — raw evidence captured from a source. Cheaper than a
 fact: an observation doesn't claim truth, it records what was seen. Use it
@@ -290,7 +298,7 @@ quote/summary without committing to the claim being true.
 Returns `{ ok, tx_id, obs_id }`. Read back with the `observation-row` builtin
 view via `query`.
 
-### `believe` `{ exom, belief_id, claim_text, confidence?, rationale?, supports?, valid_from?, valid_to?, actor? }`
+### `believe` `{ exom, belief_id, claim_text, confidence?, rationale?, supports?, valid_from?, valid_to?, agent?, model?, branch? }`
 
 Record (or revise) a belief — a claim the agent considers true, with rationale
 and confidence. Re-believing the same `claim_text` supersedes the prior active
@@ -302,7 +310,7 @@ belief (the prior one transitions to status `superseded`, history preserved).
 
 Returns `{ ok, tx_id, belief_id }`. Read back with `belief-row` via `query`.
 
-### `revoke_belief` `{ exom, belief_id, actor? }`
+### `revoke_belief` `{ exom, belief_id, agent?, model?, branch? }`
 
 Withdraw an active belief without supplying a replacement claim. Sets status
 to `revoked`, closes `valid_to` to now, drops the belief from `current_beliefs`
@@ -324,26 +332,31 @@ Creates a new branch off the current one. All write tools (`assert_fact`,
 `branch` argument that targets the write at a specific branch without
 disturbing the exom's current-branch cursor for other callers — the switch
 is held only for the duration of the write under an exclusive exom lock.
-Branch ownership is still enforced by TOFU: writes to a branch claimed by a
-different actor return `branch_owned`.
+Branch ownership is enforced by TOFU: writes to a branch claimed by a
+different user return `branch_owned`.
 
-### `session_new` `{ project_path, session_type, label, actor?, agents? }`
+### `session_new` `{ project_path, session_type, label, agents?, agent?, model? }`
 
 Create a new session exom under `<project>/sessions/<id>`. `session_type` is
 `"single"` (only `main` branch) or `"multi"` (one branch per agent plus
-`main` for the orchestrator). The orchestrator (`actor`) is added to the
-agent list automatically and gets `main`. Returns `{ ok, session_path }`.
+`main` for the orchestrator). The authenticated user is the orchestrator
+and gets `main`; the supplied `agent`/`model` are recorded on the `main`
+branch as `claimed_by_agent` / `claimed_by_model`. Sub-agent labels in
+`agents` get pre-allocated unclaimed branches (claimed later by
+`session_join`). Returns `{ ok, session_path }`.
 
 `label` must be non-empty and contain no `/`, `::`, or whitespace.
 
-### `session_join` `{ session_path, actor? }`
+### `session_join` `{ session_path, agent_label, agent?, model? }`
 
-Claim a pre-allocated branch under TOFU. Returns the branch claimed.
-First-writer-wins: a second actor calling `session_join` with the same
-actor id will succeed (idempotent), but a different actor trying to write
-to that branch later gets `branch_owned`.
+Claim a pre-allocated sub-agent branch under TOFU on behalf of the
+authenticated user. `agent_label` is the branch name (must match one of
+the labels passed to `session_new`). The supplied `agent`/`model` are
+recorded on the branch's audit fields. Returns the branch claimed.
+Idempotent for the same `user_email`; different users colliding on the
+same branch get `branch_owned`.
 
-### `session_close` `{ session_path, actor? }`
+### `session_close` `{ session_path, agent?, model? }`
 
 Asserts `session/closed_at = now`. Subsequent writes to the session exom
 fail with `session_closed`. Reverse by retracting `session/closed_at`.
@@ -378,7 +391,7 @@ audits, not for incremental sync.
 | `rayforce2 err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce2 upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
 | `missing required parameter: <name>` | MCP arg validation | Add the missing field. |
 | `invalid 'value'` | `value` JSON couldn't deserialize as a `FactValue` | Send a JSON number, string, or `{"$sym": "..."}`. Anything else (arrays, nested objects without `$sym`) is rejected. |
-| `branch_owned` | Another actor already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). |
+| `branch_owned` | Another user already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). |
 | `session_closed` | The session exom has `session/closed_at` set; writes are rejected | Retract `session/closed_at` to reopen, or pick a different session. |
 
 ---

@@ -1,34 +1,37 @@
-/// Attribution context for every mutation (fact, rule, retraction).
-/// Flows from CLI args / HTTP headers → Brain Tx metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Three-axis attribution carried by every mutation (fact, rule, retraction).
+///
+/// - `user_email`: DB-bound identity from auth. `None` only for system-internal
+///   mutations (e.g. builtin rule registration).
+/// - `agent`: the tool/integration making the call (e.g. `"cursor"`,
+///   `"claude-code-cli"`). For Bearer auth, defaults to the API key's label;
+///   an explicit `agent` arg / `x-agent` header always wins. Cookie-auth (UI)
+///   writes are `None`.
+/// - `model`: the LLM the agent is using (e.g. `"claude-opus-4-7"`). Explicit
+///   only — no fallback.
+/// - `session`: cookie session id when applicable; carried through for tx
+///   audit, not for attribution display.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MutationContext {
-    pub actor: String,
-    pub session: Option<String>,
-    pub model: Option<String>,
-    /// Authenticated user email when the mutation runs in an identified session.
     pub user_email: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub session: Option<String>,
 }
 
 impl MutationContext {
-    /// Build from an authenticated user. Actor is always user's email.
-    /// Client-supplied actor values are ignored on authenticated requests.
-    pub fn from_user(user: &crate::auth::User, model: Option<String>) -> Self {
+    /// Build from an authenticated `User`. `agent` falls back to the user's
+    /// `api_key_label` (Bearer auth) when not explicitly supplied; cookie-auth
+    /// users have no label so `agent` stays `None` unless explicitly set.
+    pub fn from_user(
+        user: &crate::auth::User,
+        agent: Option<String>,
+        model: Option<String>,
+    ) -> Self {
         Self {
-            actor: user.email.clone(),
-            session: user.session_id.clone(),
-            model,
             user_email: Some(user.email.clone()),
-        }
-    }
-}
-
-impl Default for MutationContext {
-    fn default() -> Self {
-        Self {
-            actor: "unknown".into(),
-            session: None,
-            model: None,
-            user_email: None,
+            agent: agent.or_else(|| user.api_key_label.clone()),
+            model,
+            session: user.session_id.clone(),
         }
     }
 }
@@ -38,19 +41,48 @@ mod tests {
     use super::*;
     use crate::auth::{User, UserRole};
 
-    #[test]
-    fn from_user_uses_email_as_actor() {
-        let user = User {
-            email: "alice@co.com".into(),
-            display_name: "Alice".into(),
+    fn user(email: &str, session: Option<&str>, label: Option<&str>) -> User {
+        User {
+            email: email.into(),
+            display_name: email.into(),
             provider: "google".into(),
-            session_id: Some("sess-1".into()),
+            session_id: session.map(str::to_string),
+            api_key_label: label.map(str::to_string),
             role: UserRole::Regular,
-        };
-        let ctx = MutationContext::from_user(&user, Some("claude-4".into()));
-        assert_eq!(ctx.actor, "alice@co.com");
-        assert_eq!(ctx.session, Some("sess-1".into()));
-        assert_eq!(ctx.model, Some("claude-4".into()));
-        assert_eq!(ctx.user_email, Some("alice@co.com".into()));
+        }
+    }
+
+    #[test]
+    fn from_user_cookie_no_agent_fallback() {
+        let u = user("alice@co.com", Some("sess-1"), None);
+        let ctx = MutationContext::from_user(&u, None, None);
+        assert_eq!(ctx.user_email.as_deref(), Some("alice@co.com"));
+        assert_eq!(ctx.agent, None);
+        assert_eq!(ctx.model, None);
+        assert_eq!(ctx.session.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn from_user_bearer_falls_back_to_label() {
+        let u = user("alice@co.com", None, Some("my-mcp"));
+        let ctx = MutationContext::from_user(&u, None, Some("claude-opus-4-7".into()));
+        assert_eq!(ctx.agent.as_deref(), Some("my-mcp"));
+        assert_eq!(ctx.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn from_user_explicit_agent_overrides_label() {
+        let u = user("alice@co.com", None, Some("my-mcp"));
+        let ctx = MutationContext::from_user(&u, Some("cursor".into()), None);
+        assert_eq!(ctx.agent.as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn default_is_all_none() {
+        let ctx = MutationContext::default();
+        assert_eq!(ctx.user_email, None);
+        assert_eq!(ctx.agent, None);
+        assert_eq!(ctx.model, None);
+        assert_eq!(ctx.session, None);
     }
 }

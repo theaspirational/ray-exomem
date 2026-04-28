@@ -239,8 +239,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "source": { "type": "string", "description": "Provenance tag (where this fact came from). Defaults to 'mcp'." },
                     "valid_from": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact starts being true. Defaults to now." },
                     "valid_to": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact stops being true. Open-ended if omitted." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to the authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional but recommended — it's how the UI shows `via <agent>` on writes." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call (e.g. `cursor`, `claude-code-cli`). Falls back to the API key's label. Recorded on the tx and rendered as `via <agent>`." },
+                    "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only — no fallback. Rendered as `using <model>`." },
                     "branch": { "type": "string", "description": "Target branch for the write. Defaults to the exom's current branch (usually `main`). The exom is restored to its prior branch after the write." }
                 },
                 "required": ["exom", "predicate", "value"]
@@ -254,8 +254,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name." },
                     "fact_id": { "type": "string", "description": "Fact id to retract." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "fact_id"]
@@ -276,8 +276,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Free-form tags to aid retrieval." },
                     "valid_from": { "type": "string", "description": "ISO-8601; when the observed thing started being true. Defaults to now." },
                     "valid_to": { "type": "string", "description": "ISO-8601; when it stopped. Open-ended if omitted." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "obs_id", "source_type", "content"]
@@ -297,8 +297,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "supports": { "type": "array", "items": { "type": "string" }, "description": "Fact ids or observation ids that support the claim." },
                     "valid_from": { "type": "string", "description": "ISO-8601; when the claim starts being true. Defaults to now." },
                     "valid_to": { "type": "string", "description": "ISO-8601; when it stops. Open-ended if omitted." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "belief_id", "claim_text"]
@@ -312,8 +312,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name." },
                     "belief_id": { "type": "string", "description": "Belief id to revoke. Must currently be active on the target branch." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
                     "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
                 },
                 "required": ["exom", "belief_id"]
@@ -395,37 +395,40 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name" },
                     "branch_name": { "type": "string", "description": "New branch name" },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx. Optional." }
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity. Explicit only." }
                 },
                 "required": ["exom", "branch_name"]
             }
         }),
         serde_json::json!({
             "name": "session_new",
-            "description": "Create a new session exom under <project>/sessions/<id>. The orchestrator (`actor`) is implicitly added to `agents` and gets the `main` branch; remaining agents each get a pre-allocated branch named after their actor id. Returns the new session exom path.",
+            "description": "Create a new session exom under <project>/sessions/<id>. The orchestrator (the authenticated user) gets the `main` branch with its claim recorded under `claimed_by_user_email` + `claimed_by_agent` + `claimed_by_model`; remaining agents each get a pre-allocated unclaimed branch named after their `agent_label`. Returns the new session exom path.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project_path": { "type": "string", "description": "Project path (must already be initialised). Slash or :: form." },
                     "session_type": { "type": "string", "enum": ["single", "multi"], "description": "`multi` pre-allocates one branch per agent (and `main` for the orchestrator). `single` only creates `main`." },
                     "label": { "type": "string", "description": "Display label. Must be non-empty and free of '/', '::', and whitespace." },
-                    "actor": { "type": "string", "description": "Orchestrator. Defaults to authenticated user's email." },
-                    "agents": { "type": "array", "items": { "type": "string" }, "description": "Other agent ids to pre-allocate branches for. Ignored for `single` sessions." }
+                    "agents": { "type": "array", "items": { "type": "string" }, "description": "Sub-agent labels. Each gets a pre-allocated branch (named after the label) which they later claim via `session_join`. Ignored for `single` sessions." },
+                    "agent": { "type": "string", "description": "Tool/integration the orchestrator is using. Falls back to the API key's label. Recorded on the `main` branch." },
+                    "model": { "type": "string", "description": "LLM the orchestrator is running. Explicit only." }
                 },
                 "required": ["project_path", "session_type", "label"]
             }
         }),
         serde_json::json!({
             "name": "session_join",
-            "description": "Claim a pre-allocated branch in a multi-agent session under TOFU (first writer wins). Returns the branch name claimed.",
+            "description": "Claim a pre-allocated sub-agent branch in a multi-agent session under TOFU (first writer wins). Branch is claimed by the authenticated user with the supplied `agent`/`model` recorded for audit. Returns the branch name claimed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session_path": { "type": "string", "description": "Full path to the session exom, e.g. `public/work/x/y/sessions/<id>`." },
-                    "actor": { "type": "string", "description": "Agent claiming a branch. Defaults to authenticated user's email." }
+                    "agent_label": { "type": "string", "description": "Sub-agent branch label within the session to claim (must match one of the labels passed to `session_new`)." },
+                    "agent": { "type": "string", "description": "Tool/integration the claimer is using. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM the claimer is running. Explicit only." }
                 },
-                "required": ["session_path"]
+                "required": ["session_path", "agent_label"]
             }
         }),
         serde_json::json!({
@@ -435,8 +438,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "session_path": { "type": "string", "description": "Full path to the session exom." },
-                    "actor": { "type": "string", "description": "Actor attribution. Defaults to authenticated user's email." },
-                    "agent": { "type": "string", "description": "Agent / model identity recorded on the tx (e.g. `claude-opus-4-7`). Optional." }
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." }
                 },
                 "required": ["session_path"]
             }
@@ -548,27 +551,25 @@ fn exom_slug(args: &serde_json::Value) -> String {
 
 /// Build a write-side `MutationContext` for an authenticated MCP call.
 ///
-/// Attribution rules:
-/// * `actor` defaults to the authenticated user's email; an explicit
-///   `actor` arg can override (useful for bots, audit-trail labels, etc.).
-/// * `user_email` is always set to the authenticated user — it's the
-///   load-bearing identity for permission checks and UI display.
-/// * `model` is the agent identity the *MCP client* declared (e.g.
-///   `"claude-opus-4-7"`). The server can't infer it; the calling client
-///   passes it as an `agent` arg. Optional.
+/// Three-axis attribution:
+/// * `user_email` — authenticated user (always set; load-bearing for
+///   permission checks and UI display).
+/// * `agent` — explicit `agent` arg wins, otherwise falls back to the
+///   authenticated user's `api_key_label` (Bearer auth) or `None` (cookie).
+/// * `model` — explicit `model` arg only; no fallback.
 fn mcp_mutation_ctx(user: &User, args: &serde_json::Value) -> crate::context::MutationContext {
-    let actor = get_str(args, "actor")
+    let agent = get_str(args, "agent")
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| user.email.clone());
-    let model = get_str(args, "agent")
+        .or_else(|| user.api_key_label.clone());
+    let model = get_str(args, "model")
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     crate::context::MutationContext {
-        actor,
-        session: None,
-        model,
         user_email: Some(user.email.clone()),
+        agent,
+        model,
+        session: None,
     }
 }
 
@@ -1122,11 +1123,6 @@ fn tool_session_new(state: &AppState, user: &User, args: &serde_json::Value) -> 
         }
     };
     let label = require_str(args, "label")?;
-    let actor_owned = get_str(args, "actor")
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| user.email.clone());
-    let actor = actor_owned.as_str();
     let agents: Vec<String> = args
         .get("agents")
         .and_then(|v| v.as_array())
@@ -1136,6 +1132,14 @@ fn tool_session_new(state: &AppState, user: &User, args: &serde_json::Value) -> 
                 .collect()
         })
         .unwrap_or_default();
+
+    let agent = get_str(args, "agent")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| user.api_key_label.clone());
+    let model = get_str(args, "model")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -1147,7 +1151,15 @@ fn tool_session_new(state: &AppState, user: &User, args: &serde_json::Value) -> 
     })?;
 
     match crate::brain::session_new(
-        tree_root, sym_path, &project_path, session_type, label, actor, &agents,
+        tree_root,
+        sym_path,
+        &project_path,
+        session_type,
+        label,
+        user.email.as_str(),
+        agent.as_deref(),
+        model.as_deref(),
+        &agents,
     ) {
         Ok(session_path) => {
             let _ = state.sse_tx.send((
@@ -1174,11 +1186,15 @@ fn tool_session_join(state: &AppState, user: &User, args: &serde_json::Value) ->
             code: -32602,
             message: format!("invalid session_path: {e}"),
         })?;
-    let actor_owned = get_str(args, "actor")
+    let agent_label = require_str(args, "agent_label")?;
+
+    let agent = get_str(args, "agent")
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| user.email.clone());
-    let actor = actor_owned.as_str();
+        .or_else(|| user.api_key_label.clone());
+    let model = get_str(args, "model")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -1189,11 +1205,19 @@ fn tool_session_join(state: &AppState, user: &User, args: &serde_json::Value) ->
         message: "daemon has no sym_path configured".into(),
     })?;
 
-    match crate::brain::session_join(tree_root, sym_path, &session_path, actor) {
+    match crate::brain::session_join(
+        tree_root,
+        sym_path,
+        &session_path,
+        agent_label,
+        user.email.as_str(),
+        agent.as_deref(),
+        model.as_deref(),
+    ) {
         Ok(branch) => Ok(serde_json::json!({
             "ok": true,
             "session_path": session_path.to_slash_string(),
-            "actor": actor,
+            "user_email": user.email,
             "branch": branch,
         })
         .to_string()),

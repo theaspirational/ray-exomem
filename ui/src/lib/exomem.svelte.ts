@@ -1,5 +1,4 @@
 import { browser } from '$app/environment';
-import { auth } from '$lib/auth.svelte';
 import { getExomemBaseUrl } from '$lib/exomem-base';
 import { toCli } from '$lib/path.svelte';
 
@@ -144,32 +143,22 @@ async function readJson<T>(path: string, init?: RequestInit): Promise<T> {
 	return res.json();
 }
 
-/** Explicit local override for mutation attribution used by the prompt dialog. */
-export function getRayExomemActor(): string {
-	if (!browser) return '';
-	return localStorage.getItem('ray-exomem-actor')?.trim() ?? '';
-}
-
-function getMutationActor(): string {
-	return getRayExomemActor() || auth.user?.email?.trim() || '';
-}
-
-function actorHeaders(): Record<string, string> {
-	const actor = getMutationActor();
-	if (!actor) {
-		throw new Error('Actor identity is not set. Choose an actor name in the prompt dialog.');
-	}
-	return {
-		'X-Actor': actor,
-		'X-Session': 'exomem-web',
-		'X-Model': 'svelte'
-	};
+/**
+ * Three-axis attribution headers for write requests.
+ *
+ * Cookie-authenticated UI writes default to `agent = None` and `model = None`;
+ * the server records the user's email from auth and renders `by alice@lynx`.
+ * Future hooks (e.g. "this UI session is running model X") can populate
+ * `x-agent` / `x-model` here.
+ */
+function attributionHeaders(): Record<string, string> {
+	return {};
 }
 
 function mutationHeaders(): Record<string, string> {
 	return {
 		'Content-Type': 'application/json',
-		...actorHeaders()
+		...attributionHeaders()
 	};
 }
 
@@ -201,7 +190,7 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 function evalHeaders(): Record<string, string> {
 	return {
 		'Content-Type': 'text/plain',
-		...actorHeaders()
+		...attributionHeaders()
 	};
 }
 
@@ -381,7 +370,6 @@ export function apiAssertSessionLabel(sessionPathSlash: string, label: string): 
 	return postAction('api/actions/assert-fact', {
 		exom: toCli(sessionPathSlash),
 		branch: 'main',
-		actor: getMutationActor(),
 		predicate: 'session/label',
 		value: label.trim()
 	});
@@ -448,18 +436,12 @@ export function apiSessionNew(body: {
 	project_path: string;
 	type: 'multi' | 'single';
 	label: string;
-	actor?: string;
 	agents?: string[];
 }): Promise<{ ok: boolean; session_path: string }> {
-	const actor = body.actor ?? getMutationActor();
-	if (!actor) {
-		return Promise.reject(new Error('Actor identity is not set. Choose an actor name in the prompt dialog.'));
-	}
 	return postAction('api/actions/session-new', {
 		project_path: body.project_path,
 		type: body.type,
 		label: body.label,
-		actor,
 		agents: body.agents ?? []
 	});
 }
@@ -1086,7 +1068,7 @@ async function deleteRequest(path: string): Promise<void> {
 	try {
 		res = await fetch(endpoint(path), {
 			method: 'DELETE',
-			headers: actorHeaders(),
+			headers: attributionHeaders(),
 			signal,
 			credentials: 'include'
 		});

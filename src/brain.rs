@@ -93,9 +93,9 @@ impl std::fmt::Display for BeliefStatus {
 pub struct Tx {
     pub tx_id: TxId,
     pub tx_time: String,
-    #[serde(default)]
     pub user_email: Option<String>,
-    pub actor: String,
+    pub agent: Option<String>,
+    pub model: Option<String>,
     pub action: TxAction,
     pub refs: Vec<EntityId>,
     pub note: String,
@@ -136,10 +136,13 @@ pub struct Branch {
     pub parent_branch_id: Option<String>,
     pub created_tx_id: TxId,
     pub archived: bool,
-    /// TOFU ownership: the first actor to write to this branch claims it.
-    /// `None` means unclaimed (any actor may claim it on first write).
-    #[serde(default)]
-    pub claimed_by: Option<String>,
+    /// TOFU ownership: email of the user who first claimed this branch.
+    /// `None` means unclaimed (any user may claim it on first write).
+    pub claimed_by_user_email: Option<String>,
+    /// Tool/integration the claimer used (`agent` arg or API-key label).
+    pub claimed_by_agent: Option<String>,
+    /// LLM the claimer was running at claim time.
+    pub claimed_by_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +216,9 @@ impl Brain {
             parent_branch_id: None,
             created_tx_id: 0,
             archived: false,
-            claimed_by: None,
+            claimed_by_user_email: None,
+            claimed_by_agent: None,
+            claimed_by_model: None,
         };
         Brain {
             observations: Vec::new(),
@@ -289,7 +294,9 @@ impl Brain {
                         parent_branch_id: None,
                         created_tx_id: 0,
                         archived: false,
-                        claimed_by: None,
+                        claimed_by_user_email: None,
+            claimed_by_agent: None,
+            claimed_by_model: None,
                     },
                 );
             }
@@ -331,7 +338,9 @@ impl Brain {
                     parent_branch_id: None,
                     created_tx_id: 0,
                     archived: false,
-                    claimed_by: None,
+                    claimed_by_user_email: None,
+            claimed_by_agent: None,
+            claimed_by_model: None,
                 },
             );
         }
@@ -389,7 +398,8 @@ impl Brain {
             tx_id,
             tx_time: tx_time.clone(),
             user_email: ctx.user_email.clone(),
-            actor: ctx.actor.clone(),
+            agent: ctx.agent.clone(),
+            model: ctx.model.clone(),
             action,
             refs,
             note: note.into(),
@@ -671,7 +681,9 @@ impl Brain {
             parent_branch_id: Some(self.current_branch.clone()),
             created_tx_id: tx_id,
             archived: false,
-            claimed_by: None,
+            claimed_by_user_email: None,
+            claimed_by_agent: None,
+            claimed_by_model: None,
         };
         self.branches.push(branch);
         self.rebuild_splay(DirtyTable::Branch)?;
@@ -1529,18 +1541,24 @@ pub fn create_branch(
         parent_branch_id: parent,
         created_tx_id: 0,
         archived: false,
-        claimed_by: None,
+        claimed_by_user_email: None,
+        claimed_by_agent: None,
+        claimed_by_model: None,
     });
     crate::storage::save_branches_to_disk(&disk, sym_path, &branches)
         .map_err(|e| crate::scaffold::ScaffoldError::Io(io_err(e)))?;
     Ok(())
 }
 
-/// TOFU-claim a branch for `actor`.
+/// TOFU-claim a branch for `user_email`, recording `agent` and `model` for
+/// audit display.
 ///
-/// - If `claimed_by` is None → set it to `actor` and persist.
-/// - If `claimed_by == actor` → no-op (idempotent).
-/// - If `claimed_by == someone_else` → `Err(WriteError::BranchOwned(owner))`.
+/// - If `claimed_by_user_email` is None → set it to `user_email` (with the
+///   supplied `agent`/`model`) and persist.
+/// - If `claimed_by_user_email == user_email` → no-op (idempotent); existing
+///   agent/model are preserved.
+/// - If `claimed_by_user_email == someone_else` →
+///   `Err(WriteError::BranchOwned(owner))`.
 /// - If the branch doesn't exist → `Err(WriteError::BranchMissing(name))`.
 ///
 /// "main" is considered to always exist even when the branch table is absent.
@@ -1549,7 +1567,9 @@ pub fn claim_branch(
     sym_path: &Path,
     exom_path: &TreePath,
     branch_name: &str,
-    actor: &str,
+    user_email: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
 ) -> Result<(), WriteError> {
     let disk = exom_path.to_disk_path(tree_root);
     let mut branches = crate::storage::load_branches_from_disk(&disk, sym_path)
@@ -1563,7 +1583,9 @@ pub fn claim_branch(
             parent_branch_id: None,
             created_tx_id: 0,
             archived: false,
-            claimed_by: None,
+            claimed_by_user_email: None,
+            claimed_by_agent: None,
+            claimed_by_model: None,
         });
     }
 
@@ -1574,11 +1596,15 @@ pub fn claim_branch(
         return Err(WriteError::BranchMissing(branch_name.to_string()));
     };
 
-    match &b.claimed_by {
-        Some(owner) if owner != actor => return Err(WriteError::BranchOwned(owner.clone())),
+    match &b.claimed_by_user_email {
+        Some(owner) if owner != user_email => {
+            return Err(WriteError::BranchOwned(owner.clone()))
+        }
         Some(_) => {}
         None => {
-            b.claimed_by = Some(actor.to_string());
+            b.claimed_by_user_email = Some(user_email.to_string());
+            b.claimed_by_agent = agent.map(str::to_string);
+            b.claimed_by_model = model.map(str::to_string);
             crate::storage::save_branches_to_disk(&disk, sym_path, &branches)
                 .map_err(|e| WriteError::Io(io_err(e)))?;
         }
@@ -1605,17 +1631,19 @@ pub enum WriteError {
 
 /// Gate every mutation path. Call this before touching any splay table.
 ///
-/// Enforces: exom exists, session is not closed, actor is non-empty,
-/// branch exists in the exom, and the actor either owns the branch or
-/// is the first writer (TOFU claim).
+/// Enforces: exom exists, session is not closed, `user_email` is non-empty,
+/// branch exists in the exom, and the user either owns the branch or is the
+/// first writer (TOFU claim, recording `agent` and `model` as audit metadata).
 pub fn precheck_write(
     tree_root: &Path,
     sym_path: &Path,
     exom_path: &TreePath,
     branch: &str,
-    actor: &str,
+    user_email: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
 ) -> Result<(), WriteError> {
-    if actor.is_empty() {
+    if user_email.is_empty() {
         return Err(WriteError::ActorRequired);
     }
     let disk = exom_path.to_disk_path(tree_root);
@@ -1646,7 +1674,7 @@ pub fn precheck_write(
         return Err(WriteError::BranchMissing(branch.to_string()));
     }
 
-    claim_branch(tree_root, sym_path, exom_path, branch, actor)
+    claim_branch(tree_root, sym_path, exom_path, branch, user_email, agent, model)
 }
 
 /// Mirror writes to `session/label`, `session/closed_at`, or
@@ -1677,13 +1705,22 @@ pub fn mirror_session_meta_to_disk(
 
 /// Create a session exom under `<project_path>/sessions/<id>` and write its
 /// `exom.json`. No splay-table writes — metadata only.
+///
+/// `user_email` is the orchestrator's identity (recorded as `initiated_by` and
+/// captured in the `main` branch's `claimed_by_user_email`). `agent` and
+/// `model` are recorded on the `main` branch's audit fields.
+///
+/// `agents` are sub-agent labels (used as branch names); they receive branch
+/// records but are claimed lazily via `session_join`.
 pub fn session_new(
     tree_root: &Path,
     sym_path: &Path,
     project_path: &TreePath,
     session_type: SessionType,
     label: &str,
-    actor: &str,
+    user_email: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
     agents: &[String],
 ) -> Result<TreePath, crate::scaffold::ScaffoldError> {
     if label.is_empty() || label.contains('/') || label.contains("::") || label.contains(' ') {
@@ -1694,9 +1731,12 @@ pub fn session_new(
             ),
         ));
     }
-    if actor.is_empty() {
+    if user_email.is_empty() {
         return Err(crate::scaffold::ScaffoldError::Path(
-            crate::path::PathError::InvalidSegment(actor.to_string(), "actor required"),
+            crate::path::PathError::InvalidSegment(
+                user_email.to_string(),
+                "user_email required",
+            ),
         ));
     }
     // Project must exist and have sessions/ folder.
@@ -1717,7 +1757,7 @@ pub fn session_new(
     std::fs::create_dir_all(&disk)?;
 
     // Build agents list: orchestrator must always be first; dedupe.
-    let mut agents_final: Vec<String> = vec![actor.to_string()];
+    let mut agents_final: Vec<String> = vec![user_email.to_string()];
     for a in agents {
         if !agents_final.contains(a) {
             agents_final.push(a.clone());
@@ -1727,7 +1767,7 @@ pub fn session_new(
     let meta = ExomMeta::new_session(SessionMeta {
         session_type,
         label: label.to_string(),
-        initiated_by: actor.to_string(),
+        initiated_by: user_email.to_string(),
         agents: agents_final.clone(),
         closed_at: None,
         archived_at: None,
@@ -1736,40 +1776,54 @@ pub fn session_new(
 
     // Pre-create branch records for every participant.
     // Orchestrator gets "main"; each other agent gets a branch named after themselves.
-    for agent_name in &agents_final {
-        let branch_name = if agent_name == actor {
+    for participant in &agents_final {
+        let branch_name = if participant == user_email {
             "main"
         } else {
-            agent_name.as_str()
+            participant.as_str()
         };
         create_branch(tree_root, sym_path, &session_path, branch_name)?;
     }
-    // TOFU-claim "main" immediately for the orchestrator.
-    claim_branch(tree_root, sym_path, &session_path, "main", actor).map_err(|e| {
+    // TOFU-claim "main" immediately for the orchestrator, recording agent/model.
+    claim_branch(
+        tree_root,
+        sym_path,
+        &session_path,
+        "main",
+        user_email,
+        agent,
+        model,
+    )
+    .map_err(|e| {
         crate::scaffold::ScaffoldError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
     })?;
 
     Ok(session_path)
 }
 
-/// Join an existing session as `actor`.
+/// Join an existing session as the sub-agent named `branch_name`, on behalf
+/// of `user_email`.
 ///
-/// Looks up the branch named `actor` in the session exom (set up by `session_new`).
-/// Performs TOFU ownership claim: if unclaimed → claims it; if already owned by
-/// `actor` → idempotent; if owned by someone else → `WriteError::BranchOwned`.
-/// Returns the branch name (== `actor`).
+/// Looks up the branch named `branch_name` in the session exom (set up by
+/// `session_new`). Performs TOFU ownership claim: if unclaimed → claims it
+/// (recording `agent` and `model`); if already owned by `user_email` →
+/// idempotent; if owned by someone else → `WriteError::BranchOwned`.
+/// Returns `branch_name`.
 ///
 /// The orchestrator's branch is "main", so orchestrators should not call this;
 /// they already own "main" after `session_new`. Sub-agents call this to claim
 /// their named branch.
 ///
-/// Access-control note: the HTTP handler must verify that `actor` is a member of
-/// the session's `agents` list before calling this function.
+/// Access-control note: the HTTP handler must verify that `branch_name` is a
+/// member of the session's `agents` list before calling this function.
 pub fn session_join(
     tree_root: &Path,
     sym_path: &Path,
     session_path: &TreePath,
-    actor: &str,
+    branch_name: &str,
+    user_email: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, WriteError> {
     // Verify the session exom exists.
     let disk = session_path.to_disk_path(tree_root);
@@ -1789,10 +1843,9 @@ pub fn session_join(
         }
     }
 
-    // The branch for this actor must exist (created by session_new).
+    // The branch must exist (created by session_new).
     let branches = crate::storage::load_branches_from_disk(&disk, sym_path)
         .map_err(|e| WriteError::Io(io_err(e)))?;
-    let branch_name = actor;
     let exists = branch_name == "main"
         || branches
             .iter()
@@ -1801,7 +1854,15 @@ pub fn session_join(
         return Err(WriteError::BranchMissing(branch_name.to_string()));
     }
 
-    claim_branch(tree_root, sym_path, session_path, branch_name, actor)?;
+    claim_branch(
+        tree_root,
+        sym_path,
+        session_path,
+        branch_name,
+        user_email,
+        agent,
+        model,
+    )?;
     Ok(branch_name.to_string())
 }
 
@@ -1833,6 +1894,8 @@ mod session_tests {
             SessionType::Multi,
             "landing",
             "orchestrator",
+            None,
+            None,
             &["agent_a".into(), "agent_b".into()],
         )
         .unwrap();
@@ -1862,6 +1925,8 @@ mod session_tests {
             SessionType::Single,
             "old",
             "me",
+            None,
+            None,
             &[],
         )
         .unwrap();
@@ -1895,18 +1960,51 @@ mod session_tests {
         let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
         let p: TreePath = "work".parse().unwrap();
-        assert!(session_new(d.path(), &sym, &p, SessionType::Single, "", "me", &[]).is_err());
         assert!(
-            session_new(d.path(), &sym, &p, SessionType::Single, "bad/name", "me", &[]).is_err()
+            session_new(d.path(), &sym, &p, SessionType::Single, "", "me", None, None, &[])
+                .is_err()
         );
+        assert!(session_new(
+            d.path(),
+            &sym,
+            &p,
+            SessionType::Single,
+            "bad/name",
+            "me",
+            None,
+            None,
+            &[]
+        )
+        .is_err());
+        assert!(session_new(
+            d.path(),
+            &sym,
+            &p,
+            SessionType::Single,
+            "bad::name",
+            "me",
+            None,
+            None,
+            &[]
+        )
+        .is_err());
+        assert!(session_new(
+            d.path(),
+            &sym,
+            &p,
+            SessionType::Single,
+            "bad name",
+            "me",
+            None,
+            None,
+            &[]
+        )
+        .is_err());
+        // empty user_email
         assert!(
-            session_new(d.path(), &sym, &p, SessionType::Single, "bad::name", "me", &[]).is_err()
+            session_new(d.path(), &sym, &p, SessionType::Single, "ok", "", None, None, &[])
+                .is_err()
         );
-        assert!(
-            session_new(d.path(), &sym, &p, SessionType::Single, "bad name", "me", &[]).is_err()
-        );
-        // empty actor
-        assert!(session_new(d.path(), &sym, &p, SessionType::Single, "ok", "", &[]).is_err());
     }
 }
 
@@ -1929,7 +2027,9 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        let err = precheck_write(d.path(), &sym, &tp("work::nope"), "main", "me").unwrap_err();
+        let err =
+            precheck_write(d.path(), &sym, &tp("work::nope"), "main", "me", None, None)
+                .unwrap_err();
         assert!(matches!(err, WriteError::NoSuchExom(_)));
     }
 
@@ -1940,7 +2040,9 @@ mod tofu_tests {
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
-        let err = precheck_write(d.path(), &sym, &tp("work::main"), "main", "").unwrap_err();
+        let err =
+            precheck_write(d.path(), &sym, &tp("work::main"), "main", "", None, None)
+                .unwrap_err();
         assert!(matches!(err, WriteError::ActorRequired));
     }
 
@@ -1958,6 +2060,8 @@ mod tofu_tests {
             SessionType::Single,
             "x",
             "me",
+            None,
+            None,
             &[],
         )
         .unwrap();
@@ -1966,7 +2070,7 @@ mod tofu_tests {
         let mut meta = exom::read_meta(&disk).unwrap();
         meta.session.as_mut().unwrap().closed_at = Some("2026-04-11T00:00:00Z".into());
         exom::write_meta(&disk, &meta).unwrap();
-        let err = precheck_write(d.path(), &sym, &session, "main", "me").unwrap_err();
+        let err = precheck_write(d.path(), &sym, &session, "main", "me", None, None).unwrap_err();
         assert!(matches!(err, WriteError::SessionClosed));
     }
 
@@ -1980,12 +2084,38 @@ mod tofu_tests {
         // Create a branch "agent_a" via create_branch.
         create_branch(d.path(), &sym, &tp("work::main"), "agent_a").unwrap();
         // First write claims it for alice.
-        assert!(precheck_write(d.path(), &sym, &tp("work::main"), "agent_a", "alice").is_ok());
+        assert!(precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "agent_a",
+            "alice",
+            None,
+            None
+        )
+        .is_ok());
         // Same actor writes again — succeeds (idempotent).
-        assert!(precheck_write(d.path(), &sym, &tp("work::main"), "agent_a", "alice").is_ok());
+        assert!(precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "agent_a",
+            "alice",
+            None,
+            None
+        )
+        .is_ok());
         // Different actor tries same branch — rejected.
-        let err =
-            precheck_write(d.path(), &sym, &tp("work::main"), "agent_a", "bob").unwrap_err();
+        let err = precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "agent_a",
+            "bob",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, WriteError::BranchOwned(_)));
     }
 
@@ -1996,8 +2126,16 @@ mod tofu_tests {
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
-        let err = precheck_write(d.path(), &sym, &tp("work::main"), "nonexistent", "alice")
-            .unwrap_err();
+        let err = precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "nonexistent",
+            "alice",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, WriteError::BranchMissing(_)));
     }
 
@@ -2009,7 +2147,9 @@ mod tofu_tests {
         let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
         // "main" branch should exist implicitly for any exom.
-        assert!(precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice").is_ok());
+        assert!(
+            precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice", None, None).is_ok()
+        );
     }
 
     #[test]
@@ -2026,19 +2166,24 @@ mod tofu_tests {
             SessionType::Multi,
             "collab",
             "orch",
+            None,
+            None,
             &["agent_a".into()],
         )
         .unwrap();
-        // agent_a joins and claims their branch.
-        let branch = session_join(d.path(), &sym, &session, "agent_a").unwrap();
+        // agent_a joins and claims their branch on behalf of alice.
+        let branch =
+            session_join(d.path(), &sym, &session, "agent_a", "alice", None, None).unwrap();
         assert_eq!(branch, "agent_a");
-        // Joining again is idempotent.
-        assert!(session_join(d.path(), &sym, &session, "agent_a").is_ok());
-        // A different actor cannot claim the same (already-owned) branch.
-        let err = precheck_write(d.path(), &sym, &session, "agent_a", "bob").unwrap_err();
+        // Joining again is idempotent (same user_email).
+        assert!(session_join(d.path(), &sym, &session, "agent_a", "alice", None, None).is_ok());
+        // A different user cannot claim the same (already-owned) branch.
+        let err =
+            precheck_write(d.path(), &sym, &session, "agent_a", "bob", None, None).unwrap_err();
         assert!(matches!(err, WriteError::BranchOwned(_)));
-        // Fabricated actor not in the session's pre-created branches is rejected.
-        let err = session_join(d.path(), &sym, &session, "impostor").unwrap_err();
+        // Branch not in the session's pre-created list is rejected.
+        let err =
+            session_join(d.path(), &sym, &session, "impostor", "alice", None, None).unwrap_err();
         assert!(matches!(err, WriteError::BranchMissing(_)));
     }
 
@@ -2056,6 +2201,8 @@ mod tofu_tests {
             SessionType::Multi,
             "multi",
             "orch",
+            Some("cursor"),
+            Some("claude-opus-4-7"),
             &["sub_a".into(), "sub_b".into()],
         )
         .unwrap();
@@ -2065,9 +2212,14 @@ mod tofu_tests {
         assert!(names.contains(&"main"), "main branch missing");
         assert!(names.contains(&"sub_a"), "sub_a branch missing");
         assert!(names.contains(&"sub_b"), "sub_b branch missing");
-        // Orchestrator already owns main.
+        // Orchestrator already owns main with full attribution.
         let main_branch = branches.iter().find(|b| b.name == "main").unwrap();
-        assert_eq!(main_branch.claimed_by.as_deref(), Some("orch"));
+        assert_eq!(main_branch.claimed_by_user_email.as_deref(), Some("orch"));
+        assert_eq!(main_branch.claimed_by_agent.as_deref(), Some("cursor"));
+        assert_eq!(
+            main_branch.claimed_by_model.as_deref(),
+            Some("claude-opus-4-7")
+        );
     }
 }
 

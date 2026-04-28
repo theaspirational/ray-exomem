@@ -31,7 +31,8 @@ pub mod attrs {
         pub const ID: &str = "tx/id";
         pub const TIME: &str = "tx/time";
         pub const USER_EMAIL: &str = "tx/user-email";
-        pub const ACTOR: &str = "tx/actor";
+        pub const AGENT: &str = "tx/agent";
+        pub const MODEL: &str = "tx/model";
         pub const ACTION: &str = "tx/action";
         pub const BRANCH: &str = "tx/branch";
         pub const PARENT: &str = "tx/parent";
@@ -190,18 +191,25 @@ pub fn system_attributes() -> Vec<OntologyAttribute> {
             description: "Transaction time.".into(),
         },
         OntologyAttribute {
-            name: attrs::tx::ACTOR.to_string(),
-            entity_kind: "tx".into(),
-            value_kind: "string".into(),
-            category: "tx".into(),
-            description: "Actor that created the transaction.".into(),
-        },
-        OntologyAttribute {
             name: attrs::tx::USER_EMAIL.to_string(),
             entity_kind: "tx".into(),
             value_kind: "string".into(),
             category: "tx".into(),
             description: "Email of the authenticated user for this transaction, when known.".into(),
+        },
+        OntologyAttribute {
+            name: attrs::tx::AGENT.to_string(),
+            entity_kind: "tx".into(),
+            value_kind: "string".into(),
+            category: "tx".into(),
+            description: "Tool/integration that issued the transaction (e.g. cursor, claude-code-cli). Defaults to the API key's label for Bearer auth; None for cookie-auth UI writes.".into(),
+        },
+        OntologyAttribute {
+            name: attrs::tx::MODEL.to_string(),
+            entity_kind: "tx".into(),
+            value_kind: "string".into(),
+            category: "tx".into(),
+            description: "LLM that produced the transaction (e.g. claude-opus-4-7). Explicit only.".into(),
         },
         OntologyAttribute {
             name: attrs::tx::ACTION.to_string(),
@@ -520,11 +528,11 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
         ),
         (
             "tx-row".to_string(),
-            "Transaction row with actor, action, time, and branch.".to_string(),
+            "Transaction row with agent, action, time, and branch.".to_string(),
             format!(
-                "(rule {exom} (tx-row ?tx ?id ?actor ?action ?when ?branch) (?tx '{id_attr} ?id) (?tx '{actor_attr} ?actor) (?tx '{action_attr} ?action) (?tx '{time_attr} ?when) (?tx '{branch_attr} ?branch))",
+                "(rule {exom} (tx-row ?tx ?id ?agent ?action ?when ?branch) (?tx '{id_attr} ?id) (?tx '{agent_attr} ?agent) (?tx '{action_attr} ?action) (?tx '{time_attr} ?when) (?tx '{branch_attr} ?branch))",
                 id_attr = attrs::tx::ID,
-                actor_attr = attrs::tx::ACTOR,
+                agent_attr = attrs::tx::AGENT,
                 action_attr = attrs::tx::ACTION,
                 time_attr = attrs::tx::TIME,
                 branch_attr = attrs::tx::BRANCH,
@@ -565,10 +573,10 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
             "merge-row".to_string(),
             "Merge transaction row with source and target branches.".to_string(),
             format!(
-                "(rule {exom} (merge-row ?tx ?source ?target ?actor ?when) (?tx '{source_attr} ?source) (?tx '{target_attr} ?target) (?tx '{actor_attr} ?actor) (?tx '{time_attr} ?when))",
+                "(rule {exom} (merge-row ?tx ?source ?target ?agent ?when) (?tx '{source_attr} ?source) (?tx '{target_attr} ?target) (?tx '{agent_attr} ?agent) (?tx '{time_attr} ?when))",
                 source_attr = attrs::tx::MERGE_SOURCE,
                 target_attr = attrs::tx::MERGE_TARGET,
-                actor_attr = attrs::tx::ACTOR,
+                agent_attr = attrs::tx::AGENT,
                 time_attr = attrs::tx::TIME,
             ),
         ),

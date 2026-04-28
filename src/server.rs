@@ -594,6 +594,23 @@ fn server_sym_path(state: &AppState) -> PathBuf {
         .unwrap_or_else(|| crate::storage::data_dir().join("sym"))
 }
 
+/// Read three-axis attribution headers (`x-agent`, `x-model`) for a write
+/// route. Cookie-auth UI writes typically omit both; Bearer-auth scripts pass
+/// either or both to override the API-key label and the model.
+fn read_attribution_headers(
+    headers: &axum::http::HeaderMap,
+) -> (Option<String>, Option<String>) {
+    let read = |name: &str| -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    (read("x-agent"), read("x-model"))
+}
+
 /// Lazy-load an exom by slash key, inserting into the map if found on disk.
 fn get_or_load_exom<'a>(
     exoms: &'a mut HashMap<String, ExomState>,
@@ -1231,7 +1248,11 @@ async fn api_welcome_summary(
                     .map(|(t, _, _)| tx.tx_time.as_str() > t.as_str())
                     .unwrap_or(true)
                 {
-                    latest_change = Some((tx.tx_time.clone(), tx.actor.clone(), tx.note.clone()));
+                    latest_change = Some((
+                        tx.tx_time.clone(),
+                        tx.user_email.clone().unwrap_or_else(|| "system".into()),
+                        tx.note.clone(),
+                    ));
                 }
                 all_txs.push((path.clone(), tx.clone()));
             }
@@ -1313,7 +1334,9 @@ async fn api_welcome_summary(
             "exom": exom,
             "tx_id": tx.tx_id,
             "tx_time": tx.tx_time,
-            "actor": tx.actor,
+            "user_email": tx.user_email,
+            "agent": tx.agent,
+            "model": tx.model,
             "action": tx.action.to_string(),
             "refs": tx.refs,
             "note": tx.note,
@@ -1422,7 +1445,6 @@ struct SessionNewBody {
     #[serde(rename = "type")]
     session_type: Option<String>,
     label: Option<String>,
-    actor: Option<String>,
     #[serde(default)]
     agents: Vec<String>,
 }
@@ -1430,6 +1452,7 @@ struct SessionNewBody {
 async fn api_session_new(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SessionNewBody>,
 ) -> impl IntoResponse {
     let project_path_str = body.project_path.unwrap_or_default();
@@ -1452,11 +1475,12 @@ async fn api_session_new(
         }
     };
     let label = body.label.unwrap_or_default();
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        body.actor.unwrap_or_default()
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let agent = header_agent.or_else(|| user.api_key_label.clone());
     let tree_root = server_tree_root(&state);
     let sym_path = server_sym_path(&state);
     match brain::session_new(
@@ -1465,7 +1489,9 @@ async fn api_session_new(
         &project_path,
         session_type,
         &label,
-        &actor,
+        user.email.as_str(),
+        agent.as_deref(),
+        header_model.as_deref(),
         &body.agents,
     ) {
         Ok(session_path) => {
@@ -1483,20 +1509,31 @@ async fn api_session_new(
 #[derive(Deserialize)]
 struct SessionJoinBody {
     session_path: Option<String>,
-    actor: Option<String>,
+    /// Sub-agent branch label within the session to claim. Branch must have
+    /// been pre-created by `session_new`.
+    #[serde(default, alias = "actor")]
+    agent_label: Option<String>,
 }
 
 async fn api_session_join(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SessionJoinBody>,
 ) -> impl IntoResponse {
     let session_path_str = body.session_path.unwrap_or_default();
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        body.actor.unwrap_or_default()
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let agent_label = body.agent_label.unwrap_or_default();
+    if agent_label.is_empty() {
+        return ApiError::new("agent_label_required", "agent_label required")
+            .with_suggestion("pass agent_label in request body")
+            .into_response();
+    }
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let agent = header_agent.or_else(|| user.api_key_label.clone());
     let session_path: crate::path::TreePath = match session_path_str.parse() {
         Ok(p) => p,
         Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
@@ -1504,19 +1541,22 @@ async fn api_session_join(
     if let Some(resp) = guard_write(&state, &maybe_user, &session_path.to_slash_string()).await {
         return resp;
     }
-    if actor.is_empty() {
-        return ApiError::new("actor_required", "actor required")
-            .with_suggestion("pass actor in request body")
-            .into_response();
-    }
     let tree_root = server_tree_root(&state);
     let sym_path = server_sym_path(&state);
-    match brain::session_join(&tree_root, &sym_path, &session_path, &actor) {
+    match brain::session_join(
+        &tree_root,
+        &sym_path,
+        &session_path,
+        &agent_label,
+        user.email.as_str(),
+        agent.as_deref(),
+        header_model.as_deref(),
+    ) {
         Ok(branch) => {
             Json(serde_json::json!({
                 "ok": true,
                 "session_path": session_path.to_slash_string(),
-                "actor": actor,
+                "user_email": user.email,
                 "branch": branch,
             }))
             .into_response()
@@ -1665,8 +1705,6 @@ struct AssertFactBody {
     #[serde(default)]
     exom: Option<String>,
     #[serde(default)]
-    actor: Option<String>,
-    #[serde(default)]
     branch: Option<String>,
     fact_id: Option<String>,
     predicate: String,
@@ -1694,6 +1732,7 @@ fn default_confidence() -> f64 {
 async fn api_assert_fact(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
+    headers: axum::http::HeaderMap,
     Json(req): Json<AssertFactBody>,
 ) -> impl IntoResponse {
     let exom_raw = req.exom.as_deref().unwrap_or(DEFAULT_EXOM);
@@ -1707,36 +1746,31 @@ async fn api_assert_fact(
         return resp;
     }
 
-    let actor_str = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        match req.actor.as_deref().filter(|s| !s.is_empty()) {
-            Some(a) => a.to_string(),
-            None => {
-                return ApiError::from(brain::WriteError::ActorRequired).into_response();
-            }
-        }
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let write_ctx = MutationContext::from_user(user, header_agent, header_model);
 
     let branch_str = req.branch.as_deref().unwrap_or("main");
 
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
         let sym_path = server_sym_path(&state);
-        if let Err(e) =
-            brain::precheck_write(&tree_root, &sym_path, &exom_path, branch_str, &actor_str)
-        {
+        if let Err(e) = brain::precheck_write(
+            &tree_root,
+            &sym_path,
+            &exom_path,
+            branch_str,
+            user.email.as_str(),
+            write_ctx.agent.as_deref(),
+            write_ctx.model.as_deref(),
+        ) {
             return ApiError::from(e).into_response();
         }
     }
-
-    let user_email = maybe_user.0.as_ref().map(|u| u.email.clone());
-    let write_ctx = MutationContext {
-        actor: actor_str.clone(),
-        session: None,
-        model: None,
-        user_email,
-    };
 
     let fact_id = req.fact_id.clone().unwrap_or_else(|| req.predicate.clone());
     let provenance = req
@@ -2295,32 +2329,15 @@ async fn api_eval(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let ctx = if let Some(ref user) = maybe_user.0 {
-        MutationContext::from_user(
-            user,
-            headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-        )
-    } else {
-        let actor = headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string();
-        MutationContext {
-            actor,
-            session: headers
-                .get("x-session")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            model: headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let ctx = match maybe_user.0.as_ref() {
+        Some(user) => MutationContext::from_user(user, header_agent, header_model),
+        None => MutationContext {
             user_email: None,
-        }
+            agent: header_agent,
+            model: header_model,
+            session: None,
+        },
     };
     api_eval_inner(state, maybe_user, ctx, body).await
 }
@@ -2405,7 +2422,7 @@ async fn api_eval_inner(
                     }
                     let _ = state.sse_tx.send((
                         Some(exom.clone()),
-                        format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred),
+                        format!(r#"{{"v":1,"kind":"memory","op":"eval_assert_fact","exom":"{}","user_email":"{}","predicate":"{}"}}"#, exom, ctx.user_email.as_deref().unwrap_or("system"), pred),
                     ));
                     Ok(())
                 })();
@@ -2431,7 +2448,7 @@ async fn api_eval_inner(
                     }
                     let _ = state.sse_tx.send((
                         Some(exom.clone()),
-                        format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","actor":"{}","predicate":"{}"}}"#, exom, ctx.actor, pred),
+                        format!(r#"{{"v":1,"kind":"memory","op":"eval_retract_fact","exom":"{}","user_email":"{}","predicate":"{}"}}"#, exom, ctx.user_email.as_deref().unwrap_or("system"), pred),
                     ));
                     Ok(())
                 })();
@@ -2464,8 +2481,9 @@ async fn api_eval_inner(
                     let _ = state.sse_tx.send((
                         Some(exom_name.clone()),
                         format!(
-                            r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","actor":"{}"}}"#,
-                            exom_name, ctx.actor
+                            r#"{{"v":1,"kind":"memory","op":"rule_append","exom":"{}","user_email":"{}"}}"#,
+                            exom_name,
+                            ctx.user_email.as_deref().unwrap_or("system")
                         ),
                     ));
                     Ok(())
@@ -2775,7 +2793,11 @@ fn fact_json_enriched(brain: &Brain, f: &crate::brain::Fact) -> serde_json::Valu
         .iter()
         .find(|t| t.tx_id == f.created_by_tx);
     let (actor, branch_id, tx_time) = match tx {
-        Some(t) => (t.actor.as_str(), t.branch_id.as_str(), t.tx_time.as_str()),
+        Some(t) => (
+            t.user_email.as_deref().unwrap_or(""),
+            t.branch_id.as_str(),
+            t.tx_time.as_str(),
+        ),
         None => ("", "", ""),
     };
     let branch_name = brain
@@ -2925,7 +2947,9 @@ async fn api_list_branches(
                 "archived": b.archived,
                 "is_current": b.branch_id == es.brain.current_branch_id(),
                 "fact_count": es.brain.facts_on_branch(&b.branch_id).len(),
-                "claimed_by": b.claimed_by,
+                "claimed_by_user_email": b.claimed_by_user_email,
+                "claimed_by_agent": b.claimed_by_agent,
+                "claimed_by_model": b.claimed_by_model,
             })
         })
         .collect();
@@ -2946,33 +2970,12 @@ async fn api_create_branch(
     headers: axum::http::HeaderMap,
     Json(body): Json<CreateBranchBody>,
 ) -> impl IntoResponse {
-    let ctx = if let Some(ref user) = maybe_user.0 {
-        MutationContext::from_user(
-            user,
-            headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-        )
-    } else {
-        let actor = headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string();
-        MutationContext {
-            actor: actor.clone(),
-            session: headers
-                .get("x-session")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            model: headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            user_email: None,
-        }
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let ctx = MutationContext::from_user(user, header_agent, header_model);
 
     let exom_raw = body.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
@@ -2988,9 +2991,15 @@ async fn api_create_branch(
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
         let sym_path = server_sym_path(&state);
-        if let Err(e) =
-            brain::precheck_write(&tree_root, &sym_path, &exom_path, "main", &ctx.actor)
-        {
+        if let Err(e) = brain::precheck_write(
+            &tree_root,
+            &sym_path,
+            &exom_path,
+            "main",
+            user.email.as_str(),
+            ctx.agent.as_deref(),
+            ctx.model.as_deref(),
+        ) {
             return ApiError::from(e).into_response();
         }
     }
@@ -3069,27 +3078,12 @@ async fn api_delete_branch_handler(
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string()
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
-    let _ctx = MutationContext {
-        actor: actor.clone(),
-        session: headers
-            .get("x-session")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string()),
-        model: headers
-            .get("x-model")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string()),
-        user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
-    };
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let _ctx = MutationContext::from_user(user, header_agent, header_model);
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
@@ -3120,16 +3114,11 @@ async fn api_switch_branch_handler(
     maybe_user: MaybeUser,
     AxumPath(branch_id): AxumPath<String>,
     Query(q): Query<ExomQuery>,
-    headers: axum::http::HeaderMap,
+    _headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string()
+    let actor = match maybe_user.0.as_ref() {
+        Some(u) => u.email.clone(),
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
@@ -3250,33 +3239,12 @@ async fn api_merge_branch_handler(
     headers: axum::http::HeaderMap,
     Json(body): Json<MergeBranchBody>,
 ) -> impl IntoResponse {
-    let ctx = if let Some(ref user) = maybe_user.0 {
-        MutationContext::from_user(
-            user,
-            headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-        )
-    } else {
-        let actor = headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string();
-        MutationContext {
-            actor,
-            session: headers
-                .get("x-session")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            model: headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            user_email: None,
-        }
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let ctx = MutationContext::from_user(user, header_agent, header_model);
     let policy = match body.policy.as_deref().unwrap_or("last-writer-wins") {
         "last-writer-wins" => MergePolicy::LastWriterWins,
         "keep-target" => MergePolicy::KeepTarget,
@@ -3527,15 +3495,12 @@ async fn api_import_json(
         rules: Vec<String>,
     }
 
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string()
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let actor = user.email.clone();
+    let (header_agent, header_model) = read_attribution_headers(&headers);
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
@@ -3558,18 +3523,7 @@ async fn api_import_json(
         }
     };
 
-    let _ctx = MutationContext {
-        actor: actor.clone(),
-        session: headers
-            .get("x-session")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string()),
-        model: headers
-            .get("x-model")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string()),
-        user_email: maybe_user.0.as_ref().map(|u| u.email.clone()),
-    };
+    let _ctx = MutationContext::from_user(user, header_agent, header_model);
 
     let result = mutate_exom_async(&state, &exom_slash, move |ex| {
         ex.brain.replace_state(
@@ -3629,34 +3583,13 @@ async fn api_retract_all(
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let ctx = if let Some(ref user) = maybe_user.0 {
-        MutationContext::from_user(
-            user,
-            headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-        )
-    } else {
-        let actor = headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string();
-        MutationContext {
-            actor: actor.clone(),
-            session: headers
-                .get("x-session")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            model: headers
-                .get("x-model")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string()),
-            user_email: None,
-        }
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
-    let actor = ctx.actor.clone();
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let ctx = MutationContext::from_user(user, header_agent, header_model);
+    let actor = user.email.clone();
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
@@ -3671,9 +3604,15 @@ async fn api_retract_all(
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
         let sym_path = server_sym_path(&state);
-        if let Err(e) =
-            brain::precheck_write(&tree_root, &sym_path, &exom_path, "main", &ctx.actor)
-        {
+        if let Err(e) = brain::precheck_write(
+            &tree_root,
+            &sym_path,
+            &exom_path,
+            "main",
+            user.email.as_str(),
+            ctx.agent.as_deref(),
+            ctx.model.as_deref(),
+        ) {
             return ApiError::from(e).into_response();
         }
     }
@@ -3719,15 +3658,12 @@ async fn api_wipe(
     Query(q): Query<ExomQuery>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string()
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let actor = user.email.clone();
+    let (header_agent, header_model) = read_attribution_headers(&headers);
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
         Ok(p) => p,
@@ -3742,9 +3678,15 @@ async fn api_wipe(
     if state.tree_root.is_some() {
         let tree_root = server_tree_root(&state);
         let sym_path = server_sym_path(&state);
-        if let Err(e) =
-            brain::precheck_write(&tree_root, &sym_path, &exom_path, "main", &actor)
-        {
+        if let Err(e) = brain::precheck_write(
+            &tree_root,
+            &sym_path,
+            &exom_path,
+            "main",
+            user.email.as_str(),
+            header_agent.as_deref(),
+            header_model.as_deref(),
+        ) {
             return ApiError::from(e).into_response();
         }
     }
@@ -3801,15 +3743,11 @@ async fn api_factory_reset(
             }
         }
     }
-    let actor = if let Some(ref user) = maybe_user.0 {
-        user.email.clone()
-    } else {
-        headers
-            .get("x-actor")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous")
-            .to_string()
+    let actor = match maybe_user.0.as_ref() {
+        Some(u) => u.email.clone(),
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
+    let _ = &headers;
     // The brain/tree wipe is fully sync. Wrap it in a closure so the
     // std::sync::MutexGuard on `state.exoms` is released before we await
     // the auth-store wipe below — otherwise the future would not be Send.
@@ -4294,7 +4232,10 @@ async fn api_logs(
         .map(|tx| {
             serde_json::json!({
                 "id": format!("tx{}", tx.tx_id), "type": tx.action.to_string(),
-                "timestamp": tx.tx_time, "pattern": tx.note, "source": tx.actor
+                "timestamp": tx.tx_time, "pattern": tx.note,
+                "source": tx.user_email,
+                "agent": tx.agent,
+                "model": tx.model,
             })
         })
         .collect();

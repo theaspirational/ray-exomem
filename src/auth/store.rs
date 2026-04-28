@@ -155,6 +155,7 @@ impl AuthStore {
                 display_name: row.user.display_name.clone(),
                 provider: row.user.provider.clone(),
                 session_id: None,
+                api_key_label: Some(row.label.clone()),
                 role: row.user.role,
             };
             store.api_key_cache.insert(row.key_hash.clone(), user);
@@ -245,6 +246,7 @@ impl AuthStore {
                     display_name: u.display_name,
                     provider: u.provider,
                     session_id: Some(sid),
+                    api_key_label: None,
                     role: u.role,
                 }))
             }
@@ -282,6 +284,7 @@ impl AuthStore {
                         display_name: row.user.display_name.clone(),
                         provider: row.user.provider.clone(),
                         session_id: None,
+                        api_key_label: Some(row.label.clone()),
                         role: row.user.role,
                     };
                     self.api_key_cache.insert(key_hash, user.clone());
@@ -313,6 +316,7 @@ impl AuthStore {
             display_name: user_info.display_name,
             provider: user_info.provider,
             session_id: None,
+            api_key_label: Some(stored.label.clone()),
             role,
         };
         self.api_key_cache
@@ -831,6 +835,7 @@ impl AuthStore {
                     .map(|u| u.provider.clone())
                     .unwrap_or_else(|| "unknown".to_string()),
                 session_id: None,
+                api_key_label: Some(stored_key.label.clone()),
                 role,
             };
             self.api_key_cache.insert(stored_key.key_hash.clone(), user);
@@ -1435,6 +1440,7 @@ mod tests {
             display_name: "Alice".into(),
             provider: "mock".into(),
             session_id: Some("sess-1".into()),
+            api_key_label: None,
             role: UserRole::Regular,
         };
         store.session_cache.insert("sess-1".into(), user.clone());

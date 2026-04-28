@@ -693,8 +693,17 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
         }
     }
     for tx in &txs {
-        row_count += 4; // tx/id, tx/time, tx/actor, tx/action
+        row_count += 3; // tx/id, tx/time, tx/action
         row_count += 1; // tx/branch
+        if tx.user_email.is_some() {
+            row_count += 1;
+        }
+        if tx.agent.is_some() {
+            row_count += 1;
+        }
+        if tx.model.is_some() {
+            row_count += 1;
+        }
         if tx.parent_tx_id.is_some() {
             row_count += 1;
         }
@@ -879,14 +888,26 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
                         email,
                     )?;
                 }
-                push_datom_row(
-                    &mut e_col,
-                    &mut a_col,
-                    &mut v_col,
-                    &tx_entity,
-                    system_schema::attrs::tx::ACTOR,
-                    &tx.actor,
-                )?;
+                if let Some(ref agent) = tx.agent {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::AGENT,
+                        agent,
+                    )?;
+                }
+                if let Some(ref model) = tx.model {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &tx_entity,
+                        system_schema::attrs::tx::MODEL,
+                        model,
+                    )?;
+                }
                 push_datom_row(
                     &mut e_col,
                     &mut a_col,
@@ -1779,11 +1800,10 @@ pub fn load_beliefs(table: &RayObj) -> Result<Vec<Belief>> {
 // ---------------------------------------------------------------------------
 
 pub fn build_tx_table(txs: &[Tx]) -> RayObj {
-    let mut b = TableBuilder::new(10);
+    let mut b = TableBuilder::new(11);
 
     let tx_ids: Vec<i64> = txs.iter().map(|t| t.tx_id as i64).collect();
     let times: Vec<&str> = txs.iter().map(|t| t.tx_time.as_str()).collect();
-    let actors: Vec<&str> = txs.iter().map(|t| t.actor.as_str()).collect();
     let actions: Vec<&str> = txs
         .iter()
         .map(|t| match t.action {
@@ -1807,10 +1827,11 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
     let branches: Vec<&str> = txs.iter().map(|t| t.branch_id.as_str()).collect();
     let sessions: Vec<Option<&str>> = txs.iter().map(|t| t.session.as_deref()).collect();
     let user_emails: Vec<Option<&str>> = txs.iter().map(|t| t.user_email.as_deref()).collect();
+    let agents: Vec<Option<&str>> = txs.iter().map(|t| t.agent.as_deref()).collect();
+    let models: Vec<Option<&str>> = txs.iter().map(|t| t.model.as_deref()).collect();
 
     b.add_i64_col("tx_id", &tx_ids, None);
     b.add_str_col("tx_time", &times);
-    b.add_sym_col("actor", &actors);
     b.add_sym_col("action", &actions);
     b.add_str_col("refs", &refs_strs);
     b.add_str_col("note", &notes);
@@ -1818,6 +1839,8 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
     b.add_sym_col("branch_id", &branches);
     b.add_sym_col_nullable("session", &sessions);
     b.add_sym_col_nullable("user_email", &user_emails);
+    b.add_sym_col_nullable("agent", &agents);
+    b.add_sym_col_nullable("model", &models);
 
     b.finish()
 }
@@ -1825,26 +1848,19 @@ pub fn build_tx_table(txs: &[Tx]) -> RayObj {
 pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
     let tbl = table.as_ptr();
     let nrows = unsafe { ffi::ray_table_nrows(tbl) };
-    let ncols = unsafe { ffi::ray_table_ncols(tbl) };
+    let _ncols = unsafe { ffi::ray_table_ncols(tbl) };
 
     let tx_ids = read_i64_col(tbl, 0, nrows);
     let times = read_str_col(tbl, 1, nrows);
-    let actors = read_sym_col(tbl, 2, nrows)?;
-    let actions = read_sym_col(tbl, 3, nrows)?;
-    let refs_raw = read_str_col(tbl, 4, nrows);
-    let notes = read_str_col(tbl, 5, nrows);
-    let parent_ids = read_i64_nullable_col(tbl, 6, nrows);
-    let branches = read_sym_col(tbl, 7, nrows)?;
-    let sessions = if ncols >= 9 {
-        read_sym_nullable_col(tbl, 8, nrows)?
-    } else {
-        vec![None; nrows as usize]
-    };
-    let user_emails = if ncols >= 10 {
-        read_sym_nullable_col(tbl, 9, nrows)?
-    } else {
-        vec![None; nrows as usize]
-    };
+    let actions = read_sym_col(tbl, 2, nrows)?;
+    let refs_raw = read_str_col(tbl, 3, nrows);
+    let notes = read_str_col(tbl, 4, nrows);
+    let parent_ids = read_i64_nullable_col(tbl, 5, nrows);
+    let branches = read_sym_col(tbl, 6, nrows)?;
+    let sessions = read_sym_nullable_col(tbl, 7, nrows)?;
+    let user_emails = read_sym_nullable_col(tbl, 8, nrows)?;
+    let agents = read_sym_nullable_col(tbl, 9, nrows)?;
+    let models = read_sym_nullable_col(tbl, 10, nrows)?;
 
     let mut txs = Vec::with_capacity(nrows as usize);
     for i in 0..nrows as usize {
@@ -1862,7 +1878,8 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
             tx_id: tx_ids[i] as u64,
             tx_time: times[i].clone(),
             user_email: user_emails[i].clone(),
-            actor: actors[i].clone(),
+            agent: agents[i].clone(),
+            model: models[i].clone(),
             action,
             refs: decode_string_vec(&refs_raw[i]),
             note: notes[i].clone(),
@@ -1879,7 +1896,7 @@ pub fn load_txs(table: &RayObj) -> Result<Vec<Tx>> {
 // ---------------------------------------------------------------------------
 
 pub fn build_branch_table(branches: &[Branch]) -> RayObj {
-    let mut b = TableBuilder::new(6);
+    let mut b = TableBuilder::new(8);
 
     let ids: Vec<&str> = branches.iter().map(|b| b.branch_id.as_str()).collect();
     let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
@@ -1892,13 +1909,26 @@ pub fn build_branch_table(branches: &[Branch]) -> RayObj {
         .iter()
         .map(|b| if b.archived { 1 } else { 0 })
         .collect();
-    let claimed: Vec<Option<&str>> = branches.iter().map(|b| b.claimed_by.as_deref()).collect();
+    let claimed_users: Vec<Option<&str>> = branches
+        .iter()
+        .map(|b| b.claimed_by_user_email.as_deref())
+        .collect();
+    let claimed_agents: Vec<Option<&str>> = branches
+        .iter()
+        .map(|b| b.claimed_by_agent.as_deref())
+        .collect();
+    let claimed_models: Vec<Option<&str>> = branches
+        .iter()
+        .map(|b| b.claimed_by_model.as_deref())
+        .collect();
     b.add_sym_col("branch_id", &ids);
     b.add_sym_col("name", &names);
     b.add_sym_col_nullable("parent_branch_id", &parents);
     b.add_i64_col("created_tx_id", &created, None);
     b.add_i64_col("archived", &archived, None);
-    b.add_sym_col_nullable("claimed_by", &claimed);
+    b.add_sym_col_nullable("claimed_by_user_email", &claimed_users);
+    b.add_sym_col_nullable("claimed_by_agent", &claimed_agents);
+    b.add_sym_col_nullable("claimed_by_model", &claimed_models);
 
     b.finish()
 }
@@ -1906,22 +1936,16 @@ pub fn build_branch_table(branches: &[Branch]) -> RayObj {
 pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
     let tbl = table.as_ptr();
     let nrows = unsafe { ffi::ray_table_nrows(tbl) };
-    let ncols = unsafe { ffi::ray_table_ncols(tbl) };
+    let _ncols = unsafe { ffi::ray_table_ncols(tbl) };
 
     let ids = read_sym_col(tbl, 0, nrows)?;
     let names = read_sym_col(tbl, 1, nrows)?;
     let parents = read_sym_nullable_col(tbl, 2, nrows)?;
     let created = read_i64_col(tbl, 3, nrows);
-    let archived_col = if ncols >= 5 {
-        read_i64_col(tbl, 4, nrows)
-    } else {
-        vec![0i64; nrows as usize]
-    };
-    let claimed_col = if ncols >= 6 {
-        read_sym_nullable_col(tbl, 5, nrows)?
-    } else {
-        vec![None; nrows as usize]
-    };
+    let archived_col = read_i64_col(tbl, 4, nrows);
+    let claimed_user_col = read_sym_nullable_col(tbl, 5, nrows)?;
+    let claimed_agent_col = read_sym_nullable_col(tbl, 6, nrows)?;
+    let claimed_model_col = read_sym_nullable_col(tbl, 7, nrows)?;
 
     let mut branches = Vec::with_capacity(nrows as usize);
     for i in 0..nrows as usize {
@@ -1931,7 +1955,9 @@ pub fn load_branches(table: &RayObj) -> Result<Vec<Branch>> {
             parent_branch_id: parents[i].clone(),
             created_tx_id: created[i] as u64,
             archived: archived_col[i] != 0,
-            claimed_by: claimed_col[i].clone(),
+            claimed_by_user_email: claimed_user_col[i].clone(),
+            claimed_by_agent: claimed_agent_col[i].clone(),
+            claimed_by_model: claimed_model_col[i].clone(),
         });
     }
     Ok(branches)

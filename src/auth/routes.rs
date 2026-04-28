@@ -150,8 +150,6 @@ struct BootstrapFactSpec {
     #[serde(default)]
     valid_to: Option<String>,
     tx_time: String,
-    #[serde(default)]
-    actor: Option<String>,
     #[serde(default = "default_branch")]
     branch: String,
 }
@@ -169,8 +167,6 @@ struct BootstrapObservationSpec {
     #[serde(default)]
     valid_to: Option<String>,
     tx_time: String,
-    #[serde(default)]
-    actor: Option<String>,
     #[serde(default = "default_branch")]
     branch: String,
 }
@@ -188,8 +184,6 @@ struct BootstrapBeliefSpec {
     #[serde(default)]
     valid_to: Option<String>,
     tx_time: String,
-    #[serde(default)]
-    actor: Option<String>,
     #[serde(default = "default_branch")]
     branch: String,
 }
@@ -205,16 +199,12 @@ struct BootstrapBranchSpec {
     #[serde(default)]
     claimed_by: Option<String>,
     tx_time: String,
-    #[serde(default)]
-    actor: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct BootstrapRuleSpec {
     text: String,
     defined_at: String,
-    #[serde(default = "default_rule_actor")]
-    actor: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -236,10 +226,6 @@ struct BootstrapSeed {
 
 fn default_branch() -> String {
     "main".to_string()
-}
-
-fn default_rule_actor() -> String {
-    "rule-curator".to_string()
 }
 
 struct SeedBuilder<'a> {
@@ -266,14 +252,12 @@ impl<'a> SeedBuilder<'a> {
                 parent_branch_id: None,
                 created_tx_id: 0,
                 archived: false,
-                claimed_by: Some(email.to_string()),
+                claimed_by_user_email: Some(email.to_string()),
+                claimed_by_agent: None,
+                claimed_by_model: None,
             }],
             next_tx: 1,
         }
-    }
-
-    fn actor(&self, explicit: Option<&str>) -> String {
-        explicit.unwrap_or(self.email).to_string()
     }
 
     fn push_tx(
@@ -282,7 +266,6 @@ impl<'a> SeedBuilder<'a> {
         refs: Vec<String>,
         note: String,
         tx_time: &str,
-        actor: String,
         branch: &str,
     ) -> crate::brain::TxId {
         let tx_id = self.next_tx;
@@ -292,7 +275,8 @@ impl<'a> SeedBuilder<'a> {
             tx_id,
             tx_time: tx_time.to_string(),
             user_email: Some(self.email.to_string()),
-            actor,
+            agent: None,
+            model: None,
             action,
             refs,
             note,
@@ -304,13 +288,11 @@ impl<'a> SeedBuilder<'a> {
     }
 
     fn add_branch(&mut self, spec: BootstrapBranchSpec) {
-        let actor = self.actor(spec.actor.as_deref());
         let tx_id = self.push_tx(
             crate::brain::TxAction::CreateBranch,
             vec![spec.branch_id.clone()],
             format!("branch: {}", spec.name),
             &spec.tx_time,
-            actor,
             &spec.parent_branch_id,
         );
         self.branches.push(crate::brain::Branch {
@@ -319,18 +301,18 @@ impl<'a> SeedBuilder<'a> {
             parent_branch_id: Some(spec.parent_branch_id),
             created_tx_id: tx_id,
             archived: spec.archived,
-            claimed_by: spec.claimed_by,
+            claimed_by_user_email: spec.claimed_by,
+            claimed_by_agent: None,
+            claimed_by_model: None,
         });
     }
 
     fn add_fact(&mut self, spec: BootstrapFactSpec) {
-        let actor = self.actor(spec.actor.as_deref());
         let tx_id = self.push_tx(
             crate::brain::TxAction::AssertFact,
             vec![spec.fact_id.clone()],
             format!("assert: {} = {}", spec.predicate, spec.value),
             &spec.tx_time,
-            actor,
             &spec.branch,
         );
         self.facts.push(crate::brain::Fact {
@@ -349,13 +331,11 @@ impl<'a> SeedBuilder<'a> {
     }
 
     fn add_observation(&mut self, spec: BootstrapObservationSpec) {
-        let actor = self.actor(spec.actor.as_deref());
         let tx_id = self.push_tx(
             crate::brain::TxAction::AssertObservation,
             vec![spec.obs_id.clone()],
             format!("observe: {}", spec.obs_id),
             &spec.tx_time,
-            actor,
             &spec.branch,
         );
         self.observations.push(crate::brain::Observation {
@@ -373,13 +353,11 @@ impl<'a> SeedBuilder<'a> {
     }
 
     fn add_belief(&mut self, spec: BootstrapBeliefSpec) {
-        let actor = self.actor(spec.actor.as_deref());
         let tx_id = self.push_tx(
             crate::brain::TxAction::ReviseBelief,
             vec![spec.belief_id.clone()],
             format!("revise: {}", spec.claim_text),
             &spec.tx_time,
-            actor,
             &spec.branch,
         );
         self.beliefs.push(crate::brain::Belief {
@@ -481,10 +459,10 @@ async fn seed_bootstrap_exom(
             es.rules.push(crate::rules::parse_rule_line(
                 &rule_spec.text,
                 MutationContext {
-                    actor: rule_spec.actor,
-                    session: None,
-                    model: None,
                     user_email: Some(email.to_string()),
+                    agent: None,
+                    model: None,
+                    session: None,
                 },
                 rule_spec.defined_at,
             )?);
@@ -661,6 +639,7 @@ async fn login(
         display_name: identity.display_name.clone(),
         provider: identity.provider.clone(),
         session_id: Some(session_id.clone()),
+        api_key_label: None,
         role: role.clone(),
     };
 
@@ -761,6 +740,7 @@ async fn create_api_key(
     // Cache the key -> user mapping.
     let api_user = User {
         session_id: None,
+        api_key_label: Some(body.label.clone()),
         ..user.clone()
     };
     store.api_key_cache.insert(key_hash, api_user);

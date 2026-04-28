@@ -198,7 +198,7 @@ Queryable system predicates in every exom's datom store:
   fact/predicate, fact/value,
   fact/provenance, fact/valid_from, fact/valid_to, fact/created_by,
   fact/superseded_by, fact/revoked_by,
-  tx/id, tx/time, tx/actor, tx/action, tx/branch, tx/parent, tx/session, tx/ref,
+  tx/id, tx/time, tx/user-email, tx/agent, tx/model, tx/action, tx/branch, tx/parent, tx/session, tx/ref,
   claim/owner, claim/status, claim/expires_at, task/depends_on, agent/session
 
 Built-in derived views:
