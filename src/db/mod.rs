@@ -103,6 +103,8 @@ pub trait AuthDb: Send + Sync {
 
     async fn revoke_api_key(&self, key_id: &str) -> anyhow::Result<bool>;
 
+    async fn rename_api_key(&self, key_id: &str, new_label: &str) -> anyhow::Result<bool>;
+
     async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyWithUser>>;
 
     async fn list_api_keys_for_user(&self, email: &str) -> anyhow::Result<Vec<StoredApiKey>>;

@@ -179,6 +179,16 @@ impl JsonlAuthDb {
                     }
                 }
             }
+            "api-key-relabel" => {
+                if let (Some(key_id), Some(label)) = (
+                    entry.get("key_id").and_then(|v| v.as_str()),
+                    entry.get("label").and_then(|v| v.as_str()),
+                ) {
+                    if let Some(stored) = self.api_keys.lock().unwrap().get_mut(key_id) {
+                        stored.label = label.to_string();
+                    }
+                }
+            }
             "share" => {
                 if let (
                     Some(share_id),
@@ -463,6 +473,23 @@ impl AuthDb for JsonlAuthDb {
         drop(keys);
 
         let entry = serde_json::json!({ "kind": "api-key-revoke", "key_id": key_id });
+        self.append_entry(&entry)?;
+        self.apply_entry(&entry);
+        Ok(true)
+    }
+
+    async fn rename_api_key(&self, key_id: &str, new_label: &str) -> anyhow::Result<bool> {
+        let keys = self.api_keys.lock().unwrap();
+        if !keys.contains_key(key_id) {
+            return Ok(false);
+        }
+        drop(keys);
+
+        let entry = serde_json::json!({
+            "kind": "api-key-relabel",
+            "key_id": key_id,
+            "label": new_label,
+        });
         self.append_entry(&entry)?;
         self.apply_entry(&entry);
         Ok(true)

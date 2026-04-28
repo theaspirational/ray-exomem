@@ -30,7 +30,7 @@ pub mod attrs {
     pub mod tx {
         pub const ID: &str = "tx/id";
         pub const TIME: &str = "tx/time";
-        pub const USER_EMAIL: &str = "tx/user-email";
+        pub const USER_EMAIL: &str = "tx/user_email";
         pub const AGENT: &str = "tx/agent";
         pub const MODEL: &str = "tx/model";
         pub const ACTION: &str = "tx/action";

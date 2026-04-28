@@ -29,7 +29,10 @@ pub fn auth_router() -> Router<Arc<AppState>> {
         .route("/session", get(session))
         .route("/me", get(me))
         .route("/api-keys", get(list_api_keys).post(create_api_key))
-        .route("/api-keys/{key_id}", delete(revoke_api_key))
+        .route(
+            "/api-keys/{key_id}",
+            delete(revoke_api_key).patch(rename_api_key),
+        )
         .route("/shares", get(list_shares).post(create_share))
         .route("/shares/{share_id}", delete(revoke_share))
         .route("/shared-with-me", get(shared_with_me))
@@ -70,6 +73,11 @@ struct SessionResponse {
 
 #[derive(Deserialize)]
 struct CreateApiKeyRequest {
+    label: String,
+}
+
+#[derive(Deserialize)]
+struct RenameApiKeyRequest {
     label: String,
 }
 
@@ -822,6 +830,33 @@ async fn revoke_api_key(
 
     store.revoke_api_key_by_id(&key_id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// PATCH /auth/api-keys/:key_id
+async fn rename_api_key(
+    State(state): State<Arc<AppState>>,
+    user: User,
+    AxumPath(key_id): AxumPath<String>,
+    Json(body): Json<RenameApiKeyRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let store = require_auth_store(&state)?;
+
+    let label = body.label.trim().to_string();
+    if label.is_empty() {
+        return Err(ApiError::new("invalid_label", "label must not be empty").with_status(400));
+    }
+
+    if !user.is_admin() {
+        let keys = store.list_api_keys_for_user(&user.email).await;
+        if !keys.iter().any(|k| k.key_id == key_id) {
+            return Err(ApiError::new("not_found", "API key not found").with_status(404));
+        }
+    }
+
+    if !store.rename_api_key_by_id(&key_id, &label).await {
+        return Err(ApiError::new("not_found", "API key not found").with_status(404));
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "label": label })))
 }
 
 /// POST /auth/shares

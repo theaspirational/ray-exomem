@@ -18,7 +18,6 @@
 	interface GeneratedKey {
 		key_id: string;
 		raw_key: string;
-		mcp_config: Record<string, unknown> | null;
 	}
 
 	function authApiBase(): string {
@@ -35,8 +34,11 @@
 		return `${(safe || 'user').toLowerCase()}-laptop`;
 	}
 
-	const VERIFY_CURL = $derived(`curl -H "Authorization: Bearer $KEY" \\
-  ${authApiBase()}/api/status`);
+	function verifyCurl(rawKey: string | null): string {
+		const token = rawKey ?? '$KEY';
+		return `curl -H "Authorization: Bearer ${token}" \\
+  ${authApiBase()}/api/status`;
+	}
 
 	function claudeCodeCmd(rawKey: string | null): string {
 		const token = rawKey ?? '<API_TOKEN>';
@@ -44,13 +46,13 @@
   --header "Authorization: Bearer ${token}"`;
 	}
 
-	function mcpJson(cfg: Record<string, unknown> | null): string {
-		if (cfg) return JSON.stringify(cfg, null, 2);
+	function mcpJson(rawKey: string | null): string {
+		const token = rawKey ?? '<YOUR_API_KEY>';
 		const url = `${authApiBase()}/mcp`;
 		return JSON.stringify(
 			{
 				mcpServers: {
-					'ray-exomem': { url, headers: { Authorization: 'Bearer <YOUR_API_KEY>' } }
+					'ray-exomem': { url, headers: { Authorization: `Bearer ${token}` } }
 				}
 			},
 			null,
@@ -242,16 +244,13 @@
 								{:else if snippetTab === 'mcp'}
 									<pre
 										class="max-h-48 overflow-auto rounded-md border border-border bg-background p-3 pr-10 font-mono text-xs text-foreground/90"
-									>{mcpJson(generatedKey.mcp_config)}</pre>
+									>{mcpJson(generatedKey.raw_key)}</pre>
 									<Button
 										variant="ghost"
 										size="icon-sm"
 										class="absolute top-1.5 right-1.5"
 										onclick={() =>
-											void copyToClipboard(
-												mcpJson(generatedKey!.mcp_config),
-												'MCP config'
-											)}
+											void copyToClipboard(mcpJson(generatedKey!.raw_key), 'MCP config')}
 										title="Copy"
 									>
 										<Copy class="size-3" />
@@ -262,12 +261,13 @@
 								{:else}
 									<pre
 										class="max-h-48 overflow-auto rounded-md border border-border bg-background p-3 pr-10 font-mono text-xs text-foreground/90"
-									>{VERIFY_CURL}</pre>
+									>{verifyCurl(generatedKey.raw_key)}</pre>
 									<Button
 										variant="ghost"
 										size="icon-sm"
 										class="absolute top-1.5 right-1.5"
-										onclick={() => void copyToClipboard(VERIFY_CURL, 'cURL example')}
+										onclick={() =>
+											void copyToClipboard(verifyCurl(generatedKey!.raw_key), 'cURL example')}
 										title="Copy"
 									>
 										<Copy class="size-3" />
@@ -280,7 +280,7 @@
 							<p class="font-sans text-xs text-foreground/70">Verify it works:</p>
 							<pre
 								class="overflow-x-auto rounded-md border border-border bg-background/80 p-3 font-mono text-[11px] leading-relaxed text-foreground/90"
-							>{VERIFY_CURL}</pre>
+							>{verifyCurl(generatedKey.raw_key)}</pre>
 						</div>
 
 						<p class="font-sans text-sm">

@@ -1087,6 +1087,63 @@ impl AuthStore {
         true
     }
 
+    /// Rename an API key's label (persists). Refreshes the api_key_cache so
+    /// future Bearer auths see the new label as actor attribution.
+    pub async fn rename_api_key_by_id(&self, key_id: &str, new_label: &str) -> bool {
+        if let Some(ref db) = self.auth_db {
+            let db = db.clone();
+            let kid = key_id.to_string();
+            let label = new_label.to_string();
+            return match async move {
+                let all = db.list_api_keys().await?;
+                let hash = all
+                    .into_iter()
+                    .find(|k| k.key_id == kid)
+                    .map(|k| k.key_hash);
+                let ok = db.rename_api_key(&kid, &label).await?;
+                anyhow::Ok((ok, hash))
+            }
+            .await
+            {
+                Ok((true, Some(h))) => {
+                    if let Some(mut entry) = self.api_key_cache.get_mut(&h) {
+                        entry.api_key_label = Some(new_label.to_string());
+                    }
+                    true
+                }
+                Ok((true, None)) => true,
+                Ok((false, _)) => false,
+                Err(e) => {
+                    eprintln!("auth: rename_api_key_by_id: {e}");
+                    false
+                }
+            };
+        }
+        let keys = self.api_keys.lock().unwrap();
+        let key_hash = keys.get(key_id).map(|k| k.key_hash.clone());
+        if key_hash.is_none() {
+            return false;
+        }
+        drop(keys);
+
+        let entry = serde_json::json!({
+            "kind": "api-key-relabel",
+            "key_id": key_id,
+            "label": new_label,
+        });
+        let _ = self.append_entry(&entry);
+
+        if let Some(stored) = self.api_keys.lock().unwrap().get_mut(key_id) {
+            stored.label = new_label.to_string();
+        }
+        if let Some(h) = key_hash {
+            if let Some(mut cached) = self.api_key_cache.get_mut(&h) {
+                cached.api_key_label = Some(new_label.to_string());
+            }
+        }
+        true
+    }
+
     /// Revoke a share grant by share_id (persists to JSONL).
     pub async fn revoke_share_by_id(&self, share_id: &str) -> bool {
         if let Some(ref db) = self.auth_db {

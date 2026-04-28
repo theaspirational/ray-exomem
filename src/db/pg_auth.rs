@@ -271,6 +271,15 @@ impl AuthDb for PgAuthDb {
         Ok(res.rows_affected() > 0)
     }
 
+    async fn rename_api_key(&self, key_id: &str, new_label: &str) -> anyhow::Result<bool> {
+        let res = sqlx::query("UPDATE api_keys SET label = $2 WHERE key_id = $1")
+            .bind(key_id)
+            .bind(new_label)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyWithUser>> {
         let rows = sqlx::query(
             r#"

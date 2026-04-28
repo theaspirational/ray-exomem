@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
-	import { Copy, Key, LogOut, Plus, Trash2, Loader2 } from '@lucide/svelte';
+	import { Copy, Key, LogOut, Pencil, Plus, Trash2, Loader2 } from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Card } from '$lib/components/ui/card/index.js';
 	import { Separator } from '$lib/components/ui/separator/index.js';
@@ -36,31 +36,15 @@
 	let generatedKey = $state<GeneratedKey | null>(null);
 
 	let revoking = $state<string | null>(null);
-	let actorValue = $state('user');
-	let savingActor = $state(false);
+
+	let renameDialogOpen = $state(false);
+	let renameKeyId = $state<string | null>(null);
+	let renameLabel = $state('');
+	let renaming = $state(false);
 
 	onMount(() => {
-		const storedActor = localStorage.getItem('ray-exomem-actor')?.trim();
-		actorValue = storedActor || 'user';
-		if (!storedActor) {
-			localStorage.setItem('ray-exomem-actor', 'user');
-		}
 		fetchKeys();
 	});
-
-	async function saveActor() {
-		const next = actorValue.trim() || 'user';
-		savingActor = true;
-		try {
-			localStorage.setItem('ray-exomem-actor', next);
-			actorValue = next;
-			toast.success('Actor saved');
-		} catch {
-			toast.error('Failed to save actor');
-		} finally {
-			savingActor = false;
-		}
-	}
 
 	async function fetchKeys() {
 		keysLoading = true;
@@ -105,6 +89,50 @@
 			toast.error(e instanceof Error ? e.message : 'Failed to generate API key');
 		} finally {
 			generating = false;
+		}
+	}
+
+	function openRenameDialog(key: ApiKey) {
+		renameKeyId = key.key_id;
+		renameLabel = key.label;
+		renameDialogOpen = true;
+	}
+
+	function closeRenameDialog() {
+		renameDialogOpen = false;
+		renameKeyId = null;
+		renameLabel = '';
+	}
+
+	async function renameKey() {
+		const keyId = renameKeyId;
+		const next = renameLabel.trim();
+		if (!keyId || !next) return;
+		const current = keys.find((k) => k.key_id === keyId);
+		if (current && current.label === next) {
+			closeRenameDialog();
+			return;
+		}
+		renaming = true;
+		try {
+			const resp = await fetch(`${authApiBase()}/auth/api-keys/${keyId}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({ label: next })
+			});
+			if (!resp.ok) {
+				const body = await resp.json().catch(() => ({}));
+				toast.error(body.message || 'Failed to rename API key');
+				return;
+			}
+			keys = keys.map((k) => (k.key_id === keyId ? { ...k, label: next } : k));
+			toast.success('API key renamed');
+			closeRenameDialog();
+		} catch (e) {
+			toast.error(e instanceof Error ? e.message : 'Failed to rename API key');
+		} finally {
+			renaming = false;
 		}
 	}
 
@@ -218,36 +246,6 @@
 		</div>
 	</Card>
 
-	<Card class="border-border/60 bg-card/80">
-		<div class="space-y-4">
-			<div class="space-y-1">
-				<h2 class="text-sm font-medium text-foreground/60">Actor</h2>
-				<p class="text-xs text-muted-foreground">
-					Used as write attribution from this browser. Default value is <span class="font-mono">user</span>.
-				</p>
-			</div>
-			<div class="space-y-2">
-				<label class="text-xs text-muted-foreground" for="profile-actor">Actor name</label>
-				<Input
-					id="profile-actor"
-					bind:value={actorValue}
-					class="border-border bg-background font-mono text-sm"
-					placeholder="user"
-					autocomplete="username"
-					onkeydown={(e) => {
-						if (e.key === 'Enter') void saveActor();
-					}}
-				/>
-			</div>
-			<Button variant="outline" size="sm" disabled={savingActor} onclick={() => void saveActor()}>
-				{#if savingActor}
-					<Loader2 class="size-3.5 animate-spin" />
-				{/if}
-				Save Actor
-			</Button>
-		</div>
-	</Card>
-
 	<!-- API Keys -->
 	<Card class="border-border/60 bg-card/80">
 		<div class="space-y-4">
@@ -284,19 +282,29 @@
 									{key.key_id} &middot; Created {formatDate(key.created_at)}
 								</p>
 							</div>
-							<Button
-								variant="ghost"
-								size="icon-sm"
-								disabled={revoking === key.key_id}
-								onclick={() => revokeKey(key.key_id)}
-								title="Revoke key"
-							>
-								{#if revoking === key.key_id}
-									<Loader2 class="size-3.5 animate-spin" />
-								{:else}
-									<Trash2 class="size-3.5 text-muted-foreground hover:text-destructive" />
-								{/if}
-							</Button>
+							<div class="flex items-center gap-1">
+								<Button
+									variant="ghost"
+									size="icon-sm"
+									onclick={() => openRenameDialog(key)}
+									title="Rename label"
+								>
+									<Pencil class="size-3.5 text-muted-foreground hover:text-foreground" />
+								</Button>
+								<Button
+									variant="ghost"
+									size="icon-sm"
+									disabled={revoking === key.key_id}
+									onclick={() => revokeKey(key.key_id)}
+									title="Revoke key"
+								>
+									{#if revoking === key.key_id}
+										<Loader2 class="size-3.5 animate-spin" />
+									{:else}
+										<Trash2 class="size-3.5 text-muted-foreground hover:text-destructive" />
+									{/if}
+								</Button>
+							</div>
 						</div>
 					{/each}
 				</div>
@@ -483,5 +491,44 @@
 				</Dialog.Footer>
 			</form>
 		{/if}
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Rename Key Dialog -->
+<Dialog.Root bind:open={renameDialogOpen}>
+	<Dialog.Content class="border-border/60 bg-card sm:max-w-md">
+		<Dialog.Header>
+			<Dialog.Title>Rename API Key</Dialog.Title>
+			<Dialog.Description>Update the label used to identify this key.</Dialog.Description>
+		</Dialog.Header>
+
+		<form
+			onsubmit={(e) => {
+				e.preventDefault();
+				renameKey();
+			}}
+			class="space-y-4"
+		>
+			<div class="space-y-1.5">
+				<label for="rename-key-label" class="text-xs font-medium text-foreground/60">Label</label>
+				<Input
+					id="rename-key-label"
+					bind:value={renameLabel}
+					placeholder="e.g. claude-desktop, cursor, dev-testing"
+					disabled={renaming}
+				/>
+			</div>
+			<Dialog.Footer>
+				<Button variant="outline" onclick={closeRenameDialog} disabled={renaming}>Cancel</Button>
+				<Button type="submit" disabled={renaming || !renameLabel.trim()}>
+					{#if renaming}
+						<Loader2 class="size-3.5 animate-spin" />
+						Saving...
+					{:else}
+						Save
+					{/if}
+				</Button>
+			</Dialog.Footer>
+		</form>
 	</Dialog.Content>
 </Dialog.Root>
