@@ -463,3 +463,53 @@ fn plan_verbatim_recommended_steps_default() {
         "expected ONLY '9000' for age=30; got {got:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// B7 regression: pinning a string literal in a body atom value position must
+// match a DATOM-encoded i64 column. ray-exomem stores str values in the V
+// column as `(0x4000... | sym_id)`; rayforce2 used to intern body string
+// literals as plain sym ids, so the equality compare missed every row. The
+// rayforce2-side fix tracks the body literal's source ray type and lets
+// dl_col_eq_row do a tag-aware payload compare against DATOM-tagged I64
+// columns. Plain RAY_SYM IDB columns (built from rule heads with string
+// constants) keep matching too — the fix is additive: the direct compare
+// is tried first, the tagged-payload compare only as a fallback.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn body_string_literal_pins_datom_encoded_value_column() {
+    let exom = "b7/main";
+    let profile = &[
+        ("f1", "color", FactValue::Str("red".into())),
+        ("f2", "color", FactValue::Str("blue".into())),
+    ];
+    let q = format!(
+        r#"(query {exom} (find ?id) (where ({exom} ?id 'color "red")))"#
+    );
+    let got = query_first_col(exom, profile, &q, &[]);
+    assert_eq!(
+        got,
+        vec!["f1".to_string()],
+        "string literal in V position must pin the DATOM-encoded color=red row; got {got:?}"
+    );
+}
+
+#[test]
+fn body_string_literal_pins_datom_encoded_via_facts_str_edb() {
+    // Same regression but routed through the typed `facts_str` EDB which
+    // also uses encode_string_datom for its V column.
+    let exom = "b7/main";
+    let profile = &[
+        ("f1", "color", FactValue::Str("red".into())),
+        ("f2", "color", FactValue::Str("blue".into())),
+    ];
+    let q = format!(
+        r#"(query {exom} (find ?id) (where (facts_str ?id 'color "red")))"#
+    );
+    let got = query_first_col(exom, profile, &q, &[]);
+    assert_eq!(
+        got,
+        vec!["f1".to_string()],
+        "string literal must match facts_str V column; got {got:?}"
+    );
+}
