@@ -920,7 +920,7 @@ fn append_public_subtree(
     Ok(())
 }
 
-async fn build_tree_root_for_user(
+pub(crate) async fn build_tree_root_for_user(
     state: &AppState,
     user: &User,
     opts: &crate::tree::WalkOptions,

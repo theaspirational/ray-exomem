@@ -469,6 +469,69 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "required": ["exom"]
             }
         }),
+        serde_json::json!({
+            "name": "init",
+            "description": "Scaffold a new project at <path>: creates `<path>/main` (the project's main exom) plus an empty `<path>/sessions/` folder. Idempotent — re-running on an already-initialised project is a no-op.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Tree path for the project (slash or :: form), e.g. `public/example/getting-started` or `work::team::project`." }
+                },
+                "required": ["path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "exom_new",
+            "description": "Create a bare exom at the given tree path. Use for free-standing exoms not attached to a project (e.g. scratch, ad-hoc namespaces). For project scaffolding use `init` instead. Idempotent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Full tree path for the new exom (slash or :: form)." }
+                },
+                "required": ["path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "tree",
+            "description": "Walk the auth-aware tree for the calling user. Returns the user's own namespace, plus any namespaces they have shares for, plus the public/* subtree. Use to discover which projects/sessions exist before calling `init`/`session_new`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Optional sub-path; if omitted, walks the full visible root." },
+                    "depth": { "type": "integer", "description": "Optional max depth. Defaults to unbounded." },
+                    "include_archived": { "type": "boolean", "description": "Include archived nodes (default false)." },
+                    "include_branches": { "type": "boolean", "description": "Include per-exom branch summaries (default false)." }
+                },
+                "required": []
+            }
+        }),
+        serde_json::json!({
+            "name": "merge_branch",
+            "description": "Merge `branch` into the exom's current branch using the supplied policy. `last-writer-wins` overwrites conflicting target facts; `keep-target` skips conflicts; `manual` returns the conflict list without writing. Returns added fact ids, conflicts, and the merge tx id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "exom": { "type": "string", "description": "Exom name." },
+                    "branch": { "type": "string", "description": "Source branch to merge from." },
+                    "policy": { "type": "string", "enum": ["last-writer-wins", "keep-target", "manual"], "description": "Conflict-resolution policy. Defaults to `last-writer-wins`." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity. Explicit only." }
+                },
+                "required": ["exom", "branch"]
+            }
+        }),
+        serde_json::json!({
+            "name": "archive_branch",
+            "description": "Soft-delete a branch (sets archived=true). Cannot archive `main`. The branch's history is preserved; subsequent reads filter it out.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "exom": { "type": "string", "description": "Exom name." },
+                    "branch": { "type": "string", "description": "Branch to archive." }
+                },
+                "required": ["exom", "branch"]
+            }
+        }),
     ]
 }
 
@@ -519,6 +582,11 @@ async fn handle_tool_call(
         "session_close" => tool_session_close(state, user, &arguments).await,
         "schema" => tool_schema(state, &arguments),
         "export" => tool_export(state, &arguments),
+        "init" => tool_init(state, user, &arguments).await,
+        "exom_new" => tool_exom_new(state, user, &arguments).await,
+        "tree" => tool_tree(state, user, &arguments).await,
+        "merge_branch" => tool_merge_branch(state, user, &arguments).await,
+        "archive_branch" => tool_archive_branch(state, user, &arguments).await,
         _ => Err(JsonRpcError {
             code: -32602,
             message: format!("unknown tool: {tool_name}"),
@@ -1401,6 +1469,260 @@ fn tool_schema(state: &AppState, args: &serde_json::Value) -> Result<String, Jso
     let es = load_exom(state, &mut exoms, &exom_slash)?;
     let ontology = crate::system_schema::build_exom_ontology(&exom_slash, &es.brain, &es.rules);
     Ok(serde_json::to_string_pretty(&ontology).unwrap_or_else(|_| "{}".into()))
+}
+
+async fn tool_init(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let path_str = require_str(args, "path")?;
+    let path: crate::path::TreePath = path_str.parse().map_err(|e: crate::path::PathError| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("invalid path: {e}"),
+        }
+    })?;
+    let path_slash = path.to_slash_string();
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store).await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", path_slash),
+            });
+        }
+    }
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    crate::scaffold::init_project(tree_root, &path).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e.to_string(),
+    })?;
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path_slash,
+    })
+    .to_string())
+}
+
+async fn tool_exom_new(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let path_str = require_str(args, "path")?;
+    let path: crate::path::TreePath = path_str.parse().map_err(|e: crate::path::PathError| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("invalid path: {e}"),
+        }
+    })?;
+    let path_slash = path.to_slash_string();
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store).await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", path_slash),
+            });
+        }
+    }
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    crate::scaffold::new_bare_exom(tree_root, &path).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e.to_string(),
+    })?;
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path_slash,
+    })
+    .to_string())
+}
+
+async fn tool_tree(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let depth = args.get("depth").and_then(|v| v.as_u64()).map(|n| n as usize);
+    let include_archived = args
+        .get("include_archived")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let include_branches = args
+        .get("include_branches")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let opts = crate::tree::WalkOptions {
+        depth: depth.or(Some(usize::MAX)),
+        include_archived,
+        include_branches,
+        include_activity: false,
+    };
+
+    let node = match get_str(args, "path").filter(|s| !s.is_empty()) {
+        None => crate::server::build_tree_root_for_user(state, user, &opts)
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("io: {e}"),
+            })?,
+        Some(p) => {
+            let path: crate::path::TreePath =
+                p.parse().map_err(|e: crate::path::PathError| JsonRpcError {
+                    code: -32602,
+                    message: format!("invalid path: {e}"),
+                })?;
+            let path_slash = path.to_slash_string();
+            if let Some(ref auth_store) = state.auth_store {
+                let level =
+                    crate::auth::access::resolve_access(user, &path_slash, auth_store).await;
+                if !level.can_read() {
+                    return Err(JsonRpcError {
+                        code: -32000,
+                        message: format!("forbidden: read access denied to {}", path_slash),
+                    });
+                }
+            }
+            let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+                code: -32000,
+                message: "daemon has no tree_root configured".into(),
+            })?;
+            let sym_path = state.sym_path.as_deref().ok_or_else(|| JsonRpcError {
+                code: -32000,
+                message: "daemon has no sym_path configured".into(),
+            })?;
+            crate::tree::walk(tree_root, sym_path, &path, &opts).map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("io: {e}"),
+            })?
+        }
+    };
+
+    serde_json::to_string_pretty(&node).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("serde: {e}"),
+    })
+}
+
+async fn tool_merge_branch(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let exom_slash = exom_slug(args);
+    let source_branch = require_str(args, "branch")?.to_string();
+    let policy = match get_str(args, "policy").unwrap_or("last-writer-wins") {
+        "last-writer-wins" => crate::brain::MergePolicy::LastWriterWins,
+        "keep-target" => crate::brain::MergePolicy::KeepTarget,
+        "manual" => crate::brain::MergePolicy::Manual,
+        other => {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: format!("unknown merge policy {:?}", other),
+            });
+        }
+    };
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store).await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", exom_slash),
+            });
+        }
+    }
+
+    let ctx = mcp_mutation_ctx(user, args);
+
+    let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
+        let target = es.brain.current_branch_id().to_string();
+        es.brain.merge_branch(&source_branch, &target, policy, &ctx)
+    })
+    .await;
+
+    match result {
+        Ok(merge_result) => Ok(serde_json::json!({
+            "ok": true,
+            "added": merge_result.added,
+            "conflicts": merge_result.conflicts.iter().map(|c| serde_json::json!({
+                "fact_id": c.fact_id,
+                "predicate": c.predicate,
+                "source_value": c.source_value,
+                "target_value": c.target_value,
+            })).collect::<Vec<_>>(),
+            "tx_id": merge_result.tx_id,
+        })
+        .to_string()),
+        Err(e) => Err(JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        }),
+    }
+}
+
+async fn tool_archive_branch(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let exom_slash = exom_slug(args);
+    let branch = require_str(args, "branch")?.to_string();
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store).await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", exom_slash),
+            });
+        }
+    }
+
+    let bid = branch.clone();
+    let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
+        es.brain.archive_branch(&bid)?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => Ok(serde_json::json!({
+            "ok": true,
+            "exom": exom_slash,
+            "archived": branch,
+        })
+        .to_string()),
+        Err(e) => Err(JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        }),
+    }
 }
 
 fn tool_export(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
