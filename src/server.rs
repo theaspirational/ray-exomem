@@ -1951,9 +1951,24 @@ fn expand_canonical_query(
         .collect();
 
     // Pin body-atom string literals to sym tags when the schema demands it.
-    // Must run before rule expansion so inlined rule bodies inherit the fix.
+    // Two paths:
+    //   - direct EAV `(?e 'attr "literal")` — rewritten in place.
+    //   - rule-call `(rule-name ?id "literal" ?v)` — the literal arrives at
+    //     the inlined rule body's value slot only after rayforce2 expands
+    //     the rule, so we rewrite at the call site using a per-rule head-
+    //     param→attr map derived from each rule's inline body.
+    let mut rule_attr_map: std::collections::HashMap<String, Vec<Option<String>>> =
+        std::collections::HashMap::new();
+    for body in &rule_inline_bodies {
+        if let Some((name, attrs)) = rayfall_ast::derive_rule_param_attrs(body) {
+            rule_attr_map.insert(name, attrs);
+        }
+    }
     let mut query = query.clone();
-    query.rewrite_body_literals_with_schema(|attr| es.brain.value_kind_for_attr(attr));
+    query.rewrite_body_literals_with_schema_and_rules(
+        |attr| es.brain.value_kind_for_attr(attr),
+        |name| rule_attr_map.get(name).cloned(),
+    );
 
     let normalized_query = query.emit();
     let expanded_query =

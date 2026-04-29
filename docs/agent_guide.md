@@ -300,6 +300,39 @@ builtin views instead.
        (where (facts_i64 ?id "service/sla_p99_ms" ?ms) (< ?ms 500)))
 ```
 
+**Pin literals in the body atom, not in a separate `(= ?var "lit")`
+clause.** Rayfall's `where` does not accept assignment-style equality forms:
+`(where (?tx 'tx/action ?act) (= ?act "retract-fact"))` returns `rayforce2
+err type: rule: cannot parse assignment expression`. Bind the literal
+directly inside the body atom instead — `(where (?tx 'tx/action
+"retract-fact"))`.
+
+**Pinning a literal in a rule-call slot is supported.** Forms like
+`(fact-row ?id "service/sla_p99_ms" ?v)` or `(tx-row ?tx ?id ?u ?a ?m
+"merge" ?w ?br)` resolve correctly: the lowering layer derives each rule's
+head-param→attribute map and tags the literal at the call site (so
+`"service/sla_p99_ms"` becomes `'service/sla_p99_ms` for the sym-encoded
+`fact/predicate` slot before the engine evaluates the rule). String-valued
+slots (`tx/action`, `tx/branch`) are matched by rayforce2's tag-aware
+compare without rewriting. Both the rule-call form and the direct EAV form
+`(?id 'fact/predicate "service/sla_p99_ms")` work — pick whichever reads
+more naturally.
+
+**Don't confuse entity refs with predicate values.** `tx-row` projects
+`tx/N` for `?tx` (the entity ref) and the bare numeric id for `?id` (the
+`tx/id` predicate value). So `(?tx 'tx/id "tx/22")` returns 0 rows; the
+correct pin is `(?tx 'tx/id "22")`. Same trap with facts: a `fact_id` and
+the predicate name often look identical (e.g. `"test/n"`), but in
+`(?fact 'fact/predicate ?p)`, `?fact` binds to the entity ref and `?p` to
+the predicate name. When unsure, run the unpinned form first to see what
+the value actually is.
+
+**Every `find` variable must be bound by some body atom.** Projecting a var
+that is pinned in the body to a constant — e.g. `(find ?id ?p ?v) (where
+(fact-row ?id "fx/marker" ?v))` — fails with `dl_project: unset head-const
+type` because `?p` never gets a binding. Either drop the unbound var from
+`find`, or use a fully-variable body atom and add a join.
+
 **Branch-scoped reads.** Pass `branch: "<name>"` to `query` or `eval` to
 evaluate against a specific branch's view of facts/tx/observations/beliefs
 without persistently changing the exom's cursor. Useful for inspecting
@@ -481,6 +514,8 @@ audits, not for incremental sync.
 | `unknown_branch: unknown branch '<name>'` | Passed `branch:` arg that doesn't exist or is archived on the target exom | `list_branches` to enumerate; create with `create_branch` if you meant to. |
 | `query missing database name` | Sent `(query (find ...) ...)` with no exom path inside the form | Add the exom path: `(query <exom> (find ...) (where ...))`. |
 | `rule '<name>' expects N args, got M` | Server-side arity check rejected a body atom before evaluation | Look up the right arity in `schema.builtin_views` (`fact-row` is 3, `tx-row` is 8, typed EDBs are 3). |
+| `rayforce2 err type: rule: cannot parse assignment expression` | Used `(= ?var "lit")` in a `where` clause — Rayfall doesn't accept assignment-style equality | Pin the literal directly into the body atom: `(?tx 'tx/action "retract-fact")` instead of `(?tx 'tx/action ?act) (= ?act "retract-fact")`. |
+| `dl_project: unset head-const type` | A variable in `find` is pinned to a constant in the body (or otherwise never bound to a column) | Drop the unbound var from `find`, or rewrite the body atom with a real binding. |
 | `unknown relation '<name>' in query body` | Body atom referenced something that isn't a typed EDB, builtin view, or user rule head | The error suggests the closest match. Use `schema.builtin_views` to enumerate. |
 | `rayforce2 err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce2 upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
 | `missing required parameter: <name>` | MCP arg validation | Add the missing field. |
@@ -490,6 +525,7 @@ audits, not for incremental sync.
 | `branch_owned` | Another user already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). |
 | `session_closed` | The session exom has `session/closed_at` set; writes are rejected | Retract `session/closed_at` to reopen, or pick a different session. |
 | `cannot archive branch 'main'` | Tried to `archive_branch` on `main` | Archive a feature branch instead; `main` is the trunk and is permanent. |
+| 0 rows from a pinned EAV query (no error, just empty result) | Often: pinned the wrong slot. `(?tx 'tx/id "tx/22")` returns 0 because `"tx/22"` is the entity ref; the `tx/id` *value* is `"22"`. Same with `fact_id` vs predicate name. | Run the unpinned form first (`(?tx 'tx/id ?id)`) to see what the value actually is, then pin against that. |
 
 ---
 

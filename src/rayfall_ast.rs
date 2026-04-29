@@ -102,26 +102,63 @@ impl CanonicalQuery {
     /// every body atom shaped `(?e 'attr literal)` whose attribute resolves
     /// in the schema to a sym-encoded `value_kind`, rewrite the literal to
     /// `'literal` so the engine sym-interns it before the compare.
-    ///
-    /// Must run before rule expansion so the rewrite propagates into
-    /// inlined rule bodies.
     pub fn rewrite_body_literals_with_schema<F>(&mut self, value_kind_for_attr: F)
     where
         F: Fn(&str) -> Option<String>,
     {
+        self.rewrite_body_literals_with_schema_and_rules(value_kind_for_attr, |_| None);
+    }
+
+    /// Like `rewrite_body_literals_with_schema`, but also rewrites literal
+    /// args of rule-call body atoms.
+    ///
+    /// Rule expansion happens server-side in rayforce2, so a literal in a
+    /// rule-call slot — e.g. `"test/n"` in `(fact-row ?id "test/n" ?v)` —
+    /// only lands in the inlined `(?fact 'fact/predicate "test/n")` AFTER
+    /// the query string leaves Rust. Rewriting at expansion-time on our
+    /// side won't reach it. Instead, derive a per-head-param attribute map
+    /// from each rule definition (`derive_rule_param_attrs`) and pin the
+    /// rule-call literals here, before the engine ever sees them.
+    pub fn rewrite_body_literals_with_schema_and_rules<F, G>(
+        &mut self,
+        value_kind_for_attr: F,
+        rule_param_attrs: G,
+    ) where
+        F: Fn(&str) -> Option<String>,
+        G: Fn(&str) -> Option<Vec<Option<String>>>,
+    {
         for clause in &mut self.clauses {
-            rewrite_expr_body_literals(clause, &value_kind_for_attr);
+            rewrite_expr_body_literals(clause, &value_kind_for_attr, &rule_param_attrs);
         }
     }
 }
 
 const SYM_ENCODED_KINDS: &[&str] = &["predicate", "branch", "tx-entity", "entity", "sym"];
 
-fn rewrite_expr_body_literals<F>(expr: &mut Expr, value_kind_for_attr: &F)
+fn pin_string_to_sym<F>(arg: &mut Expr, attr: &str, value_kind_for_attr: &F)
 where
     F: Fn(&str) -> Option<String>,
 {
+    if let Expr::String(s) = arg {
+        if let Some(kind) = value_kind_for_attr(attr) {
+            if SYM_ENCODED_KINDS.contains(&kind.as_str()) {
+                let value = s.clone();
+                *arg = Expr::Quote(Box::new(Expr::Symbol(value)));
+            }
+        }
+    }
+}
+
+fn rewrite_expr_body_literals<F, G>(
+    expr: &mut Expr,
+    value_kind_for_attr: &F,
+    rule_param_attrs: &G,
+) where
+    F: Fn(&str) -> Option<String>,
+    G: Fn(&str) -> Option<Vec<Option<String>>>,
+{
     if let Expr::List(items) = expr {
+        // EAV body atom: `(?ent 'attr "literal")` → `(?ent 'attr 'literal)`.
         if items.len() == 3 {
             let attr_name = match &items[1] {
                 Expr::Quote(inner) => match inner.as_ref() {
@@ -130,22 +167,86 @@ where
                 },
                 _ => None,
             };
-            let lit = match &items[2] {
-                Expr::String(s) => Some(s.clone()),
-                _ => None,
-            };
-            if let (Some(attr), Some(value)) = (attr_name, lit) {
-                if let Some(kind) = value_kind_for_attr(&attr) {
-                    if SYM_ENCODED_KINDS.contains(&kind.as_str()) {
-                        items[2] = Expr::Quote(Box::new(Expr::Symbol(value)));
+            if let Some(attr) = attr_name {
+                pin_string_to_sym(&mut items[2], &attr, value_kind_for_attr);
+            }
+        }
+
+        // Rule-call body atom: `(rule-name arg0 arg1 ... argN)`. Each argN
+        // matches one head-param slot of the rule; if that slot is bound to
+        // an attribute's value position in the rule body, the literal needs
+        // the same sym-pin treatment.
+        if let Some(name) = items.first().and_then(Expr::as_symbol) {
+            if let Some(param_attrs) = rule_param_attrs(name) {
+                for (i, arg) in items.iter_mut().enumerate().skip(1) {
+                    let slot = i - 1;
+                    if let Some(Some(attr)) = param_attrs.get(slot) {
+                        pin_string_to_sym(arg, attr, value_kind_for_attr);
                     }
                 }
             }
         }
+
         for child in items.iter_mut() {
-            rewrite_expr_body_literals(child, value_kind_for_attr);
+            rewrite_expr_body_literals(child, value_kind_for_attr, rule_param_attrs);
         }
     }
+}
+
+/// Derive a per-head-param attribute mapping from a rule's inline body.
+///
+/// Returns `(head_predicate, per-slot attr names)`. For a rule like
+/// `((fact-row ?fact ?pred ?value) (?fact 'fact/predicate ?pred) (?fact 'fact/value ?value))`,
+/// returns `("fact-row", [None, Some("fact/predicate"), Some("fact/value")])` —
+/// slot 0 (?fact) is an entity slot (no value-position attr), slot 1 (?pred)
+/// is the value of `fact/predicate`, slot 2 (?value) is the value of
+/// `fact/value`. Used by the rule-call rewriter to pin sym-encoded literals
+/// before the rule expands inside the engine.
+pub fn derive_rule_param_attrs(inline_body: &str) -> Option<(String, Vec<Option<String>>)> {
+    use std::collections::HashMap;
+
+    let parsed = parse_one(inline_body).ok()?;
+    let outer = parsed.as_list()?;
+    let head = outer.first()?.as_list()?;
+    let head_pred = head.first()?.as_symbol()?.to_string();
+    let head_vars: Vec<Option<String>> = head[1..]
+        .iter()
+        .map(|e| match e {
+            Expr::Symbol(s) if s.starts_with('?') => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let mut value_var_to_attr: HashMap<String, String> = HashMap::new();
+    for clause in &outer[1..] {
+        let Some(items) = clause.as_list() else {
+            continue;
+        };
+        if items.len() != 3 {
+            continue;
+        }
+        let attr = match &items[1] {
+            Expr::Quote(inner) => match inner.as_ref() {
+                Expr::Symbol(s) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let value_var = match &items[2] {
+            Expr::Symbol(s) if s.starts_with('?') => Some(s.clone()),
+            _ => None,
+        };
+        if let (Some(a), Some(v)) = (attr, value_var) {
+            value_var_to_attr.entry(v).or_insert(a);
+        }
+    }
+
+    let param_attrs = head_vars
+        .into_iter()
+        .map(|v| v.and_then(|name| value_var_to_attr.get(&name).cloned()))
+        .collect();
+
+    Some((head_pred, param_attrs))
 }
 
 impl CanonicalRule {
