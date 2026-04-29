@@ -772,7 +772,7 @@ async fn create_api_key(
     let mcp_snippet = serde_json::json!({
         "mcpServers": {
             "ray-exomem": {
-                "url": format!("http://{bind}{}/api", crate::server::BASE_PATH),
+                "url": format!("http://{bind}{}/mcp", crate::server::BASE_PATH),
                 "headers": {
                     "Authorization": format!("Bearer {raw_key}")
                 }

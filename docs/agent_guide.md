@@ -12,6 +12,8 @@ here. Agents should not call CLI binaries.
 ## 1. Connecting
 
 Ray-exomem speaks MCP over Streamable HTTP at `<base>/mcp`.
+`<base>/mcp/sse` is also accepted as a Streamable HTTP alias for clients
+whose examples or configuration UIs expect an `/sse`-suffixed endpoint.
 
 For the hosted instance:
 
@@ -20,8 +22,17 @@ https://mem.trydev.app/mcp
 Authorization: Bearer <api-key>
 ```
 
+Equivalent alias:
+
+```
+https://mem.trydev.app/mcp/sse
+Authorization: Bearer <api-key>
+```
+
 Issue an API key from the user's session (`/auth/api-keys`). Local dev runs at
-`http://127.0.0.1:9780/mcp` with the same auth contract.
+`http://127.0.0.1:9780/mcp` or `http://127.0.0.1:9780/mcp/sse`. When local dev
+is launched without an auth provider, those MCP endpoints work without a bearer
+token and writes are attributed to `local@ray-exomem`.
 
 The server advertises tools via standard MCP `tools/list`. The current toolset
 is fixed at compile time and listed in §4.

@@ -26,8 +26,35 @@ fn mcp_call(
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
-    let resp = ureq::post(&format!("{base_url}/mcp"))
+    mcp_call_at(base_url, "/mcp", raw_key, method, params)
+}
+
+fn mcp_call_at(
+    base_url: &str,
+    path: &str,
+    raw_key: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let resp = ureq::post(&format!("{base_url}{path}"))
         .set("Authorization", &format!("Bearer {raw_key}"))
+        .send_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }))
+        .unwrap();
+    resp.into_json().unwrap()
+}
+
+fn mcp_call_no_auth(
+    base_url: &str,
+    path: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let resp = ureq::post(&format!("{base_url}{path}"))
         .send_json(json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -93,7 +120,7 @@ fn mcp_tools_list() {
         "fact_history",
         "list_branches",
         "create_branch",
-        "start_session",
+        "session_new",
         "schema",
         "export",
     ] {
@@ -114,6 +141,59 @@ fn mcp_tools_list() {
             tool
         );
     }
+}
+
+#[test]
+fn mcp_sse_path_accepts_streamable_post() {
+    let (daemon, raw_key) = daemon_with_api_key();
+
+    let body = mcp_call_at(
+        &daemon.base_url,
+        "/mcp/sse",
+        &raw_key,
+        "initialize",
+        json!({}),
+    );
+
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert_eq!(body["result"]["serverInfo"]["name"], "ray-exomem");
+    assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn mcp_single_user_mode_accepts_streamable_post_without_auth() {
+    let daemon = common::daemon::TestDaemon::start();
+
+    let body = mcp_call_no_auth(&daemon.base_url, "/mcp/sse", "initialize", json!({}));
+
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert_eq!(body["result"]["serverInfo"]["name"], "ray-exomem");
+    assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn mcp_notification_returns_accepted_without_json_rpc_body() {
+    let (daemon, raw_key) = daemon_with_api_key();
+
+    let resp = ureq::post(&format!("{}/mcp", daemon.base_url))
+        .set("Authorization", &format!("Bearer {raw_key}"))
+        .send_json(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }))
+        .expect("notification should be accepted");
+
+    assert_eq!(resp.status(), 202);
+    let body = resp
+        .into_string()
+        .expect("response body should be readable");
+    assert!(
+        body.is_empty(),
+        "notification response body should be empty"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,5 +317,33 @@ fn mcp_tool_eval() {
     assert!(
         text.contains('3'),
         "eval of (+ 1 2) should contain 3, got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: tools/call tree on an unmapped path returns `unknown_path:` rather
+// than a generic `io: missing` (F4 — distinguish "not allocated yet" from real
+// I/O failure so callers can pattern-match on the canonical substring).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_tool_tree_returns_unknown_path_for_unmapped_path() {
+    let (daemon, raw_key) = daemon_with_api_key();
+
+    let body = mcp_call(
+        &daemon.base_url,
+        &raw_key,
+        "tools/call",
+        json!({
+            "name": "tree",
+            "arguments": { "path": "public/never-existed" }
+        }),
+    );
+
+    assert!(body["result"].is_null(), "should have no result: {body}");
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("unknown_path: public/never-existed"),
+        "expected unknown_path error for unmapped path, got: {msg}"
     );
 }

@@ -241,6 +241,7 @@ All daemon routes are mounted under `server::BASE_PATH`, compiled from
 GET http://127.0.0.1:9780/api/status
 GET http://127.0.0.1:9780/events
 POST http://127.0.0.1:9780/mcp
+POST http://127.0.0.1:9780/mcp/sse
 ```
 
 With `RAY_EXOMEM_BASE_PATH=/ray-exomem`:
@@ -249,6 +250,7 @@ With `RAY_EXOMEM_BASE_PATH=/ray-exomem`:
 GET http://127.0.0.1:9780/ray-exomem/api/status
 GET http://127.0.0.1:9780/ray-exomem/events
 POST http://127.0.0.1:9780/ray-exomem/mcp
+POST http://127.0.0.1:9780/ray-exomem/mcp/sse
 ```
 
 Canonical API routes:
@@ -301,7 +303,8 @@ Removed legacy routes:
 
 The embedded UI is served by the same daemon and includes tree, exom, query,
 graph, guide, login, profile, and admin surfaces. Server-Sent Events stream from
-`/events`. The MCP Streamable HTTP endpoint is `/mcp`.
+`/events`. The MCP Streamable HTTP endpoint is `/mcp`; `/mcp/sse` is an alias
+for MCP clients whose configuration examples use an `/sse`-suffixed URL.
 
 ## Auth and Local Development
 
@@ -427,4 +430,3 @@ in the terminal.
 reflexively; persisted splay rows encode symbol IDs by slot.
 - Startup runs a sym rewrite compatibility pass and an engine health probe over
 loaded exoms to surface rayforce2 symbol-layout problems early.
-

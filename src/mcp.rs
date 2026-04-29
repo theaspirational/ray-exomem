@@ -20,8 +20,10 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::IntervalStream;
 
-use crate::auth::{middleware::MaybeUser, User};
+use crate::auth::{middleware::MaybeUser, User, UserRole};
 use crate::server::AppState;
+
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -79,9 +81,16 @@ impl JsonRpcResponse {
 
 pub async fn mcp_handler(
     State(state): State<Arc<AppState>>,
-    user: User,
+    maybe_user: MaybeUser,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    let local_user = if state.auth_store.is_none() && maybe_user.0.is_none() {
+        Some(local_mcp_user())
+    } else {
+        None
+    };
+    let user = maybe_user.0.as_ref().or(local_user.as_ref());
+
     let id = req.id.clone();
     let result = match req.method.as_str() {
         "initialize" => handle_initialize(),
@@ -90,22 +99,52 @@ pub async fn mcp_handler(
         "resources/list" => Ok(handle_resources_list()),
         "resources/read" => handle_resources_read(req.params),
         "prompts/list" => Ok(serde_json::json!({ "prompts": [] })),
-        "tools/call" => handle_tool_call(&state, &user, req.params).await,
+        "tools/call" => match user {
+            Some(user) => handle_tool_call(&state, user, req.params).await,
+            None => Err(JsonRpcError {
+                code: -32001,
+                message: "authentication required".into(),
+            }),
+        },
         _ => Err(JsonRpcError {
             code: -32601,
             message: format!("method not found: {}", req.method),
         }),
     };
+    if id.is_none() {
+        return match result {
+            Ok(_) => (StatusCode::ACCEPTED, mcp_headers()).into_response(),
+            Err(error) => {
+                let resp = JsonRpcResponse::err(None, error);
+                (StatusCode::BAD_REQUEST, mcp_headers(), Json(resp)).into_response()
+            }
+        };
+    }
     let resp = match result {
         Ok(value) => JsonRpcResponse::ok(id, value),
         Err(error) => JsonRpcResponse::err(id, error),
     };
+    (mcp_headers(), Json(resp)).into_response()
+}
+
+fn mcp_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         "mcp-protocol-version",
-        HeaderValue::from_static("2024-11-05"),
+        HeaderValue::from_static(MCP_PROTOCOL_VERSION),
     );
-    (headers, Json(resp)).into_response()
+    headers
+}
+
+fn local_mcp_user() -> User {
+    User {
+        email: "local@ray-exomem".into(),
+        display_name: "Local MCP".into(),
+        provider: "local".into(),
+        session_id: None,
+        api_key_label: Some("mcp-local".into()),
+        role: UserRole::TopAdmin,
+    }
 }
 
 pub async fn mcp_stream_handler(
@@ -114,21 +153,11 @@ pub async fn mcp_stream_handler(
 ) -> impl IntoResponse {
     let events = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
         .map(|_| Ok::<Event, std::convert::Infallible>(Event::default().comment("keepalive")));
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "mcp-protocol-version",
-        HeaderValue::from_static("2024-11-05"),
-    );
-    (headers, Sse::new(events)).into_response()
+    (mcp_headers(), Sse::new(events)).into_response()
 }
 
 pub async fn mcp_delete_handler(_maybe_user: MaybeUser) -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "mcp-protocol-version",
-        HeaderValue::from_static("2024-11-05"),
-    );
-    (StatusCode::NO_CONTENT, headers).into_response()
+    (StatusCode::NO_CONTENT, mcp_headers()).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +166,7 @@ pub async fn mcp_delete_handler(_maybe_user: MaybeUser) -> impl IntoResponse {
 
 fn handle_initialize() -> Result<serde_json::Value, JsonRpcError> {
     Ok(serde_json::json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {
             "tools": {},
             "resources": {},
@@ -1017,15 +1046,17 @@ async fn tool_believe(
     let claim_text = require_str(args, "claim_text")?.to_string();
     let confidence = args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.7);
     let rationale = get_str(args, "rationale").unwrap_or("").to_string();
-    let supports: Vec<String> = args
-        .get("supports")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Distinguish None (key absent → inherit prior supports on revise) from
+    // Some(vec![]) (key present and empty → deliberate clear).
+    let supports: Option<Vec<String>> = args.get("supports").map(|v| {
+        v.as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
     let branch = get_str(args, "branch").map(str::to_string);
@@ -1622,9 +1653,16 @@ async fn tool_tree(
                 code: -32000,
                 message: "daemon has no sym_path configured".into(),
             })?;
-            crate::tree::walk(tree_root, sym_path, &path, &opts).map_err(|e| JsonRpcError {
-                code: -32000,
-                message: format!("io: {e}"),
+            crate::tree::walk(tree_root, sym_path, &path, &opts).map_err(|e| {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("unknown_path: {}", path_slash)
+                } else {
+                    format!("io: {e}")
+                };
+                JsonRpcError {
+                    code: -32000,
+                    message: msg,
+                }
             })?
         }
     };

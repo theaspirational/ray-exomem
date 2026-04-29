@@ -536,11 +536,11 @@ impl Brain {
     }
 
     pub fn retract_fact(&mut self, fact_id: &str, ctx: &MutationContext) -> Result<TxId> {
-        if !self
-            .facts
-            .iter()
-            .any(|f| f.fact_id == fact_id && f.revoked_by_tx.is_none())
-        {
+        if !self.facts.iter().any(|f| {
+            f.fact_id == fact_id
+                && f.revoked_by_tx.is_none()
+                && f.superseded_by_tx.is_none()
+        }) {
             bail!("no active fact with id '{}'", fact_id);
         }
         let (tx_id, tx_time) = self.alloc_tx(
@@ -549,12 +549,16 @@ impl Brain {
             &format!("retract: {}", fact_id),
             ctx,
         )?;
-        // Retract closes EVERY active row for this fact_id: stamps revoked_by
+        // Retract closes the open head row for this fact_id: stamps revoked_by
         // and overrides valid_to to the retract time. Even rows with an
         // explicit future valid_to lose that projection — the assertion
-        // terminates now.
+        // terminates now. Prior superseded rows keep their already-closed
+        // valid_to and are left untouched.
         for f in self.facts.iter_mut() {
-            if f.fact_id == fact_id && f.revoked_by_tx.is_none() {
+            if f.fact_id == fact_id
+                && f.revoked_by_tx.is_none()
+                && f.superseded_by_tx.is_none()
+            {
                 f.revoked_by_tx = Some(tx_id);
                 f.valid_to = Some(tx_time.clone());
             }
@@ -621,12 +625,27 @@ impl Brain {
         belief_id: &str,
         claim_text: &str,
         confidence: f64,
-        supported_by: Vec<String>,
+        supported_by: Option<Vec<String>>,
         rationale: &str,
         valid_from: Option<&str>,
         valid_to: Option<&str>,
         ctx: &MutationContext,
     ) -> Result<TxId> {
+        // If supports was omitted (None), inherit from the most recent active
+        // belief with this belief_id so a partial revise doesn't wipe the
+        // prior linkage. An explicit empty vec is a deliberate clear.
+        let inherited = match &supported_by {
+            Some(_) => None,
+            None => self
+                .beliefs
+                .iter()
+                .rev()
+                .find(|b| b.belief_id == belief_id && b.status == BeliefStatus::Active)
+                .map(|b| b.supported_by.clone()),
+        };
+        let final_supported_by = supported_by
+            .or(inherited)
+            .unwrap_or_default();
         let (tx_id, tx_time) = self.alloc_tx(
             TxAction::ReviseBelief,
             vec![belief_id.into()],
@@ -654,7 +673,7 @@ impl Brain {
             claim_text: claim_text.into(),
             status: BeliefStatus::Active,
             confidence,
-            supported_by,
+            supported_by: final_supported_by,
             created_by_tx: tx_id,
             valid_from: valid_from.unwrap_or(&tx_time).to_string(),
             valid_to: valid_to.map(|s| s.to_string()),
@@ -1309,7 +1328,7 @@ impl Brain {
                 "b1",
                 "the sky is blue",
                 0.9,
-                vec!["f1".into()],
+                Some(vec!["f1".into()]),
                 "direct observation supports this",
                 None,
                 None,
@@ -1355,7 +1374,7 @@ impl Brain {
                 "b2",
                 "the sky is blue",
                 0.3,
-                vec!["f1".into()],
+                Some(vec!["f1".into()]),
                 "overcast today, revising confidence down",
                 None,
                 None,
@@ -2460,6 +2479,144 @@ mod tests {
     }
 
     #[test]
+    fn retract_after_supersede_chain_only_closes_head() {
+        // Three asserts on the same fact_id produce a chain: rows 1 & 2 are
+        // superseded with their valid_to closed to the next assert's
+        // valid_from, row 3 is the head with an explicit future valid_to.
+        // Retract must touch only the head — superseded rows keep their
+        // already-closed valid_to and stay revoked_by = None.
+        let mut brain = Brain::new();
+        let tx1 = brain
+            .assert_fact(
+                "bt/age",
+                "age",
+                FactValue::I64(40),
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx2 = brain
+            .assert_fact(
+                "bt/age",
+                "age",
+                FactValue::I64(41),
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx3 = brain
+            .assert_fact(
+                "bt/age",
+                "age",
+                FactValue::I64(42),
+                1.0,
+                "test",
+                None,
+                Some("2099-01-01T00:00:00Z"),
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx4 = brain
+            .retract_fact("bt/age", &MutationContext::default())
+            .unwrap();
+
+        let history = brain.fact_history("bt/age");
+        assert_eq!(history.len(), 3);
+
+        let row1 = &history[0];
+        assert_eq!(row1.created_by_tx, tx1);
+        assert_eq!(row1.superseded_by_tx, Some(tx2));
+        assert_eq!(row1.revoked_by_tx, None);
+        let row2 = &history[1];
+        assert_eq!(row2.created_by_tx, tx2);
+        assert_eq!(row2.superseded_by_tx, Some(tx3));
+        assert_eq!(row2.revoked_by_tx, None);
+
+        // Row 1's valid_to was closed by tx2 at supersede; must not be
+        // overwritten by the retract's tx_time.
+        let row1_close = row1.valid_to.as_deref().unwrap();
+        let row2_close = row2.valid_to.as_deref().unwrap();
+        assert!(
+            row1_close <= row2_close,
+            "row1 should be closed at or before row2 (got row1={row1_close} row2={row2_close})"
+        );
+
+        let row3 = &history[2];
+        assert_eq!(row3.created_by_tx, tx3);
+        assert_eq!(row3.superseded_by_tx, None);
+        assert_eq!(row3.revoked_by_tx, Some(tx4));
+        let head_close = row3.valid_to.as_deref().unwrap();
+        assert!(
+            head_close < "2099-01-01T00:00:00Z",
+            "retract must override the head's explicit future valid_to (got {head_close})"
+        );
+    }
+
+    #[test]
+    fn revise_inherits_supports_when_omitted() {
+        let mut brain = Brain::new();
+        let ctx = MutationContext::default();
+        brain
+            .revise_belief(
+                "b1",
+                "v1",
+                0.9,
+                Some(vec!["test/i64-num".into()]),
+                "first",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+        // Revise with supports OMITTED — should inherit ["test/i64-num"].
+        brain
+            .revise_belief("b1", "v2", 0.8, None, "second", None, None, &ctx)
+            .unwrap();
+
+        let head = brain
+            .beliefs
+            .iter()
+            .find(|b| b.belief_id == "b1" && b.status == BeliefStatus::Active)
+            .unwrap();
+        assert_eq!(head.supported_by, vec!["test/i64-num".to_string()]);
+    }
+
+    #[test]
+    fn revise_clears_supports_with_explicit_empty_vec() {
+        let mut brain = Brain::new();
+        let ctx = MutationContext::default();
+        brain
+            .revise_belief(
+                "b1",
+                "v1",
+                0.9,
+                Some(vec!["test/i64-num".into()]),
+                "first",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+        // Explicit empty array — caller deliberately clears the linkage.
+        brain
+            .revise_belief("b1", "v2", 0.8, Some(vec![]), "second", None, None, &ctx)
+            .unwrap();
+
+        let head = brain
+            .beliefs
+            .iter()
+            .find(|b| b.belief_id == "b1" && b.status == BeliefStatus::Active)
+            .unwrap();
+        assert!(head.supported_by.is_empty());
+    }
+
+    #[test]
     fn validate_predicate_name_rejects_invalid() {
         assert!(validate_predicate_name("").is_err());
         assert!(validate_predicate_name(" leading").is_err());
@@ -2570,7 +2727,7 @@ mod tests {
                 "b1",
                 "sky is blue",
                 0.9,
-                vec![],
+                Some(vec![]),
                 "sunny day",
                 None,
                 None,
@@ -2582,7 +2739,7 @@ mod tests {
                 "b2",
                 "sky is blue",
                 0.3,
-                vec![],
+                Some(vec![]),
                 "cloudy now",
                 None,
                 None,
@@ -2606,7 +2763,7 @@ mod tests {
                 "b1",
                 "it is warm",
                 0.8,
-                vec![],
+                Some(vec![]),
                 "morning",
                 None,
                 None,
@@ -2618,7 +2775,7 @@ mod tests {
                 "b2",
                 "it is warm",
                 0.2,
-                vec![],
+                Some(vec![]),
                 "evening",
                 None,
                 None,
@@ -2754,7 +2911,7 @@ mod tests {
         let mut brain = Brain::new();
         let ctx = MutationContext::default();
         brain
-            .revise_belief("b1", "claim", 0.9, vec![], "rationale", None, None, &ctx)
+            .revise_belief("b1", "claim", 0.9, Some(vec![]), "rationale", None, None, &ctx)
             .unwrap();
         assert_eq!(brain.current_beliefs().len(), 1);
 
@@ -3322,7 +3479,7 @@ mod tests {
         assert!(observe_err.to_string().contains("session_closed"));
 
         let revise_err = brain
-            .revise_belief("b1", "claim", 0.7, vec![], "rationale", None, None, &ctx)
+            .revise_belief("b1", "claim", 0.7, Some(vec![]), "rationale", None, None, &ctx)
             .unwrap_err();
         assert!(revise_err.to_string().contains("session_closed"));
 

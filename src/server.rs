@@ -552,6 +552,12 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
                 .post(crate::mcp::mcp_handler)
                 .delete(crate::mcp::mcp_delete_handler),
         )
+        .route(
+            "/mcp/sse",
+            get(crate::mcp::mcp_stream_handler)
+                .post(crate::mcp::mcp_handler)
+                .delete(crate::mcp::mcp_delete_handler),
+        )
         .route("/events", get(api_sse))
         .layer(require_auth_layer);
 

@@ -245,6 +245,16 @@ fn api_key_create_and_use() {
         body["mcp_config_snippet"].is_object(),
         "mcp_config_snippet missing: {body}"
     );
+    assert!(
+        body["mcp_config_snippet"]["mcpServers"]["ray-exomem"]["url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/mcp")),
+        "mcp_config_snippet should point at /mcp: {body}"
+    );
+    assert_eq!(
+        body["mcp_config_snippet"]["mcpServers"]["ray-exomem"]["headers"]["Authorization"],
+        format!("Bearer {raw_key}")
+    );
 
     // Use the raw key as Bearer token to access /auth/me.
     let url = format!("{}/auth/me", daemon.base_url);
