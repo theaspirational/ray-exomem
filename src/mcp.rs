@@ -1324,13 +1324,24 @@ fn tool_session_join(state: &AppState, user: &User, args: &serde_json::Value) ->
         agent.as_deref(),
         model.as_deref(),
     ) {
-        Ok(branch) => Ok(serde_json::json!({
-            "ok": true,
-            "session_path": session_path.to_slash_string(),
-            "user_email": user.email,
-            "branch": branch,
-        })
-        .to_string()),
+        Ok(branch) => {
+            // session_join writes branch claim fields directly to disk via
+            // brain::claim_branch. The cached ExomState (Brain + datoms) for
+            // this exom is now stale — evict so the next read reloads from
+            // disk and surfaces the claim triple to list_branches and EAV.
+            state
+                .exoms
+                .lock()
+                .unwrap()
+                .remove(&session_path.to_slash_string());
+            Ok(serde_json::json!({
+                "ok": true,
+                "session_path": session_path.to_slash_string(),
+                "user_email": user.email,
+                "branch": branch,
+            })
+            .to_string())
+        }
         Err(e) => Err(JsonRpcError {
             code: -32000,
             message: e.to_string(),

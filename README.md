@@ -24,14 +24,13 @@ The active model is tree-first:
 
 - Folders are grouping nodes. They do not store facts.
 - Exoms are leaf knowledge bases. A directory is an exom when it contains
-  `exom.json`.
+`exom.json`.
 - Projects are scaffolded folders with a `main` exom and a `sessions/` folder.
 - Session exoms live under `<project>/sessions/<session-id>`.
 - Branches live inside one exom. They are used for parallel work, hypothetical
-  changes, and multi-agent coordination.
+changes, and multi-agent coordination.
 
-Fresh persistent state starts empty. There is no auto-created root `main` exom
-anymore. Create exoms explicitly with `init` or `exom-new`, or enable auth and
+Fresh persistent state starts empty. Create exoms explicitly with `init` or `exom-new`, or enable auth and
 let first login seed `{email}/main`.
 
 Path forms:
@@ -68,9 +67,9 @@ Representative layout after creating a project and a session:
                 exom.json
 ```
 
-Memory data is stored in rayforce2 splay tables under each exom directory.
-There are no JSONL sidecars for facts, transactions, observations, beliefs, or
-branches. Auth state is separate: JSONL by default, or Postgres when configured.
+Memory data (facts, transactions, observations, beliefs, or  
+branches) is stored in rayforce2 splay tables under each exom directory.  
+Auth state is separate: JSONL by default, or Postgres when configured.
 
 ## Build
 
@@ -85,17 +84,24 @@ Build the release binary:
 
 ```bash
 cargo build --release --bin ray-exomem
-ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
 ```
 
 Use `ln -f`, not `cp`, when deploying the binary on macOS. Copied binaries can
 inherit `com.apple.provenance` metadata and hang silently.
 
+```bash
+ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
+```
+
 `build.rs` also builds the Svelte UI and rayforce2 C library. It uses
 `RAYFORCE2_DIR` when set, otherwise it looks for a sibling `../rayforce2`, and
 falls back to fetching rayforce2 master.
 
-The server base path is baked at compile time:
+The server base path is baked at compile time.
+
+Specify one if planing to host ray-exomem somewhere different than root of `your-site.com `  
+for example  
+`your-site.com/<RAY_EXOMEM_BASE_PATH>`
 
 ```bash
 # Default: mount at /
@@ -128,12 +134,6 @@ http://127.0.0.1:9780/
 http://127.0.0.1:9780/ray-exomem/   # if built with RAY_EXOMEM_BASE_PATH=/ray-exomem
 ```
 
-Stop the daemon:
-
-```bash
-ray-exomem stop
-```
-
 Create a project and inspect the tree:
 
 ```bash
@@ -141,15 +141,28 @@ ray-exomem init work::team::project::repo
 ray-exomem inspect work::team::project::repo --depth 3
 ```
 
-Create a session exom under that project:
+Create a multi-agent session exom under that project. With auth enabled, the
+orchestrator's identity comes from the bearer token; the orchestrator's
+`agent`/`model` are recorded via headers, and `agents` pre-allocates one
+unclaimed branch per sub-agent label:
 
 ```bash
-ray-exomem session new work::team::project::repo \
-  --name landing-page \
-  --multi \
-  --actor orchestrator \
-  --agents agent-a,agent-b
+curl -s -X POST http://127.0.0.1:9780/api/actions/session-new \
+  -H "Authorization: Bearer $RAY_EXOMEM_KEY" \
+  -H "x-agent: orchestrator-cli" \
+  -H "x-model: claude-opus-4-7" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "project_path": "work/team/project/repo",
+        "type": "multi",
+        "label": "landing-page",
+        "agents": ["agent-a", "agent-b"]
+      }'
 ```
+
+Sub-agents claim their branches via `POST /api/actions/session-join` with
+their own `x-agent`/`x-model` headers. See the [Attribution Model](#attribution-model)
+section for the full contract.
 
 Query the project main exom:
 
@@ -158,6 +171,12 @@ ray-exomem query \
   --exom work::team::project::repo::main \
   --request '(query work/team/project/repo/main (find ?fact ?pred ?value) (where (fact-row ?fact ?pred ?value)))' \
   --json
+```
+
+Stop the daemon:
+
+```bash
+ray-exomem stop
 ```
 
 Important CLI caveat: several older daemon-backed CLI commands still prepend
@@ -189,19 +208,29 @@ Daemon-backed commands:
 Prefer declaring all participants up front with `session new --agents ...`.
 The `session add-agent` CLI path is still not a reliable automation surface.
 
-Mutating commands should include an actor:
+Asserting a fact against an authenticated daemon — `user_email` comes from
+the bearer token, `agent`/`model` from headers (see
+[Attribution Model](#attribution-model)):
 
 ```bash
-ray-exomem assert project/status active \
-  --exom work::team::project::repo::main \
-  --actor orchestrator \
-  --source kickoff-notes
+curl -s -X POST http://127.0.0.1:9780/api/actions/assert-fact \
+  -H "Authorization: Bearer $RAY_EXOMEM_KEY" \
+  -H "x-agent: claude-code-cli" \
+  -H "x-model: claude-opus-4-7" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "exom": "work/team/project/repo/main",
+        "fact_id": "project/status",
+        "predicate": "project/status",
+        "value": "active",
+        "source": "kickoff-notes"
+      }'
 ```
 
-Fact values are typed at the API/brain layer. Numeric strings are auto-typed as
-`i64` unless `--as-str` is passed; `--as-sym` and `--as-i64` are also available.
-Typed facts populate `facts_i64`, `facts_str`, and `facts_sym` EDBs for native
-Datalog rules.
+Fact values are typed at the API/brain layer. JSON numbers become `I64`,
+JSON strings auto-detect (numeric round-trip → `I64`, else `Str`), and
+`{"$sym": "..."}` lands as `Sym`. Typed facts populate `facts_i64`,
+`facts_str`, and `facts_sym` EDBs for native Datalog rules.
 
 ## HTTP, UI, SSE, and MCP
 
@@ -235,7 +264,7 @@ Canonical API routes:
 - `POST /api/actions/branch-create`
 - `POST /api/actions/rename`
 - `POST /api/actions/assert-fact`
-- `POST /api/query`
+- `POST /api/query` (accepts `?branch=<name>` to evaluate against a specific branch's view; cursor restored after the read)
 - `POST /api/expand-query`
 - `POST /api/actions/eval`
 - `GET /api/facts`
@@ -268,7 +297,7 @@ Removed legacy routes:
 
 - `GET|POST /api/exoms` returns `410 gone`; use `GET /api/tree`.
 - `POST /api/actions/start-session` returns `410 gone`; use
-  `POST /api/actions/session-new`.
+`POST /api/actions/session-new`.
 
 The embedded UI is served by the same daemon and includes tree, exom, query,
 graph, guide, login, profile, and admin surfaces. Server-Sent Events stream from
@@ -299,12 +328,56 @@ Auth persistence:
 
 - Without `--database-url`, auth state lives in `_system/auth/auth.jsonl`.
 - With `--database-url`, users, sessions, API keys, domains, and shares use
-  Postgres.
+Postgres.
 - Exom memory data always lives in local rayforce2 splay tables.
 
 `ray-exomem daemon` currently does not expose the auth provider flags. Use
 foreground `serve` for authenticated development and deployment until that is
 wired through.
+
+## Attribution Model
+
+Every mutation (fact assert/retract, observation, belief, branch create,
+session join/close) records three independent attribution axes on the
+underlying transaction:
+
+| Axis | Source | Notes |
+|---|---|---|
+| `user_email` | DB-bound, from auth | The authenticated user. Load-bearing for permission checks; not caller-controlled. `None` only for system-internal writes. |
+| `agent` | `x-agent` header (HTTP) or `agent` arg (MCP) | The tool/integration making the call (e.g. `cursor`, `claude-code-cli`). Falls back to the API key's label for Bearer auth. Cookie-auth UI writes leave it `None` unless explicitly set. An explicit value always wins over the label. |
+| `model` | `x-model` header (HTTP) or `model` arg (MCP) | The LLM identity (e.g. `claude-opus-4-7`). Explicit only — no fallback. |
+
+Branch ownership is captured the same way at TOFU claim time:
+`branch/claimed_by_user_email`, `branch/claimed_by_agent`,
+`branch/claimed_by_model`. All three are queryable EAV attributes and surface
+in `list_branches`.
+
+The canonical `tx-row` Datalog view exposes the full triple:
+
+```scheme
+(tx-row ?tx ?id ?email ?agent ?model ?action ?when ?branch)
+```
+
+Empty strings stand in for `None` (system writes have `?email = ""`,
+cookie-auth UI writes have `?agent = ""`, writes without a `model` arg have
+`?model = ""`). Filter empties at query time with `(not (= ?v ""))` if needed.
+
+UI render format is `by {user_email} via {agent} using {model}`, with
+`via`/`using` elided when those axes are `None`.
+
+**CLI caveat.** The `--actor` flag on legacy CLI subcommands (e.g.
+`assert --actor`, `session new --actor`, `branch create --actor`) predates
+the three-axis model and is CLI-only. Authenticated HTTP/MCP/UI writes do
+**not** read `actor` from the request body — they use the authenticated user
+plus the `x-agent`/`x-model` headers (or `agent`/`model` MCP args). Until CLI
+auth lands, treat the CLI's `--actor` as a `cli`-tier identity hint, not a
+substitute for the three axes.
+
+**Multi-subagent contract.** When a single MCP client (e.g. one Claude Code
+CLI process) hosts many subagents authenticated by one API key, the client
+must inject `agent: "<subagent-name>"` on every tool call to disambiguate.
+Without it, every subagent's writes appear under the API key's label. The
+daemon cannot infer this — it's a contract on the orchestrator.
 
 ## Bootstrap Seeds
 
@@ -346,11 +419,12 @@ Useful source files:
 
 - The project is Rayfall-native. Legacy `.dl` / Teide inputs are rejected.
 - If `rayforce2` changed and behavior looks stale, run
-  `cargo clean && cargo build --release --bin ray-exomem`.
+`cargo clean && cargo build --release --bin ray-exomem`.
 - The embedded UI is built into the binary at compile time.
 - `ray-exomem daemon` forks and redirects output. Use `serve` when you need logs
-  in the terminal.
+in the terminal.
 - The symbol table is part of persistent identity. Do not wipe `~/.ray-exomem/sym`
-  reflexively; persisted splay rows encode symbol IDs by slot.
+reflexively; persisted splay rows encode symbol IDs by slot.
 - Startup runs a sym rewrite compatibility pass and an engine health probe over
-  loaded exoms to surface rayforce2 symbol-layout problems early.
+loaded exoms to surface rayforce2 symbol-layout problems early.
+
