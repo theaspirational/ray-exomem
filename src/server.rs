@@ -688,6 +688,27 @@ fn combined_rules(exom: &str, user_rules: &[ParsedRule]) -> anyhow::Result<Vec<P
     Ok(rules)
 }
 
+/// Rebuild this exom's datoms + typed-fact tables from its current brain
+/// state and rebind them in the engine. No disk persistence. Use this when
+/// you need to retarget the query plane (e.g. after a temporary branch
+/// switch for a read) without committing to disk. See `refresh_exom_binding`
+/// for the full mutation-path equivalent that also persists.
+pub(crate) fn rebind_datoms_only(
+    state: &AppState,
+    exoms: &mut HashMap<String, ExomState>,
+    exom_name: &str,
+) -> anyhow::Result<()> {
+    let es = exoms
+        .get_mut(exom_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
+    es.datoms = storage::build_datoms_table(&es.brain)?;
+    es.typed_facts = storage::build_typed_fact_tables(&es.brain)?;
+    state
+        .engine
+        .bind_named_db(storage::sym_intern(exom_name), &es.datoms)?;
+    Ok(())
+}
+
 fn refresh_exom_binding(
     state: &AppState,
     exoms: &mut HashMap<String, ExomState>,
@@ -2179,6 +2200,11 @@ pub(crate) fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomSta
 struct QueryParams {
     #[serde(rename = "exom")]
     _exom: Option<String>,
+    /// Optional branch to evaluate the query against. When supplied, the
+    /// brain's cursor is temporarily switched to this branch, the engine's
+    /// datoms binding is rebuilt from that branch's view, the query runs,
+    /// and the cursor is restored on the way out (best-effort).
+    branch: Option<String>,
 }
 
 async fn api_query_get(
@@ -2200,6 +2226,7 @@ async fn api_query_get(
 async fn api_query_post(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
+    Query(params): Query<QueryParams>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let source = String::from_utf8_lossy(&body).into_owned();
@@ -2216,66 +2243,119 @@ async fn api_query_post(
     if let Some(resp) = guard_read(&state, &maybe_user, &query.exom).await {
         return resp;
     }
-    let exoms = state.exoms.lock().unwrap();
-    let expanded = match expand_canonical_query(&exoms, &state.engine, source.clone(), &query) {
-        Ok(e) => e,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err.to_string()})),
-            )
-                .into_response();
-        }
-    };
-    let es = match exoms.get(&expanded.exom_name) {
-        Some(es) => es,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("unknown exom '{}'", expanded.exom_name)
-                })),
-            )
-                .into_response();
-        }
-    };
-    let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
-    if let Err(err) = validate_query_body(&query, &known) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": err.to_string()})),
-        )
-            .into_response();
-    }
-    match execute_prepared_query(&state.engine, &exoms, &expanded) {
-        Ok((output, decoded)) => {
-            let mut payload = serde_json::json!({
-                "ok": true,
-                "output": output,
-                "mutated_exom": serde_json::Value::Null,
-                "mutation_count": 0,
-                "normalized_query": expanded.normalized_query,
-                "expanded_query": expanded.expanded_query
-            });
-            if let Some(decoded) = decoded {
-                if let (Some(dst), Some(src)) = (payload.as_object_mut(), decoded.as_object()) {
-                    for (k, v) in src {
-                        dst.insert(k.clone(), v.clone());
-                    }
+    let target_branch = params.branch.as_deref().filter(|s| !s.is_empty());
+    let mut exoms = state.exoms.lock().unwrap();
+    // Optional branch swap (validated/restored below).
+    let saved_branch = match target_branch {
+        Some(branch) => match exoms.get_mut(&query.exom) {
+            Some(es) => {
+                let prev = es.brain.current_branch_id().to_string();
+                if prev == branch {
+                    None
+                } else if let Err(e) = es.brain.switch_branch(branch) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("unknown_branch: {e}")
+                        })),
+                    )
+                        .into_response();
+                } else if let Err(e) = rebind_datoms_only(&state, &mut exoms, &query.exom) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("rebind failed: {e}")
+                        })),
+                    )
+                        .into_response();
+                } else {
+                    Some(prev)
                 }
             }
-            Json(payload).into_response()
-        }
-        Err(err) => {
-            reconcile_engine(&state, &exoms);
-            drop(exoms);
-            (
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("unknown exom '{}'", query.exom)
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let outcome: axum::response::Response = 'body: {
+        let expanded =
+            match expand_canonical_query(&exoms, &state.engine, source.clone(), &query) {
+                Ok(e) => e,
+                Err(err) => {
+                    break 'body (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": err.to_string()})),
+                    )
+                        .into_response();
+                }
+            };
+        let es = match exoms.get(&expanded.exom_name) {
+            Some(es) => es,
+            None => {
+                break 'body (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("unknown exom '{}'", expanded.exom_name)
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
+        if let Err(err) = validate_query_body(&query, &known) {
+            break 'body (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
             )
-                .into_response()
+                .into_response();
         }
+        match execute_prepared_query(&state.engine, &exoms, &expanded) {
+            Ok((output, decoded)) => {
+                let mut payload = serde_json::json!({
+                    "ok": true,
+                    "output": output,
+                    "mutated_exom": serde_json::Value::Null,
+                    "mutation_count": 0,
+                    "normalized_query": expanded.normalized_query,
+                    "expanded_query": expanded.expanded_query
+                });
+                if let Some(decoded) = decoded {
+                    if let (Some(dst), Some(src)) = (payload.as_object_mut(), decoded.as_object())
+                    {
+                        for (k, v) in src {
+                            dst.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                Json(payload).into_response()
+            }
+            Err(err) => {
+                reconcile_engine(&state, &exoms);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": err.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    // Restore the original branch cursor (best-effort) before releasing the lock.
+    if let Some(prev) = saved_branch {
+        if let Some(es) = exoms.get_mut(&query.exom) {
+            let _ = es.brain.switch_branch(&prev);
+        }
+        let _ = rebind_datoms_only(&state, &mut exoms, &query.exom);
     }
+    drop(exoms);
+    outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -2708,6 +2788,8 @@ async fn api_fact_detail(
     };
     let brain = &es.brain;
     let history = brain.fact_history(&id);
+    let tx_index: std::collections::HashMap<crate::brain::TxId, &crate::brain::Tx> =
+        brain.transactions().iter().map(|t| (t.tx_id, t)).collect();
     match history.last() {
         Some(f) => {
             let status = if f.revoked_by_tx.is_some() {
@@ -2721,10 +2803,14 @@ async fn api_fact_detail(
                 .map(|tx| {
                     serde_json::json!({
                         "event_id": format!("tx{}", tx.tx_id),
-                        "event_type": tx.action.to_string()
+                        "event_type": tx.action.to_string(),
+                        "user_email": tx.user_email,
+                        "agent": tx.agent,
+                        "model": tx.model,
                     })
                 })
                 .collect();
+            let creator = tx_index.get(&f.created_by_tx);
             Json(serde_json::json!({
                 "fact": {
                     "id": f.fact_id,
@@ -2747,7 +2833,10 @@ async fn api_fact_detail(
                     "valid_to": f.valid_to,
                     "created_by": format!("tx/{}", f.created_by_tx),
                     "superseded_by": f.superseded_by_tx.map(|tx| format!("tx/{}", tx)),
-                    "revoked_by": f.revoked_by_tx.map(|tx| format!("tx/{}", tx))
+                    "revoked_by": f.revoked_by_tx.map(|tx| format!("tx/{}", tx)),
+                    "user_email": creator.and_then(|t| t.user_email.as_deref()),
+                    "agent": creator.and_then(|t| t.agent.as_deref()),
+                    "model": creator.and_then(|t| t.model.as_deref()),
                 },
                 "provenance": {"type": "base"},
                 "touch_history": touch_history

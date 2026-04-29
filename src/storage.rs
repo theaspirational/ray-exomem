@@ -878,36 +878,35 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
                     system_schema::attrs::tx::TIME,
                     &tx.tx_time,
                 )?;
-                if let Some(ref email) = tx.user_email {
-                    push_datom_row(
-                        &mut e_col,
-                        &mut a_col,
-                        &mut v_col,
-                        &tx_entity,
-                        system_schema::attrs::tx::USER_EMAIL,
-                        email,
-                    )?;
-                }
-                if let Some(ref agent) = tx.agent {
-                    push_datom_row(
-                        &mut e_col,
-                        &mut a_col,
-                        &mut v_col,
-                        &tx_entity,
-                        system_schema::attrs::tx::AGENT,
-                        agent,
-                    )?;
-                }
-                if let Some(ref model) = tx.model {
-                    push_datom_row(
-                        &mut e_col,
-                        &mut a_col,
-                        &mut v_col,
-                        &tx_entity,
-                        system_schema::attrs::tx::MODEL,
-                        model,
-                    )?;
-                }
+                // Always emit the three attribution attrs — empty string is the
+                // sentinel for None. This keeps the strict-join `tx-row` view
+                // surfacing tx that lack a user_email (system writes) or model
+                // (cookie/UI writes). Filter empties at query time with
+                // `(not (= ?v ""))` if needed.
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::USER_EMAIL,
+                    tx.user_email.as_deref().unwrap_or(""),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::AGENT,
+                    tx.agent.as_deref().unwrap_or(""),
+                )?;
+                push_datom_row(
+                    &mut e_col,
+                    &mut a_col,
+                    &mut v_col,
+                    &tx_entity,
+                    system_schema::attrs::tx::MODEL,
+                    tx.model.as_deref().unwrap_or(""),
+                )?;
                 push_datom_row(
                     &mut e_col,
                     &mut a_col,
@@ -1193,6 +1192,36 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
                         &branch_entity,
                         system_schema::attrs::branch::PARENT,
                         &branch_entity_id(parent),
+                    )?;
+                }
+                if let Some(email) = branch.claimed_by_user_email.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &branch_entity,
+                        system_schema::attrs::branch::CLAIMED_BY_USER_EMAIL,
+                        email,
+                    )?;
+                }
+                if let Some(agent) = branch.claimed_by_agent.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &branch_entity,
+                        system_schema::attrs::branch::CLAIMED_BY_AGENT,
+                        agent,
+                    )?;
+                }
+                if let Some(model) = branch.claimed_by_model.as_deref() {
+                    push_datom_row(
+                        &mut e_col,
+                        &mut a_col,
+                        &mut v_col,
+                        &branch_entity,
+                        system_schema::attrs::branch::CLAIMED_BY_MODEL,
+                        model,
                     )?;
                 }
                 Ok(())

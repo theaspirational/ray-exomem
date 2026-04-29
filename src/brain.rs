@@ -383,7 +383,27 @@ impl Brain {
         Ok(())
     }
 
+    /// Active fact id for a closed session marker. Asserting this fact closes
+    /// the session; retracting it reopens.
+    const SESSION_CLOSED_FACT_ID: &'static str = "session/closed_at";
+
+    /// True if the exom currently has an active (non-revoked, non-superseded)
+    /// `session/closed_at` fact. Exom-wide: not branch-scoped, because session
+    /// closure is a property of the session exom as a whole.
+    fn is_session_closed(&self) -> bool {
+        self.facts.iter().any(|f| {
+            f.fact_id == Self::SESSION_CLOSED_FACT_ID
+                && f.revoked_by_tx.is_none()
+                && f.superseded_by_tx.is_none()
+        })
+    }
+
     /// Allocate a new transaction, returning (tx_id, tx_time) so callers reuse the timestamp.
+    ///
+    /// Load-bearing chokepoint for write authorization: every public mutation
+    /// flows through here, so session-closure enforcement lives here rather
+    /// than per-handler. The `session/closed_at` predicate itself bypasses
+    /// the check so the close/reopen lifecycle remains writable.
     fn alloc_tx(
         &mut self,
         action: TxAction,
@@ -391,6 +411,10 @@ impl Brain {
         note: &str,
         ctx: &MutationContext,
     ) -> Result<(TxId, String)> {
+        let touches_close_marker = refs.iter().any(|r| r == Self::SESSION_CLOSED_FACT_ID);
+        if !touches_close_marker && self.is_session_closed() {
+            bail!("session_closed: writes to a closed session are rejected");
+        }
         let tx_id = self.next_tx;
         self.next_tx += 1;
         let tx_time = now_iso();
@@ -3012,5 +3036,106 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0)
+    }
+
+    /// Asserting `session/closed_at` flips the brain's session-closed gate;
+    /// every subsequent mutation must be rejected at `alloc_tx`. Retracting
+    /// `session/closed_at` reopens. Verifies the chokepoint covers all
+    /// mutation kinds, not just the HTTP path that previously called
+    /// `precheck_write`.
+    #[test]
+    fn alloc_tx_blocks_all_mutations_when_session_closed() {
+        let mut brain = Brain::new();
+        let ctx = MutationContext::default();
+
+        // Assert the close marker — itself bypasses the gate.
+        brain
+            .assert_fact(
+                "session/closed_at",
+                "session/closed_at",
+                "2026-04-28T17:54:46Z",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+        assert!(brain.is_session_closed());
+
+        // Every other mutation kind must be rejected.
+        let assert_err = brain
+            .assert_fact("f1", "color", "red", 1.0, "test", None, None, &ctx)
+            .unwrap_err();
+        assert!(
+            assert_err.to_string().contains("session_closed"),
+            "assert_fact post-close should reject; got: {assert_err}"
+        );
+
+        // retract_fact's pre-flight passes (the fact existed before close);
+        // alloc_tx must still reject.
+        brain.facts.push(Fact {
+            fact_id: "leftover".into(),
+            predicate: "stale".into(),
+            value: FactValue::Str("v".into()),
+            created_at: now_iso(),
+            created_by_tx: 0,
+            superseded_by_tx: None,
+            revoked_by_tx: None,
+            confidence: 1.0,
+            provenance: "test".into(),
+            valid_from: now_iso(),
+            valid_to: None,
+        });
+        let retract_err = brain.retract_fact("leftover", &ctx).unwrap_err();
+        assert!(retract_err.to_string().contains("session_closed"));
+
+        let observe_err = brain
+            .assert_observation(
+                "obs/x",
+                "manual",
+                "ref",
+                "content",
+                0.8,
+                vec![],
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap_err();
+        assert!(observe_err.to_string().contains("session_closed"));
+
+        let revise_err = brain
+            .revise_belief("b1", "claim", 0.7, vec![], "rationale", None, None, &ctx)
+            .unwrap_err();
+        assert!(revise_err.to_string().contains("session_closed"));
+
+        // revoke_belief's pre-flight needs an active belief; bypass by injecting one.
+        brain.beliefs.push(Belief {
+            belief_id: "b-active".into(),
+            claim_text: "x".into(),
+            status: BeliefStatus::Active,
+            confidence: 0.7,
+            supported_by: vec![],
+            created_by_tx: 0,
+            valid_from: now_iso(),
+            valid_to: None,
+            rationale: String::new(),
+        });
+        let revoke_err = brain.revoke_belief("b-active", &ctx).unwrap_err();
+        assert!(revoke_err.to_string().contains("session_closed"));
+
+        let branch_err = brain.create_branch("feature-x", "feature-x", &ctx).unwrap_err();
+        assert!(branch_err.to_string().contains("session_closed"));
+
+        // Reopen by retracting the close marker — works because `retract_fact`
+        // touches `session/closed_at` and bypasses the gate.
+        brain.retract_fact("session/closed_at", &ctx).unwrap();
+        assert!(!brain.is_session_closed());
+
+        // Subsequent mutations succeed again.
+        brain
+            .assert_fact("f1", "color", "red", 1.0, "test", None, None, &ctx)
+            .unwrap();
     }
 }

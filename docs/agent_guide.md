@@ -218,7 +218,7 @@ Bitemporal history for a single `fact_id`: each tuple's `value`, `confidence`,
 `valid_from`, `valid_to`, `created_at`. Use this to verify timestamps after a
 write, or to read time-travel slices.
 
-### `query` `{ exom, query }`
+### `query` `{ exom, query, branch? }`
 
 Run one Rayfall (Datalog) form. The form must be a single `(query <exom-path>
 (find ?vars) (where (<relation> ...)))`. The exom path inside the query must
@@ -255,22 +255,43 @@ builtin views instead.
        (where (facts_i64 ?id "service/sla_p99_ms" ?ms) (< ?ms 500)))
 ```
 
+**Branch-scoped reads.** Pass `branch: "<name>"` to `query` or `eval` to
+evaluate against a specific branch's view of facts/tx/observations/beliefs
+without persistently changing the exom's cursor. Useful for inspecting
+sub-agent branches in a multi-agent session:
+
+```jsonc
+{
+  "exom": "public/work/x/y/sessions/<id>",
+  "branch": "designer",
+  "query": "(query public/work/x/y/sessions/<id> (find ?tx ?email ?agent ?model) (where (?tx 'tx/user_email ?email) (?tx 'tx/agent ?agent) (?tx 'tx/model ?model)))"
+}
+```
+
+The brain's view is switched to `designer` for the duration of the query and
+restored on the way out, so concurrent callers see the cursor unchanged.
+Errors with `unknown_branch` if the branch doesn't exist or is archived.
+
 Useful relations to remember (full list via `schema.builtin_views`):
 
 - `fact-row(?fact ?pred ?value)`
 - `fact-meta(?fact ?confidence ?prov ?valid_from ?tx)`
-- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?when)` — join with `tx-row` if you also need `?agent` or `?branch`. Capped at 8 columns by the engine's group/distinct op.
-- `tx-row(?tx ?id ?agent ?action ?when ?branch)`
+- `fact-with-tx(?fact ?pred ?value ?confidence ?prov ?vf ?tx ?when)` — join with `tx-row` if you also need attribution or branch. Capped at 8 columns by the engine's group/distinct op.
+- `tx-row(?tx ?id ?email ?agent ?model ?action ?when ?branch)` — full three-axis attribution. Empty strings indicate no attribution recorded for that axis (system writes have `?email = ""`; cookie-auth UI writes have `?agent = ""`; writes without a model arg have `?model = ""`). Filter empties at query time with `(not (= ?v ""))` if needed.
 - `observation-row(?obs ?source_type ?content ?tx)`
 - `belief-row(?belief ?claim ?status ?tx)`
 - `branch-row(?branch ?id ?name ?archived ?created_tx)`
 - typed EDBs: `facts_i64`, `facts_str`, `facts_sym` — `(facts_i64 ?e ?a ?v)` etc.
 
-### `eval` `{ source, exom? }`
+### `eval` `{ source, exom?, branch? }`
 
 Runs raw Rayfall (any form, not just `(query ...)`). Power tool. Bypasses the
 canonical-query lowering, so it doesn't auto-inject rules — `query` is what
 you want for ordinary reads.
+
+When `branch` is supplied, the brain's view is temporarily switched to that
+branch for the duration of the eval, then restored — same semantics as
+`query`'s `branch` arg.
 
 ### `assert_fact` `{ exom, predicate, value, fact_id?, confidence?, source?, valid_from?, valid_to?, agent?, model?, branch? }`
 
@@ -340,10 +361,12 @@ different user return `branch_owned`.
 Create a new session exom under `<project>/sessions/<id>`. `session_type` is
 `"single"` (only `main` branch) or `"multi"` (one branch per agent plus
 `main` for the orchestrator). The authenticated user is the orchestrator
-and gets `main`; the supplied `agent`/`model` are recorded on the `main`
-branch as `claimed_by_agent` / `claimed_by_model`. Sub-agent labels in
-`agents` get pre-allocated unclaimed branches (claimed later by
-`session_join`). Returns `{ ok, session_path }`.
+and gets `main`; the orchestrator's email plus the supplied `agent`/`model`
+are recorded on the `main` branch as `branch/claimed_by_user_email`,
+`branch/claimed_by_agent`, `branch/claimed_by_model` (queryable via the
+EAV plane and surfaced in `list_branches`). Sub-agent labels in `agents`
+get pre-allocated unclaimed branches (claimed later by `session_join`).
+Returns `{ ok, session_path }`.
 
 `label` must be non-empty and contain no `/`, `::`, or whitespace.
 

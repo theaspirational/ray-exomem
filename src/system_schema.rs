@@ -71,6 +71,9 @@ pub mod attrs {
         pub const PARENT: &str = "branch/parent";
         pub const CREATED_BY: &str = "branch/created_by";
         pub const ARCHIVED: &str = "branch/archived";
+        pub const CLAIMED_BY_USER_EMAIL: &str = "branch/claimed_by_user_email";
+        pub const CLAIMED_BY_AGENT: &str = "branch/claimed_by_agent";
+        pub const CLAIMED_BY_MODEL: &str = "branch/claimed_by_model";
     }
 
     pub mod coord {
@@ -414,13 +417,27 @@ pub fn system_attributes() -> Vec<OntologyAttribute> {
             category: "branch".into(),
             description: "Archive state for the branch.".into(),
         },
-        // Reserved attributes for branch ownership and session lifecycle.
+        // Branch ownership: three independent attribution axes recorded at TOFU claim time.
         OntologyAttribute {
-            name: "branch/claimed_by".to_string(),
+            name: attrs::branch::CLAIMED_BY_USER_EMAIL.to_string(),
             entity_kind: "branch".into(),
             value_kind: "string".into(),
             category: "branch".into(),
-            description: "mutable string; TOFU-owner of this branch".into(),
+            description: "Email of the user who first claimed this branch (TOFU owner).".into(),
+        },
+        OntologyAttribute {
+            name: attrs::branch::CLAIMED_BY_AGENT.to_string(),
+            entity_kind: "branch".into(),
+            value_kind: "string".into(),
+            category: "branch".into(),
+            description: "Tool/integration the claimer used at TOFU claim time.".into(),
+        },
+        OntologyAttribute {
+            name: attrs::branch::CLAIMED_BY_MODEL.to_string(),
+            entity_kind: "branch".into(),
+            value_kind: "string".into(),
+            category: "branch".into(),
+            description: "LLM the claimer was running at TOFU claim time.".into(),
         },
         OntologyAttribute {
             name: "session/label".to_string(),
@@ -528,11 +545,13 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
         ),
         (
             "tx-row".to_string(),
-            "Transaction row with agent, action, time, and branch.".to_string(),
+            "Transaction row with the full three-axis attribution (user_email, agent, model) plus action, time, branch. Empty strings indicate no attribution recorded for that axis (e.g. system-internal writes have user_email=\"\"; cookie-auth UI writes have agent=\"\"; writes without a model arg have model=\"\"). 8 columns — exactly the rayforce2 distinct/group n_keys cap.".to_string(),
             format!(
-                "(rule {exom} (tx-row ?tx ?id ?agent ?action ?when ?branch) (?tx '{id_attr} ?id) (?tx '{agent_attr} ?agent) (?tx '{action_attr} ?action) (?tx '{time_attr} ?when) (?tx '{branch_attr} ?branch))",
+                "(rule {exom} (tx-row ?tx ?id ?email ?agent ?model ?action ?when ?branch) (?tx '{id_attr} ?id) (?tx '{email_attr} ?email) (?tx '{agent_attr} ?agent) (?tx '{model_attr} ?model) (?tx '{action_attr} ?action) (?tx '{time_attr} ?when) (?tx '{branch_attr} ?branch))",
                 id_attr = attrs::tx::ID,
+                email_attr = attrs::tx::USER_EMAIL,
                 agent_attr = attrs::tx::AGENT,
+                model_attr = attrs::tx::MODEL,
                 action_attr = attrs::tx::ACTION,
                 time_attr = attrs::tx::TIME,
                 branch_attr = attrs::tx::BRANCH,

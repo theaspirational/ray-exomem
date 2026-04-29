@@ -220,7 +220,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Rayfall query expression" },
-                    "exom": { "type": "string", "description": "Exom name (defaults to main)" }
+                    "exom": { "type": "string", "description": "Exom name (defaults to main)" },
+                    "branch": { "type": "string", "description": "Branch to query (defaults to the exom's current branch). Switches the brain's view for the duration of the query, then restores. Use to inspect tx/facts/observations/beliefs on sub-agent branches without persistently changing the cursor." }
                 },
                 "required": ["query"]
             }
@@ -346,7 +347,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "source": { "type": "string", "description": "Rayfall source to evaluate" },
-                    "exom": { "type": "string", "description": "Exom name (defaults to main)" }
+                    "exom": { "type": "string", "description": "Exom name (defaults to main)" },
+                    "branch": { "type": "string", "description": "Branch to evaluate against (defaults to the exom's current branch). See `query` for semantics." }
                 },
                 "required": ["source"]
             }
@@ -643,10 +645,80 @@ fn load_exom<'a>(
 fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let query_str = require_str(args, "query")?;
     let exom_slash = exom_slug(args);
+    let target_branch = get_str(args, "branch")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
-    let exoms = state.exoms.lock().unwrap();
+    let mut exoms = state.exoms.lock().unwrap();
+
+    // Optional branch switch: save prev cursor, switch the brain, rebind the
+    // engine's datoms to the target branch's view. Restored after the query
+    // (best-effort) so the exom's cursor looks unchanged to other callers.
+    let saved_branch = swap_to_branch(state, &mut exoms, &exom_slash, target_branch.as_deref())?;
+
+    let outcome = run_query_body(state, &exoms, &exom_slash, query_str);
+
+    if let Some(prev) = saved_branch {
+        restore_branch(state, &mut exoms, &exom_slash, &prev);
+    }
+
+    outcome
+}
+
+/// Switch the exom's brain to `target` if supplied, returning the previous
+/// branch cursor for later restoration. `Ok(None)` means no switch was
+/// needed. Errors map to `unknown_branch`/`unknown_exom`.
+fn swap_to_branch(
+    state: &AppState,
+    exoms: &mut std::collections::HashMap<String, crate::server::ExomState>,
+    exom_slash: &str,
+    target: Option<&str>,
+) -> Result<Option<String>, JsonRpcError> {
+    let Some(target) = target else { return Ok(None) };
+    let prev = {
+        let es = exoms.get_mut(exom_slash).ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("unknown exom '{}'", exom_slash),
+        })?;
+        let prev = es.brain.current_branch_id().to_string();
+        if prev == target {
+            return Ok(None);
+        }
+        es.brain.switch_branch(target).map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!("unknown_branch: {e}"),
+        })?;
+        prev
+    };
+    crate::server::rebind_datoms_only(state, exoms, exom_slash).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("rebind failed: {e}"),
+    })?;
+    Ok(Some(prev))
+}
+
+/// Best-effort cursor restoration. Logs (silently) if rebind fails — the
+/// query already returned successfully and we don't want to clobber that.
+fn restore_branch(
+    state: &AppState,
+    exoms: &mut std::collections::HashMap<String, crate::server::ExomState>,
+    exom_slash: &str,
+    prev: &str,
+) {
+    if let Some(es) = exoms.get_mut(exom_slash) {
+        let _ = es.brain.switch_branch(prev);
+    }
+    let _ = crate::server::rebind_datoms_only(state, exoms, exom_slash);
+}
+
+fn run_query_body(
+    state: &AppState,
+    exoms: &std::collections::HashMap<String, crate::server::ExomState>,
+    _exom_slash: &str,
+    query_str: &str,
+) -> Result<String, JsonRpcError> {
     let expanded = crate::server::expand_query_validated(
-        &exoms,
+        exoms,
         &state.engine,
         query_str,
         None,
@@ -657,16 +729,12 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
         message: e.to_string(),
     })?;
 
-    if let Err(e) = crate::server::bind_typed_facts_for_exom(
-        &state.engine,
-        &exoms,
-        &expanded.exom_name,
-    ) {
-        return Err(JsonRpcError {
+    crate::server::bind_typed_facts_for_exom(&state.engine, exoms, &expanded.exom_name).map_err(
+        |e| JsonRpcError {
             code: -32000,
             message: format!("failed to bind typed facts: {e}"),
-        });
-    }
+        },
+    )?;
 
     match state.engine.eval_raw(&expanded.expanded_query) {
         Ok(raw) => {
@@ -675,7 +743,6 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
                     match crate::storage::decode_query_table(&raw, &expanded.normalized_query) {
                         Ok(d) => {
                             let formatted = crate::storage::format_decoded_query_table(&d);
-                            // Return the decoded JSON if available, otherwise the formatted string.
                             if let Some(obj) = d.as_object() {
                                 serde_json::to_string_pretty(&obj).unwrap_or(formatted)
                             } else {
@@ -700,7 +767,6 @@ fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, Json
                         }
                     }
                 };
-            let _ = exom_slash; // consumed above via expand_query
             Ok(output)
         }
         Err(e) => Err(JsonRpcError {
@@ -981,13 +1047,47 @@ fn tool_exom_status(state: &AppState, args: &serde_json::Value) -> Result<String
 
 fn tool_eval(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let source = require_str(args, "source")?;
-    match state.engine.eval(source) {
-        Ok(output) => Ok(output),
-        Err(e) => Err(JsonRpcError {
+    let target_branch = get_str(args, "branch")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // No branch arg: original fast path — eval against whatever the engine
+    // currently has bound, no exom-level coordination.
+    if target_branch.is_none() {
+        return match state.engine.eval(source) {
+            Ok(output) => Ok(output),
+            Err(e) => Err(JsonRpcError {
+                code: -32000,
+                message: e.to_string(),
+            }),
+        };
+    }
+
+    // Branch arg supplied: must coordinate at exom granularity.
+    let exom_slash = exom_slug(args);
+    let mut exoms = state.exoms.lock().unwrap();
+    let saved_branch = swap_to_branch(state, &mut exoms, &exom_slash, target_branch.as_deref())?;
+
+    // Rebind typed-fact env names so rule bodies referencing facts_i64 etc.
+    // see the target branch's view.
+    let bind_result = crate::server::bind_typed_facts_for_exom(&state.engine, &exoms, &exom_slash)
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("failed to bind typed facts: {e}"),
+        });
+
+    let outcome = bind_result.and_then(|()| {
+        state.engine.eval(source).map_err(|e| JsonRpcError {
             code: -32000,
             message: e.to_string(),
-        }),
+        })
+    });
+
+    if let Some(prev) = saved_branch {
+        restore_branch(state, &mut exoms, &exom_slash, &prev);
     }
+
+    outcome
 }
 
 fn tool_explain(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
@@ -1039,9 +1139,12 @@ fn tool_fact_history(state: &AppState, args: &serde_json::Value) -> Result<Strin
     let es = load_exom(state, &mut exoms, &exom_slash)?;
     let brain = &es.brain;
     let history = brain.fact_history(id);
+    let tx_index: std::collections::HashMap<crate::brain::TxId, &crate::brain::Tx> =
+        brain.transactions().iter().map(|t| (t.tx_id, t)).collect();
     let entries: Vec<serde_json::Value> = history
         .iter()
         .map(|f| {
+            let tx = tx_index.get(&f.created_by_tx);
             serde_json::json!({
                 "fact_id": f.fact_id,
                 "predicate": f.predicate,
@@ -1050,6 +1153,10 @@ fn tool_fact_history(state: &AppState, args: &serde_json::Value) -> Result<Strin
                 "valid_from": f.valid_from,
                 "valid_to": f.valid_to,
                 "created_at": f.created_at,
+                "tx_id": f.created_by_tx,
+                "user_email": tx.and_then(|t| t.user_email.as_deref()),
+                "agent": tx.and_then(|t| t.agent.as_deref()),
+                "model": tx.and_then(|t| t.model.as_deref()),
             })
         })
         .collect();
@@ -1070,6 +1177,9 @@ fn tool_list_branches(state: &AppState, args: &serde_json::Value) -> Result<Stri
                 "name": b.name,
                 "parent_branch_id": b.parent_branch_id,
                 "is_current": b.branch_id == es.brain.current_branch_id(),
+                "claimed_by_user_email": b.claimed_by_user_email,
+                "claimed_by_agent": b.claimed_by_agent,
+                "claimed_by_model": b.claimed_by_model,
             })
         })
         .collect();
