@@ -1763,6 +1763,10 @@ async fn api_assert_fact(
     };
     let exom_slash = exom_path.to_slash_string();
 
+    if let Err(e) = brain::validate_predicate_name(&req.predicate) {
+        return ApiError::new("invalid_predicate", e.to_string()).into_response();
+    }
+
     if let Some(resp) = guard_write(&state, &maybe_user, &exom_slash).await {
         return resp;
     }
@@ -1982,7 +1986,8 @@ pub fn expand_query_validated(
         .get(&expanded.exom_name)
         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", expanded.exom_name))?;
     let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
-    validate_query_body(&query, &known)?;
+    let arities = known_relation_arities_for_exom(&expanded.exom_name, &es.rules);
+    validate_query_body(&query, &known, &arities)?;
     Ok(expanded)
 }
 
@@ -2022,6 +2027,33 @@ fn known_relations_for_exom(exom: &str, rules: &[ParsedRule]) -> BTreeSet<String
     names
 }
 
+/// Like `known_relations_for_exom`, but maps name → arity so callers can
+/// reject calls that pass the wrong number of args.
+fn known_relation_arities_for_exom(
+    exom: &str,
+    rules: &[ParsedRule],
+) -> std::collections::BTreeMap<String, usize> {
+    let mut arities = std::collections::BTreeMap::new();
+    // Typed EDBs and the datoms table are arity-3 (entity / attr / value).
+    arities.insert(storage::FACTS_I64_ENV.to_string(), 3);
+    arities.insert(storage::FACTS_STR_ENV.to_string(), 3);
+    arities.insert(storage::FACTS_SYM_ENV.to_string(), 3);
+    arities.insert(exom.to_string(), 3);
+    for builtin in system_schema::builtin_views(exom) {
+        arities.insert(builtin.name, builtin.arity);
+    }
+    for r in rules {
+        // If a user redefines the same head with multiple arities, the
+        // rule registry preserves both — keep the largest so we accept
+        // the broadest call shape.
+        arities
+            .entry(r.head_predicate.clone())
+            .and_modify(|a| *a = (*a).max(r.head_arity))
+            .or_insert(r.head_arity);
+    }
+    arities
+}
+
 /// Walk the `(where ...)` clause of a canonical query and reject any
 /// body atom whose leading symbol isn't a known relation, a logical
 /// compound, a comparison, or an aggregate. Rayforce2 historically
@@ -2031,6 +2063,7 @@ fn known_relations_for_exom(exom: &str, rules: &[ParsedRule]) -> BTreeSet<String
 fn validate_query_body(
     query: &CanonicalQuery,
     known: &BTreeSet<String>,
+    arities: &std::collections::BTreeMap<String, usize>,
 ) -> anyhow::Result<()> {
     for clause in &query.clauses {
         let Some(items) = clause.as_list() else {
@@ -2041,7 +2074,7 @@ fn validate_query_body(
         };
         if head == "where" {
             for atom in &items[1..] {
-                validate_body_atom(atom, known)?;
+                validate_body_atom(atom, known, arities)?;
             }
         }
     }
@@ -2051,6 +2084,7 @@ fn validate_query_body(
 fn validate_body_atom(
     atom: &rayfall_ast::Expr,
     known: &BTreeSet<String>,
+    arities: &std::collections::BTreeMap<String, usize>,
 ) -> anyhow::Result<()> {
     let Some(items) = atom.as_list() else {
         return Ok(());
@@ -2066,7 +2100,7 @@ fn validate_body_atom(
     }
     if is_logical_body_op(sym) {
         for child in &items[1..] {
-            validate_body_atom(child, known)?;
+            validate_body_atom(child, known, arities)?;
         }
         return Ok(());
     }
@@ -2083,6 +2117,17 @@ fn validate_body_atom(
     }
     if !known.contains(sym) {
         return Err(unknown_relation_error(sym, known));
+    }
+    if let Some(&declared) = arities.get(sym) {
+        let actual = items.len() - 1;
+        if actual != declared {
+            return Err(anyhow::anyhow!(
+                "rule '{}' expects {} args, got {}",
+                sym,
+                declared,
+                actual
+            ));
+        }
     }
     Ok(())
 }
@@ -2151,7 +2196,8 @@ fn eval_query_form(
         .get(&expanded.exom_name)
         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", expanded.exom_name))?;
     let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
-    validate_query_body(query, &known)?;
+    let arities = known_relation_arities_for_exom(&expanded.exom_name, &es.rules);
+    validate_query_body(query, &known, &arities)?;
     execute_prepared_query(engine, exoms, &expanded)
 }
 
@@ -2309,7 +2355,8 @@ async fn api_query_post(
             }
         };
         let known = known_relations_for_exom(&expanded.exom_name, &es.rules);
-        if let Err(err) = validate_query_body(&query, &known) {
+        let arities = known_relation_arities_for_exom(&expanded.exom_name, &es.rules);
+        if let Err(err) = validate_query_body(&query, &known, &arities) {
             break 'body (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": err.to_string()})),
@@ -4637,10 +4684,14 @@ mod query_validation_tests {
         known_relations_for_exom("main", &[])
     }
 
+    fn arities() -> std::collections::BTreeMap<String, usize> {
+        known_relation_arities_for_exom("main", &[])
+    }
+
     #[test]
     fn accepts_builtin_edb() {
         let q = parse_query("(query main (find ?p ?v) (where (facts_i64 ?e ?p ?v)))");
-        validate_query_body(&q, &known()).expect("facts_i64 is a bound EDB");
+        validate_query_body(&q, &known(), &arities()).expect("facts_i64 is a bound EDB");
     }
 
     #[test]
@@ -4648,13 +4699,14 @@ mod query_validation_tests {
         let q = parse_query(
             "(query main (find ?f ?p) (where (?f 'fact/predicate ?p)))",
         );
-        validate_query_body(&q, &known()).expect("EAV atoms with variable leads should pass");
+        validate_query_body(&q, &known(), &arities())
+            .expect("EAV atoms with variable leads should pass");
     }
 
     #[test]
     fn accepts_builtin_view_idb() {
         let q = parse_query("(query main (find ?f ?p ?v) (where (fact-row ?f ?p ?v)))");
-        validate_query_body(&q, &known()).expect("fact-row is a builtin view");
+        validate_query_body(&q, &known(), &arities()).expect("fact-row is a builtin view");
     }
 
     #[test]
@@ -4662,19 +4714,21 @@ mod query_validation_tests {
         let q = parse_query(
             "(query main (find ?v) (where (and (facts_i64 ?e ?p ?v) (> ?v 5))))",
         );
-        validate_query_body(&q, &known()).expect("and/cmp should descend and pass");
+        validate_query_body(&q, &known(), &arities())
+            .expect("and/cmp should descend and pass");
     }
 
     #[test]
     fn accepts_aggregate_over_known_relation() {
         let q = parse_query("(query main (find ?s) (where (sum ?s facts_i64 2)))");
-        validate_query_body(&q, &known()).expect("agg over known relation");
+        validate_query_body(&q, &known(), &arities()).expect("agg over known relation");
     }
 
     #[test]
     fn rejects_typo_in_relation_name() {
         let q = parse_query("(query main (find ?v) (where (facts_164 ?e ?p ?v)))");
-        let err = validate_query_body(&q, &known()).expect_err("typo should fail");
+        let err =
+            validate_query_body(&q, &known(), &arities()).expect_err("typo should fail");
         let msg = err.to_string();
         assert!(msg.contains("facts_164"), "error should mention the typo: {msg}");
         assert!(msg.contains("facts_i64"), "should suggest the fix: {msg}");
@@ -4683,14 +4737,16 @@ mod query_validation_tests {
     #[test]
     fn rejects_unknown_relation_in_aggregate() {
         let q = parse_query("(query main (find ?s) (where (sum ?s bogus_rel 2)))");
-        let err = validate_query_body(&q, &known()).expect_err("unknown agg source");
+        let err = validate_query_body(&q, &known(), &arities())
+            .expect_err("unknown agg source");
         assert!(err.to_string().contains("bogus_rel"));
     }
 
     #[test]
     fn rejects_unknown_relation() {
         let q = parse_query("(query main (find ?v) (where (no_such_relation ?e ?p ?v)))");
-        let err = validate_query_body(&q, &known()).expect_err("unknown relation");
+        let err = validate_query_body(&q, &known(), &arities())
+            .expect_err("unknown relation");
         assert!(err.to_string().contains("no_such_relation"));
     }
 
@@ -4703,7 +4759,32 @@ mod query_validation_tests {
         )
         .expect("parse user rule");
         let known = known_relations_for_exom("main", std::slice::from_ref(&parsed));
+        let arities =
+            known_relation_arities_for_exom("main", std::slice::from_ref(&parsed));
         let q = parse_query("(query main (find ?f ?w) (where (heavy ?f ?w)))");
-        validate_query_body(&q, &known).expect("user rule head should be accepted");
+        validate_query_body(&q, &known, &arities)
+            .expect("user rule head should be accepted");
+    }
+
+    #[test]
+    fn rejects_wrong_arity_on_builtin_view() {
+        // fact-row is arity 3; calling it with 1 arg must fail.
+        let q = parse_query("(query main (find ?x) (where (fact-row ?x)))");
+        let err = validate_query_body(&q, &known(), &arities())
+            .expect_err("arity mismatch should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("fact-row"), "error should mention rule: {msg}");
+        assert!(msg.contains("3"), "error should mention declared arity: {msg}");
+        assert!(msg.contains("1"), "error should mention actual arity: {msg}");
+    }
+
+    #[test]
+    fn rejects_wrong_arity_on_typed_edb() {
+        // facts_i64 is arity 3; calling with 2 args should fail.
+        let q = parse_query("(query main (find ?e ?p) (where (facts_i64 ?e ?p)))");
+        let err = validate_query_body(&q, &known(), &arities())
+            .expect_err("arity mismatch should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("facts_i64"), "error should mention rule: {msg}");
     }
 }

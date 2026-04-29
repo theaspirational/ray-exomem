@@ -489,6 +489,7 @@ impl Brain {
         valid_to: Option<&str>,
         ctx: &MutationContext,
     ) -> Result<TxId> {
+        validate_predicate_name(predicate)?;
         let value: FactValue = value.into();
         let (tx_id, tx_time) = self.alloc_tx(
             TxAction::AssertFact,
@@ -496,6 +497,26 @@ impl Brain {
             &format!("assert: {} = {}", predicate, value),
             ctx,
         )?;
+        let new_valid_from = valid_from.unwrap_or(&tx_time).to_string();
+        // Close every prior open interval for this fact_id: stamp the closer's
+        // tx into superseded_by, and clamp valid_to to the earlier of the new
+        // valid_from or tx_time (so a backfilled supersede with valid_from in
+        // the past doesn't push valid_to backward past tx_time).
+        let close_at = if new_valid_from.as_str() < tx_time.as_str() {
+            new_valid_from.clone()
+        } else {
+            tx_time.clone()
+        };
+        for f in self.facts.iter_mut() {
+            if f.fact_id == fact_id
+                && f.revoked_by_tx.is_none()
+                && f.superseded_by_tx.is_none()
+                && f.valid_to.is_none()
+            {
+                f.superseded_by_tx = Some(tx_id);
+                f.valid_to = Some(close_at.clone());
+            }
+        }
         let fact = Fact {
             fact_id: fact_id.into(),
             predicate: predicate.into(),
@@ -506,7 +527,7 @@ impl Brain {
             revoked_by_tx: None,
             confidence,
             provenance: provenance.into(),
-            valid_from: valid_from.unwrap_or(&tx_time).to_string(),
+            valid_from: new_valid_from,
             valid_to: valid_to.map(|s| s.to_string()),
         };
         self.facts.push(fact);
@@ -528,14 +549,14 @@ impl Brain {
             &format!("retract: {}", fact_id),
             ctx,
         )?;
-        if let Some(f) = self
-            .facts
-            .iter_mut()
-            .find(|f| f.fact_id == fact_id && f.revoked_by_tx.is_none())
-        {
-            f.revoked_by_tx = Some(tx_id);
-            if f.valid_to.is_none() {
-                f.valid_to = Some(tx_time);
+        // Retract closes EVERY active row for this fact_id: stamps revoked_by
+        // and overrides valid_to to the retract time. Even rows with an
+        // explicit future valid_to lose that projection — the assertion
+        // terminates now.
+        for f in self.facts.iter_mut() {
+            if f.fact_id == fact_id && f.revoked_by_tx.is_none() {
+                f.revoked_by_tx = Some(tx_id);
+                f.valid_to = Some(tx_time.clone());
             }
         }
         self.rebuild_splay(DirtyTable::Fact)?;
@@ -612,11 +633,15 @@ impl Brain {
             &format!("revise: {}", claim_text),
             ctx,
         )?;
-        // Supersede any active belief with the same claim_text
+        // Supersede any active belief with the same belief_id (a re-believe
+        // for the same id replaces the prior version) or the same claim_text
+        // (different ids converging on the same claim).
         for b in self.beliefs.iter_mut() {
-            if b.claim_text == claim_text
-                && b.status == BeliefStatus::Active
-                && b.belief_id != belief_id
+            if b.status != BeliefStatus::Active {
+                continue;
+            }
+            if b.belief_id == belief_id
+                || (b.claim_text == claim_text && b.belief_id != belief_id)
             {
                 b.status = BeliefStatus::Superseded;
                 if b.valid_to.is_none() {
@@ -666,14 +691,14 @@ impl Brain {
             &format!("revoke: {}", belief_id),
             ctx,
         )?;
-        if let Some(b) = self
-            .beliefs
-            .iter_mut()
-            .find(|b| b.belief_id == belief_id && b.status == BeliefStatus::Active)
-        {
-            b.status = BeliefStatus::Revoked;
-            if b.valid_to.is_none() {
-                b.valid_to = Some(tx_time);
+        // Revoke EVERY active row for this belief_id. revise_belief should
+        // have already collapsed prior rows to Superseded, but iterate
+        // defensively so older data with multiple Active rows still ends
+        // up consistently revoked.
+        for b in self.beliefs.iter_mut() {
+            if b.belief_id == belief_id && b.status == BeliefStatus::Active {
+                b.status = BeliefStatus::Revoked;
+                b.valid_to = Some(tx_time.clone());
             }
         }
         self.rebuild_splay(DirtyTable::Belief)?;
@@ -995,6 +1020,33 @@ impl Brain {
     /// Return active beliefs on the current branch (closest version wins per `claim_text`).
     pub fn current_beliefs(&self) -> Vec<&Belief> {
         self.beliefs_on_branch(&self.current_branch)
+    }
+
+    /// Latest belief per `belief_id` on the given branch, regardless of
+    /// status. Used by `build_datoms_table` so the EAV plane retains a
+    /// `belief/status` triple for revoked / superseded beliefs (otherwise
+    /// `belief-row` silently drops them after revoke).
+    pub fn latest_belief_per_id_on_branch(&self, branch_id: &str) -> Vec<&Belief> {
+        let ancestors = self.branch_ancestors(branch_id);
+        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
+        let mut visible: Vec<&Belief> = self
+            .beliefs
+            .iter()
+            .filter(|b| self.tx_on_branches(b.created_by_tx, &branch_set))
+            .collect();
+        visible.sort_by_key(|b| {
+            (
+                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
+                Reverse(b.created_by_tx),
+            )
+        });
+        visible.dedup_by(|a, b| a.belief_id == b.belief_id);
+        visible
+    }
+
+    /// Latest belief per `belief_id` on the current branch.
+    pub fn latest_beliefs_per_id(&self) -> Vec<&Belief> {
+        self.latest_belief_per_id_on_branch(&self.current_branch)
     }
 
     fn fact_active_as_of_on_branch(&self, f: &Fact, tx_id: TxId, branch_id: &str) -> bool {
@@ -1424,6 +1476,26 @@ fn fmt_belief_history(beliefs: &[&Belief]) -> String {
 /// Uses lexicographic comparison — assumes fixed-width ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ).
 fn is_valid_at(valid_from: &str, valid_to: Option<&str>, timestamp: &str) -> bool {
     valid_from <= timestamp && valid_to.is_none_or(|end| end > timestamp)
+}
+
+/// Reject predicate names that would round-trip badly through Rayfall syntax.
+/// Empty / whitespace-only / quote-bearing names are not viable as datalog
+/// symbols. The trust boundary lives here in brain so every transport (HTTP,
+/// MCP, future CLI) gets the same enforcement.
+pub fn validate_predicate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("invalid 'predicate': must be non-empty");
+    }
+    if name.trim() != name {
+        bail!("invalid 'predicate': must not have leading/trailing whitespace");
+    }
+    if name.chars().any(|c| c.is_whitespace()) {
+        bail!("invalid 'predicate': must not contain whitespace");
+    }
+    if name.chars().any(|c| c == '\'' || c == '"') {
+        bail!("invalid 'predicate': must not contain quote characters");
+    }
+    Ok(())
 }
 
 /// ISO 8601 UTC timestamp for the current instant.
@@ -2253,6 +2325,150 @@ mod tests {
     use crate::context::MutationContext;
     fn test_lock() -> &'static std::sync::Mutex<()> {
         crate::global_test_lock()
+    }
+
+    #[test]
+    fn assert_supersede_closes_prior_valid_to_and_back_pointer() {
+        let mut brain = Brain::new();
+        let tx1 = brain
+            .assert_fact(
+                "bt/temp",
+                "temp_c",
+                FactValue::I64(21),
+                1.0,
+                "test",
+                Some("2024-01-01T00:00:00Z"),
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx2 = brain
+            .assert_fact(
+                "bt/temp",
+                "temp_c",
+                FactValue::I64(22),
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+
+        let history = brain.fact_history("bt/temp");
+        assert_eq!(history.len(), 2);
+        let t1 = &history[0];
+        let t2 = &history[1];
+        assert_eq!(t1.created_by_tx, tx1);
+        assert_eq!(t2.created_by_tx, tx2);
+        assert_eq!(
+            t1.superseded_by_tx,
+            Some(tx2),
+            "T1 must record back-pointer to T2"
+        );
+        assert!(t1.valid_to.is_some(), "T1.valid_to must be closed");
+        assert_eq!(
+            t1.valid_to.as_deref(),
+            Some(t2.valid_from.as_str()),
+            "T1.valid_to must equal T2.valid_from"
+        );
+        assert!(t2.superseded_by_tx.is_none());
+        assert!(t2.valid_to.is_none());
+    }
+
+    #[test]
+    fn retract_overrides_explicit_future_valid_to() {
+        let mut brain = Brain::new();
+        let tx1 = brain
+            .assert_fact(
+                "bt/projection",
+                "projection",
+                FactValue::I64(1),
+                1.0,
+                "test",
+                None,
+                Some("2030-01-01T00:00:00Z"),
+                &MutationContext::default(),
+            )
+            .unwrap();
+        let tx2 = brain
+            .retract_fact("bt/projection", &MutationContext::default())
+            .unwrap();
+
+        let history = brain.fact_history("bt/projection");
+        assert_eq!(history.len(), 1);
+        let row = &history[0];
+        assert_eq!(row.created_by_tx, tx1);
+        assert_eq!(row.revoked_by_tx, Some(tx2));
+        let closed = row.valid_to.as_deref().unwrap();
+        assert!(
+            closed < "2030-01-01T00:00:00Z",
+            "retract must override the explicit future valid_to (got {closed})"
+        );
+    }
+
+    #[test]
+    fn retract_closes_all_open_intervals_for_fact_id() {
+        // Pre-typed-values exoms can have multiple open rows for the same
+        // fact_id (assert_fact didn't supersede prior). After the B1 fix
+        // assert closes them, but retract must still defensively walk all
+        // matches so legacy data ends up consistent.
+        let mut brain = Brain::new();
+        // Force two open rows by pushing directly (simulating legacy state).
+        let tx1 = brain
+            .assert_fact(
+                "legacy/x",
+                "x",
+                "a",
+                1.0,
+                "test",
+                None,
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        // Inject a second open row by hand.
+        let extra = Fact {
+            fact_id: "legacy/x".into(),
+            predicate: "x".into(),
+            value: FactValue::Str("b".into()),
+            created_at: brain.facts.last().unwrap().created_at.clone(),
+            created_by_tx: tx1,
+            superseded_by_tx: None,
+            revoked_by_tx: None,
+            confidence: 1.0,
+            provenance: "test".into(),
+            valid_from: brain.facts.last().unwrap().valid_from.clone(),
+            valid_to: None,
+        };
+        brain.facts.push(extra);
+
+        let tx2 = brain
+            .retract_fact("legacy/x", &MutationContext::default())
+            .unwrap();
+
+        let history = brain.fact_history("legacy/x");
+        assert_eq!(history.len(), 2);
+        for row in &history {
+            assert_eq!(
+                row.revoked_by_tx,
+                Some(tx2),
+                "every open row must be revoked"
+            );
+            assert!(row.valid_to.is_some(), "every row's valid_to must be set");
+        }
+    }
+
+    #[test]
+    fn validate_predicate_name_rejects_invalid() {
+        assert!(validate_predicate_name("").is_err());
+        assert!(validate_predicate_name(" leading").is_err());
+        assert!(validate_predicate_name("trailing ").is_err());
+        assert!(validate_predicate_name("inner space").is_err());
+        assert!(validate_predicate_name("with'quote").is_err());
+        assert!(validate_predicate_name("with\"dquote").is_err());
+        assert!(validate_predicate_name("ok/predicate").is_ok());
+        assert!(validate_predicate_name("simple").is_ok());
     }
 
     #[test]

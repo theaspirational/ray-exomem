@@ -851,6 +851,10 @@ async fn tool_assert_fact(
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let predicate = require_str(args, "predicate")?.to_string();
+    crate::brain::validate_predicate_name(&predicate).map_err(|e| JsonRpcError {
+        code: -32602,
+        message: e.to_string(),
+    })?;
     // MCP accepts typed JSON values (20 / "text" / {"$sym": "foo"}) plus bare
     // strings for legacy clients. Bare strings run through `FactValue::auto`
     // so numeric input like "75" is stored as I64, enabling datalog cmp rules
@@ -1222,6 +1226,8 @@ fn tool_fact_history(state: &AppState, args: &serde_json::Value) -> Result<Strin
                 "valid_to": f.valid_to,
                 "created_at": f.created_at,
                 "tx_id": f.created_by_tx,
+                "superseded_by": f.superseded_by_tx.map(|t| format!("tx/{}", t)),
+                "revoked_by": f.revoked_by_tx.map(|t| format!("tx/{}", t)),
                 "user_email": tx.and_then(|t| t.user_email.as_deref()),
                 "agent": tx.and_then(|t| t.agent.as_deref()),
                 "model": tx.and_then(|t| t.model.as_deref()),

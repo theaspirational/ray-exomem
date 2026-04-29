@@ -677,7 +677,10 @@ pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
     let facts = brain.current_facts();
     let txs = brain.current_transactions();
     let observations = brain.observations();
-    let beliefs = brain.current_beliefs();
+    // Latest version per belief_id (regardless of status) so revoked /
+    // superseded beliefs still appear in `belief-row` with the right
+    // `belief/status`. `current_beliefs` would silently drop them.
+    let beliefs = brain.latest_beliefs_per_id();
     let branches = brain.branches();
     let mut row_count = facts.len();
     for fact in &facts {
