@@ -837,6 +837,11 @@ impl Brain {
         if !self.tx_on_branches(f.created_by_tx, &branch_set) {
             return false;
         }
+        if let Some(sup) = f.superseded_by_tx {
+            if self.tx_on_branches(sup, &branch_set) {
+                return false;
+            }
+        }
         if let Some(rev) = f.revoked_by_tx {
             if self.tx_on_branches(rev, &branch_set) {
                 return false;
@@ -1271,6 +1276,20 @@ impl Brain {
     /// Return the full transaction log.
     pub fn transactions(&self) -> &[Tx] {
         &self.transactions
+    }
+
+    /// Schema-driven `value_kind` lookup for an ontology attribute name.
+    ///
+    /// Returns the string kind (e.g. `"predicate"`, `"branch"`, `"tx-entity"`,
+    /// `"entity"`, `"sym"`, `"string"`, `"timestamp"`, ...) when `attr` matches
+    /// a known system or coordination attribute. Used by the query lowering
+    /// layer to pin body-atom literals to sym tags when the schema demands it.
+    pub fn value_kind_for_attr(&self, attr: &str) -> Option<String> {
+        crate::system_schema::system_attributes()
+            .into_iter()
+            .chain(crate::system_schema::coordination_attributes())
+            .find(|a| a.name == attr)
+            .map(|a| a.value_kind)
     }
 
     /// Current transaction id (latest committed).
@@ -2556,6 +2575,71 @@ mod tests {
             head_close < "2099-01-01T00:00:00Z",
             "retract must override the head's explicit future valid_to (got {head_close})"
         );
+    }
+
+    #[test]
+    fn current_facts_empty_after_supersede_chain_then_retract() {
+        // Three asserts on the same fact_id followed by a retract leaves zero
+        // visible rows on the current branch: predecessors are superseded
+        // (filtered out) and the head is revoked. History still returns the
+        // full chain.
+        let mut brain = Brain::new();
+        brain
+            .assert_fact(
+                "bt/age",
+                "age",
+                FactValue::I64(21),
+                1.0,
+                "test",
+                Some("2024-01-01T00:00:00Z"),
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        brain
+            .assert_fact(
+                "bt/age",
+                "age",
+                FactValue::I64(22),
+                1.0,
+                "test",
+                Some("2025-01-01T00:00:00Z"),
+                None,
+                &MutationContext::default(),
+            )
+            .unwrap();
+        brain
+            .assert_fact(
+                "bt/age",
+                "age",
+                FactValue::I64(23),
+                1.0,
+                "test",
+                Some("2026-01-01T00:00:00Z"),
+                Some("2030-01-01T00:00:00Z"),
+                &MutationContext::default(),
+            )
+            .unwrap();
+        brain
+            .retract_fact("bt/age", &MutationContext::default())
+            .unwrap();
+
+        let current: Vec<&Fact> = brain
+            .current_facts()
+            .into_iter()
+            .filter(|f| f.fact_id == "bt/age")
+            .collect();
+        assert!(
+            current.is_empty(),
+            "no rows should be visible after retract closes the chain head (got {:?})",
+            current
+                .iter()
+                .map(|f| (f.created_by_tx, f.value.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        let history = brain.fact_history("bt/age");
+        assert_eq!(history.len(), 3, "history must keep the full chain");
     }
 
     #[test]

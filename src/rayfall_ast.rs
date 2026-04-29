@@ -92,6 +92,60 @@ impl CanonicalQuery {
     pub fn emit(&self) -> String {
         self.to_expr().emit()
     }
+
+    /// Pin body-atom string literals to sym tags when the schema demands it.
+    ///
+    /// rayforce2's column-aware compare matches body literals against typed
+    /// columns by tag. Predicate names and entity refs are stored as
+    /// SYM-tagged datoms, but the surface syntax `(?e 'fact/predicate "p")`
+    /// emits the value as a STR-tagged datom — tag mismatch → 0 rows. For
+    /// every body atom shaped `(?e 'attr literal)` whose attribute resolves
+    /// in the schema to a sym-encoded `value_kind`, rewrite the literal to
+    /// `'literal` so the engine sym-interns it before the compare.
+    ///
+    /// Must run before rule expansion so the rewrite propagates into
+    /// inlined rule bodies.
+    pub fn rewrite_body_literals_with_schema<F>(&mut self, value_kind_for_attr: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        for clause in &mut self.clauses {
+            rewrite_expr_body_literals(clause, &value_kind_for_attr);
+        }
+    }
+}
+
+const SYM_ENCODED_KINDS: &[&str] = &["predicate", "branch", "tx-entity", "entity", "sym"];
+
+fn rewrite_expr_body_literals<F>(expr: &mut Expr, value_kind_for_attr: &F)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Expr::List(items) = expr {
+        if items.len() == 3 {
+            let attr_name = match &items[1] {
+                Expr::Quote(inner) => match inner.as_ref() {
+                    Expr::Symbol(s) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let lit = match &items[2] {
+                Expr::String(s) => Some(s.clone()),
+                _ => None,
+            };
+            if let (Some(attr), Some(value)) = (attr_name, lit) {
+                if let Some(kind) = value_kind_for_attr(&attr) {
+                    if SYM_ENCODED_KINDS.contains(&kind.as_str()) {
+                        items[2] = Expr::Quote(Box::new(Expr::Symbol(value)));
+                    }
+                }
+            }
+        }
+        for child in items.iter_mut() {
+            rewrite_expr_body_literals(child, value_kind_for_attr);
+        }
+    }
 }
 
 impl CanonicalRule {
@@ -618,6 +672,76 @@ mod tests {
         assert_eq!(
             expanded,
             "(query main (find ?x) (where (p ?x)) (rules ((fact-row ?f ?p ?v) (?f 'fact/predicate ?p) (?f 'fact/value ?v))))"
+        );
+    }
+
+    #[test]
+    fn rewrite_pins_sym_encoded_attribute_literal() {
+        let expr =
+            parse_one("(query main (find ?f) (where (?f 'fact/predicate \"fx/marker\")))").unwrap();
+        let lowered = lower_top_level(&expr, lowering_options()).unwrap();
+        let CanonicalForm::Query(mut query) = lowered.into_iter().next().unwrap() else {
+            panic!("expected query");
+        };
+        query.rewrite_body_literals_with_schema(|attr| match attr {
+            "fact/predicate" => Some("predicate".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            query.emit(),
+            "(query main (find ?f) (where (?f 'fact/predicate 'fx/marker)))"
+        );
+    }
+
+    #[test]
+    fn rewrite_skips_string_kind_attribute() {
+        let expr = parse_one("(query main (find ?f) (where (?f 'fact/value \"hello\")))").unwrap();
+        let lowered = lower_top_level(&expr, lowering_options()).unwrap();
+        let CanonicalForm::Query(mut query) = lowered.into_iter().next().unwrap() else {
+            panic!("expected query");
+        };
+        query.rewrite_body_literals_with_schema(|attr| match attr {
+            "fact/value" => Some("string".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            query.emit(),
+            "(query main (find ?f) (where (?f 'fact/value \"hello\")))"
+        );
+    }
+
+    #[test]
+    fn rewrite_descends_into_logical_compounds() {
+        let expr = parse_one(
+            "(query main (find ?f) (where (and (?f 'fact/predicate \"fx/marker\") (?f 'fact/value \"v\"))))",
+        )
+        .unwrap();
+        let lowered = lower_top_level(&expr, lowering_options()).unwrap();
+        let CanonicalForm::Query(mut query) = lowered.into_iter().next().unwrap() else {
+            panic!("expected query");
+        };
+        query.rewrite_body_literals_with_schema(|attr| match attr {
+            "fact/predicate" => Some("predicate".to_string()),
+            "fact/value" => Some("string".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            query.emit(),
+            "(query main (find ?f) (where (and (?f 'fact/predicate 'fx/marker) (?f 'fact/value \"v\"))))"
+        );
+    }
+
+    #[test]
+    fn rewrite_skips_unknown_attribute() {
+        let expr = parse_one("(query main (find ?f) (where (?f 'user/state \"active\")))").unwrap();
+        let lowered = lower_top_level(&expr, lowering_options()).unwrap();
+        let CanonicalForm::Query(mut query) = lowered.into_iter().next().unwrap() else {
+            panic!("expected query");
+        };
+        query.rewrite_body_literals_with_schema(|_| None);
+        assert_eq!(
+            query.emit(),
+            "(query main (find ?f) (where (?f 'user/state \"active\")))"
         );
     }
 }

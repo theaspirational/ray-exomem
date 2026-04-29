@@ -513,3 +513,57 @@ fn body_string_literal_pins_datom_encoded_via_facts_str_edb() {
         "string literal must match facts_str V column; got {got:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ñ2 — schema-aware sym pinning. Body atom `(?e 'fact/predicate "name")`
+// must compare against the SYM-tagged predicate column. Without the
+// lowering-layer rewrite the literal flows through as STR-tagged and the
+// engine returns 0 rows. The rewrite walks the canonical AST and converts
+// the literal to a quoted symbol when the schema's value_kind for the
+// attribute is sym-encoded.
+// ---------------------------------------------------------------------------
+
+/// Apply the schema-aware sym-pinning rewrite to a Rayfall query string.
+/// Mirrors `expand_canonical_query` in server.rs without the rule-expansion
+/// step so the rewrite can be exercised in isolation by E2E tests.
+fn rewrite_query_with_schema(query: &str) -> String {
+    use ray_exomem::rayfall_ast::{lower_top_level, CanonicalForm, LoweringOptions};
+
+    let expr = ray_exomem::rayfall_ast::parse_one(query).expect("query must parse");
+    let lowered = lower_top_level(
+        &expr,
+        LoweringOptions {
+            default_query_exom: None,
+            default_rule_exom: None,
+        },
+    )
+    .expect("query must lower");
+    let CanonicalForm::Query(mut canonical) = lowered.into_iter().next().expect("one form") else {
+        panic!("expected CanonicalForm::Query");
+    };
+    let brain = Brain::new();
+    canonical.rewrite_body_literals_with_schema(|attr| brain.value_kind_for_attr(attr));
+    canonical.emit()
+}
+
+#[test]
+fn body_string_literal_pins_predicate_position_sym_column() {
+    // Assert one fact and query its `fact/predicate` via a string literal.
+    // The schema declares fact/predicate as value_kind=predicate (sym-encoded),
+    // so the rewrite must convert "test/n" → 'test/n before the engine sees it.
+    let exom = "n2/main";
+    let profile = &[("f1", "test/n", FactValue::Str("payload".into()))];
+    let raw_q = format!(
+        r#"(query {exom} (find ?id) (where (?id 'fact/predicate "test/n")))"#
+    );
+    let q = rewrite_query_with_schema(&raw_q);
+    assert!(
+        q.contains("'test/n"),
+        "rewrite must pin literal to sym; got {q}"
+    );
+    let got = query_first_col(exom, profile, &q, &[]);
+    assert!(
+        got.iter().any(|v| v == "f1"),
+        "expected predicate-name match to return f1; got {got:?}"
+    );
+}

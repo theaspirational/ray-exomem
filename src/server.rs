@@ -1942,15 +1942,19 @@ fn expand_canonical_query(
     query: &CanonicalQuery,
 ) -> anyhow::Result<ExpandedQuery> {
     let exom_name = query.exom.clone();
-    let rule_inline_bodies: Vec<String> = {
-        let es = exoms
-            .get(&exom_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
-        combined_rules(&exom_name, &es.rules)?
-            .into_iter()
-            .map(|rule| rule.inline_body)
-            .collect()
-    };
+    let es = exoms
+        .get(&exom_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom_name))?;
+    let rule_inline_bodies: Vec<String> = combined_rules(&exom_name, &es.rules)?
+        .into_iter()
+        .map(|rule| rule.inline_body)
+        .collect();
+
+    // Pin body-atom string literals to sym tags when the schema demands it.
+    // Must run before rule expansion so inlined rule bodies inherit the fix.
+    let mut query = query.clone();
+    query.rewrite_body_literals_with_schema(|attr| es.brain.value_kind_for_attr(attr));
+
     let normalized_query = query.emit();
     let expanded_query =
         rayfall_parser::rewrite_query_with_rules(&normalized_query, &rule_inline_bodies)?;
