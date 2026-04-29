@@ -50,7 +50,11 @@ Facts are **bitemporal**:
 - `created_at` (tx-time) — when the daemon recorded the fact.
 
 A new assert with the same `fact_id` supersedes the previous tuple by closing
-its `valid_to` and creating a new tuple. History is preserved.
+its `valid_to` and stamping `superseded_by_tx` on it, then writing a new
+tuple at the head of the chain. A retract closes every active tuple's
+`valid_to` to retract-time and stamps `revoked_by_tx`. History is preserved
+— `fact_history` returns the full chain with back-pointers intact. Retract
+is an *event* (a tx in the tx log), not a value-interval.
 
 ### Permissions
 
@@ -190,6 +194,27 @@ schemas the server exposes.
 No args. Returns every exom the authenticated user can see. Cheap; use it as
 the first call in a fresh session.
 
+### `tree` `{ path?, depth?, include_archived?, include_branches? }`
+
+Walk the auth-aware tree for the calling user. Returns the user's own
+namespace plus every namespace they have shares for plus the `public/*`
+subtree. `path` narrows the walk to a sub-path (slash or `::` form);
+`depth` caps how deep it descends. Use this before `init` / `session_new`
+to confirm a path is/isn't already taken.
+
+### `init` `{ path }`
+
+Scaffold a project at `<path>`: creates `<path>/main` (the project's main
+exom) and an empty `<path>/sessions/` folder. Idempotent. Use this once
+per project before issuing `session_new` calls under it. Permission-gated
+the same way `assert_fact` is.
+
+### `exom_new` `{ path }`
+
+Create a free-standing bare exom at `<path>` (no `main`/`sessions`
+scaffolding). Use for ad-hoc namespaces or scratch exoms that aren't part
+of a project. For project setup use `init` instead. Idempotent.
+
 ### `exom_status` `{ exom }`
 
 Returns `{ exom, current_branch, facts, beliefs, transactions }`. Lazy-loads
@@ -215,8 +240,17 @@ when the engine query path is being upgraded.
 ### `fact_history` `{ exom, id }`
 
 Bitemporal history for a single `fact_id`: each tuple's `value`, `confidence`,
-`valid_from`, `valid_to`, `created_at`. Use this to verify timestamps after a
-write, or to read time-travel slices.
+`valid_from`, `valid_to`, `created_at`, plus the back-pointers `superseded_by`
+(the tx that closed this interval with a re-assert) and `revoked_by` (the tx
+that closed it with a retract). Use this to verify timestamps after a write,
+or to read time-travel slices.
+
+`fact_history` returns one row per asserted value-interval, **not** one row
+per tx event. A retract is a tx — visible in the tx log as `tx/action =
+"retract-fact"` — but it closes the existing interval rather than adding a
+new one. So a sequence of three asserts followed by a retract returns three
+rows: T1 carries `superseded_by = T2`, T2 carries `superseded_by = T3`, T3
+carries `revoked_by = T4` and `valid_to = T4.tx_time`.
 
 ### `query` `{ exom, query, branch? }`
 
@@ -298,11 +332,20 @@ branch for the duration of the eval, then restored — same semantics as
 Returns `{ ok, tx_id, fact_id, predicate, confidence, source }`. See §3 for
 value typing and how the optional fields map onto the bitemporal model.
 
+`predicate` is validated server-side: empty / whitespace-only / quote-bearing
+names are rejected with `invalid 'predicate'`. A re-assert that hits an
+existing `fact_id` closes every prior open interval (stamps
+`superseded_by_tx`, clamps `valid_to` to `min(new_valid_from, tx_time)`)
+and writes the new tuple as the head of the chain.
+
 ### `retract_fact` `{ exom, fact_id, agent?, model?, branch? }`
 
-Closes the active tuple's `valid_to` to now and marks the fact revoked.
-History is preserved — `fact_history` still returns the closed tuple.
-Returns `{ ok, tx_id, fact_id }`.
+Closes every active tuple for `fact_id`: stamps `revoked_by_tx` and forces
+`valid_to = now()`, overriding any explicit future projection (a tuple with
+`valid_to = "2030-01-01"` becomes `valid_to = <retract_time>` — once
+retracted, the projection no longer applies). History is preserved —
+`fact_history` still returns each closed tuple with its `revoked_by`
+back-pointer. Returns `{ ok, tx_id, fact_id }`.
 
 ### `observe` `{ exom, obs_id, source_type, source_ref?, content, confidence?, tags?, valid_from?, valid_to?, agent?, model?, branch? }`
 
@@ -355,6 +398,21 @@ disturbing the exom's current-branch cursor for other callers — the switch
 is held only for the duration of the write under an exclusive exom lock.
 Branch ownership is enforced by TOFU: writes to a branch claimed by a
 different user return `branch_owned`.
+
+### `merge_branch` `{ exom, branch, policy? }`
+
+Merge `branch` into the exom's current branch. `policy` is one of
+`"last-writer-wins"` (default — overwrites conflicting target facts),
+`"keep-target"` (skips conflicts), or `"manual"` (returns the conflict
+list without writing). Returns `{ ok, added, conflicts, tx_id }` where
+`added` lists fact ids merged in and `tx_id` is the merge transaction.
+The merge tx shows up in `tx-row` with `action = "merge"`.
+
+### `archive_branch` `{ exom, branch }`
+
+Soft-delete a branch — sets `branch/archived = "true"`. Cannot archive
+`main`. Branch history is preserved; subsequent reads filter the branch
+out. Returns `{ ok, exom, archived }`.
 
 ### `session_new` `{ project_path, session_type, label, agents?, agent?, model? }`
 
@@ -409,13 +467,18 @@ audits, not for incremental sync.
 | Code / message | Cause | Fix |
 |---|---|---|
 | `unknown exom '<path>'` | Path not loaded / doesn't exist | Check `list_exoms`; the path is case-sensitive and uses `/`. |
+| `unknown_branch: unknown branch '<name>'` | Passed `branch:` arg that doesn't exist or is archived on the target exom | `list_branches` to enumerate; create with `create_branch` if you meant to. |
 | `query missing database name` | Sent `(query (find ...) ...)` with no exom path inside the form | Add the exom path: `(query <exom> (find ...) (where ...))`. |
-| `rayforce2 err type` / `err arity` | Malformed Rayfall (wrong arity for a relation, mismatched parens) | Check `schema.builtin_views` for the right arity; `query` requires `(find ...) (where ...)`. |
+| `rule '<name>' expects N args, got M` | Server-side arity check rejected a body atom before evaluation | Look up the right arity in `schema.builtin_views` (`fact-row` is 3, `tx-row` is 8, typed EDBs are 3). |
+| `unknown relation '<name>' in query body` | Body atom referenced something that isn't a typed EDB, builtin view, or user rule head | The error suggests the closest match. Use `schema.builtin_views` to enumerate. |
 | `rayforce2 err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce2 upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
 | `missing required parameter: <name>` | MCP arg validation | Add the missing field. |
+| `invalid 'predicate': must be non-empty` | Predicate name is empty / whitespace / contains quotes | Use a `<namespace>/<name>` form with no whitespace or quotes. |
 | `invalid 'value'` | `value` JSON couldn't deserialize as a `FactValue` | Send a JSON number, string, or `{"$sym": "..."}`. Anything else (arrays, nested objects without `$sym`) is rejected. |
+| `forbidden: write access denied to <path>` | Caller lacks write permission on the target path | See §2 permissions table; private paths need an explicit share. |
 | `branch_owned` | Another user already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). |
 | `session_closed` | The session exom has `session/closed_at` set; writes are rejected | Retract `session/closed_at` to reopen, or pick a different session. |
+| `cannot archive branch 'main'` | Tried to `archive_branch` on `main` | Archive a feature branch instead; `main` is the trunk and is permanent. |
 
 ---
 
@@ -424,7 +487,9 @@ audits, not for incremental sync.
 - Session `archive` and `rename` (the `session/archived_at` and `session/label`
   predicates exist; you can write them through `assert_fact`, but there's no
   convenience tool yet).
-- Branch-level operations beyond create/list (rename, diff, merge).
+- Branch `rename` and `diff` (create / list / merge / archive are MCP tools;
+  rename and diff are HTTP-only today).
+- API-key issuance / rotation — issue keys via the UI at `/auth/api-keys`.
 - Group-based access — sharing private `{email}/...` paths is per-email today.
 
 When the MCP tool surface grows to cover any of these, this guide is the
