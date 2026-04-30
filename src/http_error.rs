@@ -108,6 +108,7 @@ impl From<crate::scaffold::ScaffoldError> for ApiError {
             Io(e) => ApiError::new("io", e.to_string()),
             NestInsideExom(msg) => ApiError::new("cannot_nest_inside_exom", msg),
             AlreadyExistsDifferent(_, msg) => ApiError::new("already_exists_different", msg),
+            NotFound(msg) => ApiError::new("not_found", msg).with_status(404),
         }
     }
 }

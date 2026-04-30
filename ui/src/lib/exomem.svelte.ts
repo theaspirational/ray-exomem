@@ -422,6 +422,16 @@ export function apiInitFolder(path: string): Promise<{ ok: boolean; path: string
 	return postAction('api/actions/init', { path });
 }
 
+export function apiNewFolder(path: string): Promise<{ ok: boolean; path: string }> {
+	return postAction('api/actions/folder-new', { path });
+}
+
+export function apiDeletePath(
+	path: string
+): Promise<{ ok: boolean; deleted: string; removed_exoms: string[] }> {
+	return postAction('api/actions/delete', { path });
+}
+
 export function apiNewBareExom(path: string): Promise<{ ok: boolean; path: string }> {
 	return postAction('api/actions/exom-new', { path });
 }

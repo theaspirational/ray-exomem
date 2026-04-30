@@ -6,9 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { Toaster } from '$lib/components/ui/sonner/index.js';
-	import CommandPalette from '$lib/CommandPalette.svelte';
-	import { commandPaletteState } from '$lib/commandPaletteState.svelte';
-	import Drawer from '$lib/Drawer.svelte';
+	import Sidebar from '$lib/Sidebar.svelte';
 	import TopBar from '$lib/TopBar.svelte';
 	import StatusBar from '$lib/StatusBar.svelte';
 	import ConnectAgentSheet from '$lib/Welcome/ConnectAgentSheet.svelte';
@@ -34,17 +32,9 @@
 
 		const connectTimer = window.setTimeout(() => app.live.connect(), 75);
 		const uptimeInterval = window.setInterval(() => void app.refreshServerUptime(), 15_000);
-		const onKey = (e: KeyboardEvent) => {
-			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-				e.preventDefault();
-				commandPaletteState.show();
-			}
-		};
-		window.addEventListener('keydown', onKey);
 		cleanups = [
 			() => clearTimeout(connectTimer),
 			() => clearInterval(uptimeInterval),
-			() => window.removeEventListener('keydown', onKey),
 			() => app.live.disconnect()
 		];
 	}
@@ -112,7 +102,7 @@
 {:else if auth.isAuthenticated}
 	<div class="flex h-screen flex-col overflow-hidden bg-background font-sans text-foreground">
 		<div class="flex min-h-0 flex-1">
-			<Drawer />
+			<Sidebar />
 			<div class="flex min-h-0 min-w-0 flex-1 flex-col">
 				<TopBar />
 				<main class="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -122,8 +112,7 @@
 		</div>
 		<StatusBar />
 		<ConnectAgentSheet />
-		<CommandPalette bind:open={commandPaletteState.open} />
-			<Toaster richColors position="bottom-right" />
+		<Toaster richColors position="bottom-right" />
 	</div>
 {:else}
 	<div class="flex h-screen items-center justify-center bg-background text-muted-foreground">

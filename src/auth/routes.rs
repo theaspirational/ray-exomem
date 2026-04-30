@@ -1,9 +1,10 @@
 //! Auth route handlers: login, logout, me, api-keys, shares.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{ConnectInfo, Path as AxumPath, State},
     response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
@@ -25,6 +26,7 @@ pub fn auth_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/info", get(auth_info))
         .route("/login", post(login))
+        .route("/dev-login", get(dev_login))
         .route("/logout", post(logout))
         .route("/session", get(session))
         .route("/me", get(me))
@@ -702,6 +704,91 @@ async fn login(
         axum::http::StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
         Json(response),
+    ))
+}
+
+/// GET /auth/dev-login
+///
+/// Loopback-only OAuth bypass for local UI development. Mints a session for
+/// the email configured via `--dev-login-email` (or `RAY_EXOMEM_DEV_LOGIN_EMAIL`)
+/// at daemon startup. Returns 404 when the flag is unset, 403 when the request
+/// peer is not a loopback address. Mirrors `login()`'s session creation,
+/// bootstrap seeding, and top-admin promotion so a dev session is
+/// indistinguishable from a real Google login at the cookie layer.
+async fn dev_login(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<impl IntoResponse, ApiError> {
+    let email = state.dev_login_email.as_ref().ok_or_else(|| {
+        ApiError::new("not_found", "dev-login is not enabled").with_status(404)
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(
+            ApiError::new("forbidden", "dev-login is loopback-only").with_status(403),
+        );
+    }
+    let store = require_auth_store(&state)?;
+
+    let role = store.login_role(email).await.map_err(|e| {
+        ApiError::new(
+            "auth_state_unavailable",
+            format!("failed to resolve login role: {e}"),
+        )
+        .with_status(500)
+    })?;
+
+    if let Some(existing) = store.get_user_record(email).await {
+        if !existing.active {
+            return Err(
+                ApiError::new("user_deactivated", "this account has been deactivated")
+                    .with_status(403),
+            );
+        }
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+    let display_name = email.split('@').next().unwrap_or(email).to_string();
+    let provider = "dev-login".to_string();
+
+    let user = User {
+        email: email.clone(),
+        display_name: display_name.clone(),
+        provider: provider.clone(),
+        session_id: Some(session_id.clone()),
+        api_key_label: None,
+        role: role.clone(),
+    };
+
+    store.session_cache.insert(session_id.clone(), user);
+    store.record_user(email, &display_name, &provider).await;
+    store.record_session(&session_id, email, &expires_at).await;
+    bootstrap_public_tree(&state, email).await?;
+
+    if role == UserRole::TopAdmin {
+        store.set_top_admin(email).await;
+    }
+
+    let secure = state
+        .bind_addr
+        .as_deref()
+        .map(|b| !b.starts_with("127.0.0.1") && !b.starts_with("localhost"))
+        .unwrap_or(false);
+    let cookie = session_cookie(&session_id, 30, secure);
+
+    let redirect_to = if crate::server::BASE_PATH.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{}/", crate::server::BASE_PATH)
+    };
+
+    Ok((
+        axum::http::StatusCode::SEE_OTHER,
+        [
+            (axum::http::header::SET_COOKIE, cookie),
+            (axum::http::header::LOCATION, redirect_to),
+        ],
+        "",
     ))
 }
 
