@@ -83,7 +83,7 @@ Gotchas:
 - If `rayforce2` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
 - The Svelte 5 UI is embedded in the binary at build time.
 - `ray-exomem daemon` forks. Use `serve` if you want logs in the terminal.
-- The repo is mid-migration from the old flat-exom flow to the tree/session model. Prefer `ray-exomem inspect`, `init`, `exom-new`, `session ...`, and `GET /api/tree`. `/api/exoms` and `POST /api/actions/start-session` are removed, and the legacy `start-session` / `exoms` CLI helpers should not be treated as the primary path.
+- The tree/session model is the only supported flow. Use `ray-exomem inspect`, `init`, `exom-new`, `session ...`, and `GET /api/tree` for discovery and setup.
 - In authenticated UI mode, mutation actor attribution should fall back to the logged-in email. Do not require a separate `ray-exomem-actor` localStorage value for basic writes.
 - JSONL auth replay must preserve `user.active` / `last_login` on repeated `user` entries. A naive replay that resets them on login makes deactivation appear to succeed in the UI while leaving the account effectively active.
 - The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These require rayforce2 master ≥ `dda2b98` (PR #7 merged: head-const projection + auto-registered env-bound EDBs). If the sibling `../rayforce2` checkout is on a commit older than `dda2b98`, bootstrap rule registration fails with unstratifiable-negation / missing-relation errors.
@@ -101,7 +101,7 @@ ray-exomem session new work::team::project::repo --name landing-page --multi --a
 ray-exomem query --exom work::team::project::repo::main --json
 ```
 
-- Prefer tree paths (`work::team::project::repo::main`) over the old flat `main` mental model.
+- Use tree paths (`work::team::project::repo::main`) for exom selection.
 - Prefer `query --json` for reads.
 - Use `expand-query` when debugging query lowering or injected rules.
 - `assert <predicate> <value>` uses the structured assert path when `--source`, `--confidence`, `--valid-from`, or `--valid-to` is provided.
@@ -110,7 +110,7 @@ ray-exomem query --exom work::team::project::repo::main --json
 
 ## Key API surfaces
 
-- `GET /api/tree` — canonical tree/discovery path; use instead of `/api/exoms`
+- `GET /api/tree` — canonical tree/discovery path
 - `POST /api/actions/init` — scaffold `<path>/main` plus `<path>/sessions/`
 - `POST /api/actions/exom-new` — create a bare exom at a tree path
 - `POST /api/actions/session-new` — create a session exom under a project

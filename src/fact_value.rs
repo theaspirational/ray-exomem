@@ -6,14 +6,12 @@
 //!
 //! ## Serde encoding (JSON)
 //!
-//! `#[serde(untagged)]` picks the variant from the JSON shape:
+//! `#[serde(untagged)]` picks the variant strictly from the JSON shape:
 //!   * `20` (number) → `FactValue::I64`
 //!   * `{"$sym": "foo"}` (object) → `FactValue::Sym`
-//!   * `"abc"` (string) → `FactValue::Str` (fallback)
+//!   * `"abc"` (string) → `FactValue::Str`
 //!
-//! Variant ORDER is load-bearing — I64 first, Sym next, Str last. Legacy
-//! serialized data that wrote `"75"` (string) keeps loading as
-//! `FactValue::Str("75")` until a typed assert replaces it.
+//! Variant ORDER is load-bearing — I64 first, Sym next, Str last.
 //!
 //! ## Splay encoding
 //!
@@ -54,25 +52,8 @@ impl FactValue {
         FactValue::Sym(SymValue { sym: s.into() })
     }
 
-    /// Auto-detect from a raw CLI / text input:
-    ///   * parses as `i64` with a round-trip check → `I64`
-    ///   * otherwise `Str`
-    ///
-    /// The round-trip check rejects values where `n.to_string() != input`,
-    /// which preserves strings like `"007"` (leading zeros), `"+5"` (explicit
-    /// sign), and `"7.5"` (float). Callers that want strict `i64` parsing
-    /// should use `FactValue::I64(n)` directly.
-    pub fn auto(s: &str) -> Self {
-        if let Ok(n) = s.parse::<i64>() {
-            if n.to_string() == s {
-                return FactValue::I64(n);
-            }
-        }
-        FactValue::Str(s.to_string())
-    }
-
     /// Display form used in logs, tx summaries, Rayfall rule templates,
-    /// and any legacy context that previously held a `String` value.
+    /// and human-facing summaries.
     pub fn display(&self) -> String {
         match self {
             FactValue::I64(n) => n.to_string(),
@@ -191,44 +172,6 @@ impl PartialEq<String> for FactValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn auto_i64() {
-        assert_eq!(FactValue::auto("75"), FactValue::I64(75));
-        assert_eq!(FactValue::auto("0"), FactValue::I64(0));
-        assert_eq!(FactValue::auto("-17"), FactValue::I64(-17));
-    }
-
-    #[test]
-    fn auto_str_for_non_round_trip_numbers() {
-        // leading zeros — "007".parse::<i64>() = Ok(7) but "7" != "007"
-        assert_eq!(
-            FactValue::auto("007"),
-            FactValue::Str("007".to_string())
-        );
-        // explicit plus sign — "+5".parse::<i64>() = Ok(5) but "5" != "+5"
-        assert_eq!(
-            FactValue::auto("+5"),
-            FactValue::Str("+5".to_string())
-        );
-        // floats don't parse as i64 at all
-        assert_eq!(
-            FactValue::auto("7.5"),
-            FactValue::Str("7.5".to_string())
-        );
-    }
-
-    #[test]
-    fn auto_str_for_words() {
-        assert_eq!(
-            FactValue::auto("active"),
-            FactValue::Str("active".to_string())
-        );
-        assert_eq!(
-            FactValue::auto(""),
-            FactValue::Str(String::new())
-        );
-    }
 
     #[test]
     fn display_forms() {

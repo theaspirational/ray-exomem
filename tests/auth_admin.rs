@@ -329,7 +329,7 @@ fn top_admin_can_delete_user_and_namespace() {
     let bob_session = daemon.mock_login("bob@co.com", "Bob");
 
     let create = ureq::post(&format!(
-        "{}/ray-exomem/api/actions/exom-new",
+        "{}/api/actions/exom-new",
         daemon.base_url
     ))
     .set("Cookie", &format!("ray_exomem_session={bob_session}"))

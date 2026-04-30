@@ -79,7 +79,7 @@ impl TestDaemonBuilder {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut ready = false;
         while Instant::now() < deadline {
-            if let Ok(r) = ureq::get(&format!("{base_url}/ray-exomem/api/status")).call() {
+            if let Ok(r) = ureq::get(&format!("{base_url}/auth/info")).call() {
                 if r.status() == 200 {
                     ready = true;
                     break;

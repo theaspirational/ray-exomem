@@ -348,7 +348,6 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/tree", get(api_tree))
         .route("/welcome/summary", get(api_welcome_summary))
         .route("/guide", get(api_guide))
-        .route("/exoms", get(api_exoms_gone).post(api_exoms_gone))
         .route("/actions/init", post(api_init))
         .route("/actions/exom-new", post(api_exom_new))
         .route("/actions/session-new", post(api_session_new))
@@ -386,10 +385,6 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/retract-all", post(api_retract_all))
         .route("/actions/wipe", post(api_wipe))
         .route("/actions/factory-reset", post(api_factory_reset))
-        .route(
-            "/actions/consolidate-propose",
-            post(api_consolidate_propose),
-        )
         // Schema / graph / clusters / logs / provenance / relation-graph
         .route("/schema", get(api_schema))
         .route("/graph", get(api_graph))
@@ -401,10 +396,7 @@ fn api_router() -> Router<Arc<AppState>> {
         // Derived / beliefs
         .route("/derived/{pred}", get(api_derived_handler))
         .route("/beliefs/{id}/support", get(api_belief_support_handler))
-        // Exom manage (removed)
-        .route("/exoms/{name}/manage", post(api_exoms_gone))
-        // Old start-session compat → 410
-        .route("/actions/start-session", post(api_start_session_gone))
+        .fallback(api_not_found)
 }
 
 // ---------------------------------------------------------------------------
@@ -1407,9 +1399,9 @@ async fn api_guide() -> impl IntoResponse {
     )
 }
 
-async fn api_exoms_gone() -> impl IntoResponse {
-    ApiError::new("gone", "/api/exoms is removed; use /api/tree instead")
-        .with_status(410)
+async fn api_not_found(uri: Uri) -> impl IntoResponse {
+    ApiError::new("not_found", format!("unknown API route {}", uri.path()))
+        .with_status(404)
         .into_response()
 }
 
@@ -2696,22 +2688,6 @@ async fn api_eval_inner(
 
 async fn api_evaluate_noop() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true, "new_derivations": 0, "duration_ms": 0}))
-}
-
-// ---------------------------------------------------------------------------
-// POST /actions/consolidate-propose (501)
-// ---------------------------------------------------------------------------
-
-async fn api_consolidate_propose(
-    State(_state): State<Arc<AppState>>,
-    _maybe_user: MaybeUser,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(
-            serde_json::json!({"ok": false, "error": "consolidation propose API is not implemented yet"}),
-        ),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4681,19 +4657,6 @@ async fn api_belief_support_handler(
         "supported_by_resolved": {"facts": support_facts, "observations": support_obs},
         "supported_by_unresolved": unresolved,
     }))
-    .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// POST /actions/start-session → 410
-// ---------------------------------------------------------------------------
-
-async fn api_start_session_gone() -> impl IntoResponse {
-    ApiError::new(
-        "gone",
-        "POST /api/actions/start-session is removed; use POST /api/actions/session-new",
-    )
-    .with_status(410)
     .into_response()
 }
 

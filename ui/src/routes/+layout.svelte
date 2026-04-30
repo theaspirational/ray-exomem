@@ -32,7 +32,6 @@
 		if (appStarted) return;
 		appStarted = true;
 
-		void app.refreshExoms();
 		const connectTimer = window.setTimeout(() => app.live.connect(), 75);
 		const uptimeInterval = window.setInterval(() => void app.refreshServerUptime(), 15_000);
 		const onKey = (e: KeyboardEvent) => {
@@ -66,7 +65,6 @@
 		}
 
 		if (auth.isAuthenticated && !isLoginRoute) {
-			app.ensureAuthenticatedDefaultExom(auth.user?.email ?? null);
 			startApp();
 		}
 	});
@@ -75,7 +73,6 @@
 		if (auth.loading) return;
 		if (auth.isAuthenticated && !isLoginRoute) {
 			redirectingToLogin = false;
-			app.ensureAuthenticatedDefaultExom(auth.user?.email ?? null);
 			startApp();
 			return;
 		}

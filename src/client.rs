@@ -9,18 +9,37 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 /// Base URL for the daemon API.
-const DEFAULT_BASE: &str = "127.0.0.1:9780";
-const PREFIX: &str = "/ray-exomem";
+const DEFAULT_ADDR: &str = "127.0.0.1:9780";
+const DEFAULT_BASE_PATH: &str = env!("RAY_EXOMEM_BASE_PATH");
 
 pub struct Client {
     addr: String,
+    base_path: String,
+}
+
+fn parse_endpoint(endpoint: &str) -> (String, String) {
+    let without_scheme = endpoint
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (addr, path) = match without_scheme.split_once('/') {
+        Some((addr, rest)) => (addr, format!("/{}", rest.trim_matches('/'))),
+        None => (without_scheme, DEFAULT_BASE_PATH.to_string()),
+    };
+    let base_path = if path == "/" { String::new() } else { path };
+    (addr.to_string(), base_path)
 }
 
 impl Client {
-    pub fn new(addr: Option<&str>) -> Self {
+    pub fn new(endpoint: Option<&str>) -> Self {
+        let (addr, base_path) = parse_endpoint(endpoint.unwrap_or(DEFAULT_ADDR));
         Self {
-            addr: addr.unwrap_or(DEFAULT_BASE).to_string(),
+            addr,
+            base_path,
         }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_path, path)
     }
 
     /// DELETE request, returns the response body.
@@ -30,7 +49,7 @@ impl Client {
 
     /// DELETE with extra headers (e.g. X-Actor for branch archive).
     pub fn delete_with_headers(&self, path: &str, extra: &[(&str, &str)]) -> Result<String> {
-        let url = format!("{}{}", PREFIX, path);
+        let url = self.url(path);
         let mut header_block = String::new();
         for (k, v) in extra {
             header_block.push_str(&format!("{}: {}\r\n", k, v));
@@ -44,7 +63,7 @@ impl Client {
 
     /// GET request, returns the response body.
     pub fn get(&self, path: &str) -> Result<String> {
-        let url = format!("{}{}", PREFIX, path);
+        let url = self.url(path);
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             url, self.addr
@@ -64,7 +83,7 @@ impl Client {
         body: &str,
         extra: &[(&str, &str)],
     ) -> Result<String> {
-        let url = format!("{}{}", PREFIX, path);
+        let url = self.url(path);
         let mut header_block = String::new();
         for (k, v) in extra {
             header_block.push_str(&format!("{}: {}\r\n", k, v));
@@ -92,7 +111,7 @@ impl Client {
         body: &str,
         extra: &[(&str, &str)],
     ) -> Result<String> {
-        let url = format!("{}{}", PREFIX, path);
+        let url = self.url(path);
         let mut header_block = String::new();
         for (k, v) in extra {
             header_block.push_str(&format!("{}: {}\r\n", k, v));
@@ -146,7 +165,7 @@ impl Client {
 
     /// Long-lived GET for Server-Sent Events: skip HTTP headers, then copy the remainder to `out`.
     pub fn stream_sse(&self, path: &str, out: &mut impl Write) -> Result<()> {
-        let url = format!("{}{}", PREFIX, path);
+        let url = self.url(path);
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
             url, self.addr

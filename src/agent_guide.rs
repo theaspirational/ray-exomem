@@ -15,7 +15,7 @@ pub enum GuideTopic {
     Workflow,
     /// Every CLI subcommand with usage notes.
     Cli,
-    /// REST paths (all under `/ray-exomem` on the bind address).
+    /// REST paths (nested under the compiled BASE_PATH on the bind address).
     Http,
     /// Environment variables and defaults.
     Env,
@@ -45,7 +45,7 @@ const WORKFLOW: &str = r#"WORKFLOW (recommended)
 2. Use CLI subcommands that take --addr (default 127.0.0.1:9780) to talk to the same daemon:
      ray-exomem status
      ray-exomem eval '(+ 1 2)'
-     ray-exomem assert sky-color blue --exom <your-exom-path>
+     ray-exomem assert sky-color blue --as-str --exom <your-exom-path>
 
 3. Stop the daemon:
      ray-exomem stop
@@ -106,10 +106,8 @@ watch                 Stream GET {base}/events (SSE: `event: memory` JSON for mu
 lint-memory           Hygiene: duplicate (predicate,value) / distinct fact_ids, oversized values,
                       missing provenance, bad predicates, empty fact_id, time-related heuristics.
 
-doctor / start-session  Operational helpers (see --help). doctor compares CLI and daemon build
-                      identities. start-session creates the exom via POST /api/exoms if missing
-                      (--actor), then verifies both status and an empty Rayfall query before
-                      reporting exom_ready=true.
+doctor               Operational checks (see --help). Compares CLI and daemon build identities,
+                      then verifies status and query decode for the selected exom.
 
 coord claim|release|depend|agent-session
                       Coordination helpers over claim/*, task/*, and agent/* fact ids using
@@ -135,8 +133,6 @@ observe <text>        Emits a simple `(assert-fact …)` observation marker thro
 import <file|-)       Lossless backup; POST to /api/actions/import-json (requires X-Actor).
 
 export                GET /api/actions/export?exom=… — Rayfall text of facts.
-
-exoms                 List knowledge bases (GET /api/exoms).
 
 log                   Recent events (GET /api/logs?exom=…).
 
@@ -166,7 +162,7 @@ GET  /api/schema?include_samples=true&sample_limit=…
 GET  /api/graph
 GET  /api/clusters
 GET  /api/logs
-GET  /api/exoms
+GET  /api/tree
 GET  /api/branches
 POST /api/branches                 (JSON: branch_id, name)
 POST /api/branches/<id>/switch
@@ -182,10 +178,10 @@ POST /api/actions/import-json
 GET  /api/beliefs/<id>/support   (resolve supported_by to fact/observation snapshots)
 POST /api/actions/eval           (plain text: Rayfall; advanced / engine path)
 POST /api/actions/assert-fact    (structured bitemporal fact assert)
+POST /api/actions/init
+POST /api/actions/exom-new
+POST /api/actions/session-new
 POST /api/actions/evaluate
-POST /api/actions/consolidate-propose   (501 — not implemented)
-POST /api/exoms
-POST /api/exoms/<name>/manage
 GET  /events?exom=&branch=&actor=&predicate=&since= (SSE; `event: memory` + JSON body with
      id/op/exom/branch/actor; predicate set on fact upserts/eval asserts; heartbeats)
 
@@ -214,7 +210,7 @@ RAYFORCE2_DIR       If set, build.rs uses this path to find the rayforce2 native
 
 UI (browser) may use PUBLIC_TEIDE_EXOMEM_BASE_URL to point API calls at a different
 origin; when unset and the UI is served from the daemon, it uses the page origin
-with path /ray-exomem."#;
+plus the compiled BASE_PATH."#;
 
 const LIMITATIONS: &str = r#"LIMITATIONS (read before production use)
 ----------------------------------------

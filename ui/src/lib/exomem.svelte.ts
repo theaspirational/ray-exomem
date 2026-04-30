@@ -11,7 +11,6 @@ import type {
 	ExomemStatus,
 	EvalResponse,
 	FactEntry,
-	ExomEntry,
 	RuleEntry
 } from '$lib/types';
 
@@ -308,11 +307,6 @@ export async function fetchExomemLogs(exom = DEFAULT_EXOM): Promise<ExomemLogged
 	return payload.events;
 }
 
-export async function fetchExoms(): Promise<ExomEntry[]> {
-	const payload = await readJson<{ exoms: ExomEntry[] }>('api/exoms');
-	return payload.exoms;
-}
-
 // ---------------------------------------------------------------------------
 // Tree (nested exoms)
 // ---------------------------------------------------------------------------
@@ -546,45 +540,6 @@ export function runRayfall(
 	exom = DEFAULT_EXOM
 ): Promise<EvalResponse> {
 	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, source);
-}
-
-// ---------------------------------------------------------------------------
-// Exom management
-// ---------------------------------------------------------------------------
-
-export function createExom(
-	name: string,
-	description: string,
-	copyFrom?: string
-): Promise<{ ok: boolean; name: string }> {
-	return postAction('api/exoms', { name, description, copy_from: copyFrom });
-}
-
-export function manageExom(
-	name: string,
-	action: 'rename' | 'update_description' | 'archive' | 'unarchive' | 'delete',
-	extra?: { new_name?: string; description?: string; confirm?: boolean }
-): Promise<{ ok: boolean }> {
-	return postAction(`api/exoms/${encodeURIComponent(name)}/manage`, {
-		action,
-		...extra
-	});
-}
-
-export function mergeExoms(
-	sources: string[],
-	target: string,
-	description: string,
-	strategy: 'union' | 'prefer_left' | 'prefer_right' | 'flag_conflicts' = 'union',
-	confidenceMerge: 'max' | 'min' | 'avg' = 'max'
-): Promise<{ ok: boolean; name: string }> {
-	return postAction('api/exoms/merge', {
-		sources,
-		target,
-		description,
-		strategy,
-		confidence_merge: confidenceMerge
-	});
 }
 
 // ---------------------------------------------------------------------------

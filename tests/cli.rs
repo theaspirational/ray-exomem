@@ -50,7 +50,7 @@ fn exom_new_creates_bare_exom() {
 #[test]
 fn session_new_creates_session_exom() {
     let d = TestDaemon::start();
-    let url = format!("http://127.0.0.1:{}/ray-exomem", d.port);
+    let url = format!("http://127.0.0.1:{}", d.port);
     let out0 = run(&d, &["init", "work::ath"]);
     assert!(
         out0.status.success(),
@@ -97,7 +97,7 @@ fn session_new_creates_session_exom() {
 #[ignore = "FIXME(nested-exoms-task-4.4): add-agent / branch-create is a 501 stub"]
 fn session_add_agent_returns_501() {
     let d = TestDaemon::start();
-    let url = format!("http://127.0.0.1:{}/ray-exomem", d.port);
+    let url = format!("http://127.0.0.1:{}", d.port);
     let _out = Command::new(env!("CARGO_BIN_EXE_ray-exomem"))
         .args([
             "--data-dir",

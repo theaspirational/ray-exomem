@@ -96,14 +96,11 @@ multiple instances.
 Values are `I64 | Str | Sym`. The MCP `assert_fact` tool accepts:
 
 - a JSON number → stored as `I64` (enables `<` / `>` / `sum` in Datalog).
-- a JSON string → run through `FactValue::auto` (parses to `I64` if it
-  round-trips, else `Str`). So `"75"` lands as `I64(75)`, `"green"` as
-  `Str("green")`.
+- a JSON string → stored as `Str`. So `"75"` remains `Str("75")`.
 - `{"$sym": "active"}` → stored as a `Sym` (interned, identity-compared).
 
-Strings that should remain strings even though they look numeric (`"007"`,
-`"+5"`, `"7.5"`) auto-detect to `Str` because they don't round-trip. If you
-need numeric reasoning, send a JSON number.
+If you need numeric reasoning, send a JSON number. If you need symbol identity,
+send `{"$sym": "..."}`.
 
 ---
 

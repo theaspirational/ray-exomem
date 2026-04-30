@@ -287,12 +287,8 @@ struct Cli {
     /// Override the data directory (sets RAY_EXOMEM_HOME for this invocation).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    /// Base URL of the running daemon (default: http://127.0.0.1:9780/ray-exomem).
-    #[arg(
-        long,
-        global = true,
-        default_value = "http://127.0.0.1:9780/ray-exomem"
-    )]
+    /// Base URL of the running daemon, including the compiled base path.
+    #[arg(long, global = true, default_value_t = default_daemon_url())]
     daemon_url: String,
     #[command(subcommand)]
     command: Commands,
@@ -424,15 +420,14 @@ enum Commands {
 
     /// Assert a fact into an exom. Uses the direct assert endpoint when metadata flags are provided.
     #[command(after_long_help = "Examples:\n  \
-            ray-exomem assert sky-color blue --exom main\n  \
-            ray-exomem assert location paris --valid-from 2024-01-01T00:00:00Z --valid-to 2024-06-01T00:00:00Z\n\n\
+            ray-exomem assert sky-color blue --as-str --exom work::main\n  \
+            ray-exomem assert profile/age 30 --as-i64 --exom work::main\n  \
+            ray-exomem assert status active --as-sym --exom work::main\n\n\
             For rich Rayfall, use: ray-exomem eval --file script.ray")]
     Assert {
         /// Predicate name (e.g. "sky-color").
         predicate: String,
-        /// Value (e.g. "blue"). Defaults to auto-typing (numeric strings like
-        /// "75" become i64; otherwise string). Override with --as-str /
-        /// --as-sym / --as-i64.
+        /// Value text. Pick exactly one value type with --as-str, --as-sym, or --as-i64.
         value: String,
         /// Stable fact id for future updates/retractions. Defaults to the predicate name.
         #[arg(long)]
@@ -449,13 +444,13 @@ enum Commands {
         /// When this fact ceased being true (ISO 8601). Omit for open-ended.
         #[arg(long)]
         valid_to: Option<String>,
-        /// Force the value to be stored as a plain string (skip auto-typing).
+        /// Store the value as a plain string.
         #[arg(long, conflicts_with_all = ["as_sym", "as_i64"])]
         as_str: bool,
-        /// Force the value to be stored as a symbol.
+        /// Store the value as a symbol.
         #[arg(long, conflicts_with_all = ["as_str", "as_i64"])]
         as_sym: bool,
-        /// Force the value to be parsed as an i64 (fails if parse fails).
+        /// Parse and store the value as an i64.
         #[arg(long, conflicts_with_all = ["as_str", "as_sym"])]
         as_i64: bool,
         /// Target exom.
@@ -545,17 +540,6 @@ enum Commands {
         json: bool,
     },
 
-    /// Print JSON session contract for agents (exom, URL, branch, required headers).
-    StartSession {
-        #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
-        exom: String,
-        #[arg(long, default_value = "127.0.0.1:9780")]
-        addr: String,
-        /// Used as X-Actor when creating the exom if it does not exist yet.
-        #[arg(long, default_value = "cli")]
-        actor: String,
-    },
-
     /// Record an observation.
     Observe {
         /// Observation content.
@@ -609,13 +593,6 @@ enum Commands {
         /// Target exom.
         #[arg(long, default_value = ray_exomem::server::DEFAULT_EXOM)]
         exom: String,
-        /// Daemon address.
-        #[arg(long, default_value = "127.0.0.1:9780")]
-        addr: String,
-    },
-
-    /// List all exoms.
-    Exoms {
         /// Daemon address.
         #[arg(long, default_value = "127.0.0.1:9780")]
         addr: String,
@@ -761,6 +738,13 @@ fn default_data_dir() -> PathBuf {
     ray_exomem::storage::data_dir()
 }
 
+fn default_daemon_url() -> String {
+    format!(
+        "http://127.0.0.1:9780{}",
+        ray_exomem::server::BASE_PATH
+    )
+}
+
 fn pid_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("ray-exomem.pid")
 }
@@ -810,15 +794,6 @@ fn resolve_scope_branch(parent: &Option<String>, local: &Option<String>) -> Opti
 
 fn is_unknown_exom_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("unknown exom")
-}
-
-fn should_use_structured_assert(
-    confidence: Option<f64>,
-    source: &Option<String>,
-    valid_from: &Option<String>,
-    valid_to: &Option<String>,
-) -> bool {
-    confidence.is_some() || source.is_some() || valid_from.is_some() || valid_to.is_some()
 }
 
 fn branch_scope_values(
@@ -1400,23 +1375,14 @@ fn render_tree(
     out
 }
 
-/// Parse the daemon URL's host:port portion for use with the legacy Client.
-fn daemon_url_to_addr(url: &str) -> String {
-    let s = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    s.splitn(2, '/').next().unwrap_or(s).to_string()
-}
-
-/// POST JSON to a daemon URL path (resolves addr from the global daemon_url flag).
+/// POST JSON to the configured daemon URL.
 fn daemon_post_json(
     daemon_url: &str,
     path: &str,
     payload: &serde_json::Value,
     headers: &[(&str, &str)],
 ) -> anyhow::Result<String> {
-    let addr = daemon_url_to_addr(daemon_url);
-    let c = ray_exomem::client::Client::new(Some(&addr));
+    let c = ray_exomem::client::Client::new(Some(daemon_url));
     c.post_json_with_headers(path, &payload.to_string(), headers)
 }
 
@@ -1760,8 +1726,11 @@ fn main() {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
-            // Pick the FactValue variant from --as-* flags, otherwise
-            // auto-detect (numeric strings → i64, else string).
+            if !as_i64 && !as_sym && !as_str {
+                eprintln!("error: assert requires exactly one of --as-str, --as-sym, or --as-i64");
+                std::process::exit(1);
+            }
+
             let fv = if as_i64 {
                 match value.parse::<i64>() {
                     Ok(n) => ray_exomem::fact_value::FactValue::I64(n),
@@ -1772,55 +1741,28 @@ fn main() {
                 }
             } else if as_sym {
                 ray_exomem::fact_value::FactValue::sym(value.clone())
-            } else if as_str {
-                ray_exomem::fact_value::FactValue::Str(value.clone())
             } else {
-                ray_exomem::fact_value::FactValue::auto(&value)
+                ray_exomem::fact_value::FactValue::Str(value.clone())
             };
             let value_json = serde_json::to_value(&fv).unwrap_or_else(|_| {
                 serde_json::Value::String(fv.display())
             });
-            // Force the structured /api/actions/assert-fact path whenever the
-            // fact value is anything other than a plain string — only that
-            // endpoint preserves the typed FactValue variant end-to-end. The
-            // legacy raw (assert-fact ...) Rayfall form always serializes the
-            // value as a string literal, which silently drops typing.
-            let typed_value = !matches!(fv, ray_exomem::fact_value::FactValue::Str(_));
-            let uses_structured_assert = typed_value
-                || should_use_structured_assert(confidence, &source, &valid_from, &valid_to);
-            if uses_structured_assert {
-                match assert_fact_json(
-                    &c,
-                    &exom,
-                    &h,
-                    &fact_id,
-                    &predicate,
-                    value_json,
-                    confidence_value,
-                    &provenance,
-                    valid_from.as_deref(),
-                    valid_to.as_deref(),
-                ) {
-                    Ok(body) => println!("{}", body),
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                let ray = format!(
-                    "(assert-fact {} \"{}\" '{} \"{}\")",
-                    exom,
-                    fact_id.replace('"', "\\\""),
-                    predicate.replace('"', "\\\""),
-                    fv.display().replace('"', "\\\""),
-                );
-                match c.post_text_with_headers("/api/actions/eval", &ray, &h) {
-                    Ok(body) => println!("{}", body),
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
+            match assert_fact_json(
+                &c,
+                &exom,
+                &h,
+                &fact_id,
+                &predicate,
+                value_json,
+                confidence_value,
+                &provenance,
+                valid_from.as_deref(),
+                valid_to.as_deref(),
+            ) {
+                Ok(body) => println!("{}", body),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
                 }
             }
         }
@@ -2119,92 +2061,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::StartSession { exom, addr, actor } => {
-            let c = ray_exomem::client::Client::new(Some(&addr));
-            let create_headers = vec![("X-Actor", actor.as_str())];
-            let status_path = format!("/api/status?exom={}", exom);
-            let smoke_query = format!(
-                "(query {} (find ?fact ?pred ?value) (where (?fact 'fact/predicate ?pred) (?fact 'fact/value ?value)))",
-                exom
-            );
-            let exom_exists = match c.get("/api/exoms") {
-                Ok(list_body) => serde_json::from_str::<serde_json::Value>(&list_body)
-                    .ok()
-                    .and_then(|v| {
-                        v["exoms"].as_array().map(|arr| {
-                            arr.iter()
-                                .any(|e| e["name"].as_str() == Some(exom.as_str()))
-                        })
-                    })
-                    .unwrap_or(false),
-                Err(e) => {
-                    eprintln!("error: daemon not reachable: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            if !exom_exists {
-                let create = serde_json::json!({ "name": exom, "description": "" });
-                if let Err(e) =
-                    c.post_json_with_headers("/api/exoms", &create.to_string(), &create_headers)
-                {
-                    eprintln!("error: could not create exom: {}", e);
-                    std::process::exit(1);
-                }
-            }
-            let mut status_body = None;
-            let query_headers = vec![("X-Actor", actor.as_str())];
-            let mut last_err = None;
-            for _ in 0..8 {
-                match c.get(&status_path) {
-                    Ok(s) => match c.post_text_with_headers(
-                        "/api/actions/eval",
-                        &smoke_query,
-                        &query_headers,
-                    ) {
-                        Ok(_) => {
-                            status_body = Some(s);
-                            break;
-                        }
-                        Err(e) => last_err = Some(format!("query smoke failed: {}", e)),
-                    },
-                    Err(e) => last_err = Some(format!("status failed: {}", e)),
-                }
-                std::thread::sleep(std::time::Duration::from_millis(125));
-            }
-            let status_body = match status_body {
-                Some(s) => s,
-                None => {
-                    eprintln!(
-                        "error: exom '{}' was not ready after bootstrap: {}",
-                        exom,
-                        last_err.unwrap_or_else(|| "unknown error".to_string())
-                    );
-                    std::process::exit(1);
-                }
-            };
-            let v: serde_json::Value = match serde_json::from_str(&status_body) {
-                Ok(v) => v,
-                Err(_) => {
-                    eprintln!("error: status is not valid JSON");
-                    std::process::exit(1);
-                }
-            };
-            let branch = v["current_branch"].as_str().unwrap_or("main");
-            let hostport = addr
-                .trim_start_matches("http://")
-                .trim_start_matches("https://");
-            let base_url = format!("http://{}/ray-exomem", hostport);
-            let contract = serde_json::json!({
-                "exom": exom,
-                "base_url": base_url,
-                "current_branch": branch,
-                "required_headers": ["X-Actor", "X-Session", "X-Model"],
-                "query_mode": "rayfall",
-                "exom_ready": true,
-                "schema": v.get("schema").cloned().unwrap_or(serde_json::Value::Null)
-            });
-            print_json_value(&contract, global_json || !std::io::stdout().is_terminal());
-        }
         Commands::Observe {
             content,
             source_type: _,
@@ -2272,32 +2128,6 @@ fn main() {
                 &h,
             ) {
                 Ok(body) => println!("{}", body),
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Commands::Exoms { addr } => {
-            let c = ray_exomem::client::Client::new(Some(&addr));
-            match c.get("/api/exoms") {
-                Ok(body) => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(exoms) = v["exoms"].as_array() {
-                            for e in exoms {
-                                let name = e["name"].as_str().unwrap_or("?");
-                                let desc = e["description"].as_str().unwrap_or("");
-                                if desc.is_empty() {
-                                    println!("{}", name);
-                                } else {
-                                    println!("{}  — {}", name, desc);
-                                }
-                            }
-                        }
-                    } else {
-                        println!("{}", body);
-                    }
-                }
                 Err(e) => {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
@@ -3720,24 +3550,6 @@ mod tests {
             },
             _ => panic!("expected coord command"),
         }
-    }
-
-    #[test]
-    fn assert_uses_structured_endpoint_for_metadata_flags() {
-        assert!(should_use_structured_assert(Some(0.7), &None, &None, &None));
-        assert!(should_use_structured_assert(
-            None,
-            &Some("manual".into()),
-            &None,
-            &None
-        ));
-        assert!(should_use_structured_assert(
-            None,
-            &None,
-            &Some("2026-04-11T00:00:00Z".into()),
-            &None
-        ));
-        assert!(!should_use_structured_assert(None, &None, &None, &None));
     }
 
     #[test]

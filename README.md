@@ -179,12 +179,9 @@ Stop the daemon:
 ray-exomem stop
 ```
 
-Important CLI caveat: several older daemon-backed CLI commands still prepend
-`/ray-exomem` internally. If the binary was built at the default root mount,
-direct HTTP calls hit `/api/...`, but those older CLI commands may still expect
-the server to be mounted at `/ray-exomem`. Until the CLI prefix is cleaned up,
-either build with `RAY_EXOMEM_BASE_PATH=/ray-exomem` for full CLI compatibility
-or use direct HTTP/UI against the compiled base path.
+The CLI and direct HTTP calls use the same compiled base path. By default that
+is root (`/`); set `RAY_EXOMEM_BASE_PATH` before building if the daemon is
+mounted under a subpath.
 
 ## CLI Surface
 
@@ -228,8 +225,7 @@ curl -s -X POST http://127.0.0.1:9780/api/actions/assert-fact \
 ```
 
 Fact values are typed at the API/brain layer. JSON numbers become `I64`,
-JSON strings auto-detect (numeric round-trip → `I64`, else `Str`), and
-`{"$sym": "..."}` lands as `Sym`. Typed facts populate `facts_i64`,
+JSON strings stay `Str`, and `{"$sym": "..."}` lands as `Sym`. Typed facts populate `facts_i64`,
 `facts_str`, and `facts_sym` EDBs for native Datalog rules.
 
 ## HTTP, UI, SSE, and MCP
@@ -294,12 +290,6 @@ Canonical API routes:
 - `POST /api/actions/factory-reset`
 - `GET /api/derived/{pred}`
 - `GET /api/beliefs/{id}/support`
-
-Removed legacy routes:
-
-- `GET|POST /api/exoms` returns `410 gone`; use `GET /api/tree`.
-- `POST /api/actions/start-session` returns `410 gone`; use
-`POST /api/actions/session-new`.
 
 The embedded UI is served by the same daemon and includes tree, exom, query,
 graph, guide, login, profile, and admin surfaces. Server-Sent Events stream from

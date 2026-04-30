@@ -1,12 +1,3 @@
-export interface ExomEntry {
-	name: string;
-	description: string;
-	created_at: number;
-	updated_at: number;
-	archived: boolean;
-	archived_at?: number | null;
-}
-
 export interface ExomemStatus {
 	ok: boolean;
 	exom: string;

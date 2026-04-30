@@ -34,7 +34,7 @@ fn create_exom(
 ) -> Result<ureq::Response, ureq::Error> {
     auth_post_raw(
         base_url,
-        "/ray-exomem/api/actions/exom-new",
+        "/api/actions/exom-new",
         session,
         json!({ "path": exom_path }),
     )
@@ -51,7 +51,7 @@ fn assert_fact(
 ) -> Result<ureq::Response, ureq::Error> {
     auth_post_raw(
         base_url,
-        "/ray-exomem/api/actions/assert-fact",
+        "/api/actions/assert-fact",
         session,
         json!({
             "exom": exom_path,
@@ -70,7 +70,7 @@ fn query_exom(
     predicate: &str,
 ) -> Result<ureq::Response, ureq::Error> {
     let query_str = format!("(query {exom_path} ({predicate} ?x))");
-    ureq::post(&format!("{base_url}/ray-exomem/api/query"))
+    ureq::post(&format!("{base_url}/api/query"))
         .set("Cookie", &format!("ray_exomem_session={session}"))
         .set("Content-Type", "text/plain")
         .send_string(&query_str)
@@ -122,7 +122,7 @@ fn owner_can_create_and_query_exom() {
     // Verify the exom shows up in tree with the asserted fact.
     let resp = auth_get_raw(
         &daemon.base_url,
-        "/ray-exomem/api/tree?path=alice@co.com/proj",
+        "/api/tree?path=alice@co.com/proj",
         &alice,
     );
     let status = status_of(&resp);

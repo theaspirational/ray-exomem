@@ -4,7 +4,7 @@ use common::daemon::TestDaemon;
 #[test]
 fn guide_endpoint_returns_markdown() {
     let d = TestDaemon::start();
-    let body = ureq::get(&format!("{}/ray-exomem/api/guide", d.base_url))
+    let body = ureq::get(&format!("{}/api/guide", d.base_url))
         .call()
         .unwrap()
         .into_string()

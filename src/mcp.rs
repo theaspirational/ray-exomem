@@ -263,7 +263,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name (slash or :: form)." },
                     "predicate": { "type": "string", "description": "Fact predicate, e.g. `entity/name`." },
-                    "value": { "description": "Typed value. JSON number → I64, JSON string → auto-detected (numeric round-trip → I64, else Str), `{\"$sym\": \"...\"}` → Sym." },
+                    "value": { "description": "Typed value. JSON number → I64, JSON string → Str, `{\"$sym\": \"...\"}` → Sym." },
                     "fact_id": { "type": "string", "description": "Stable fact id; defaults to the predicate. Use `<entity>#<property>` for multi-instance entities." },
                     "confidence": { "type": "number", "description": "0.0..1.0; defaults to 1.0." },
                     "source": { "type": "string", "description": "Provenance tag (where this fact came from). Defaults to 'mcp'." },
@@ -884,10 +884,6 @@ async fn tool_assert_fact(
         code: -32602,
         message: e.to_string(),
     })?;
-    // MCP accepts typed JSON values (20 / "text" / {"$sym": "foo"}) plus bare
-    // strings for legacy clients. Bare strings run through `FactValue::auto`
-    // so numeric input like "75" is stored as I64, enabling datalog cmp rules
-    // over the fact.
     let value_raw = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
     let value = match &value_raw {
         serde_json::Value::Null => {
@@ -896,7 +892,6 @@ async fn tool_assert_fact(
                 message: "missing required argument 'value'".into(),
             });
         }
-        serde_json::Value::String(s) => crate::fact_value::FactValue::auto(s),
         other => serde_json::from_value::<crate::fact_value::FactValue>(other.clone())
             .map_err(|e| JsonRpcError {
                 code: -32602,

@@ -28,7 +28,7 @@ fn export_json(base_url: &str, session: &str, exom: &str) -> serde_json::Value {
     auth_get_raw(
         base_url,
         &format!(
-            "/ray-exomem/api/actions/export-json?exom={}",
+            "/api/actions/export-json?exom={}",
             encode_query_value(exom)
         ),
         session,
@@ -45,7 +45,7 @@ fn schema_relation_values(
     relation: &str,
 ) -> Vec<String> {
     let resp = ureq::get(&format!(
-        "{base_url}/ray-exomem/api/schema?include_samples=true&sample_limit=20&exom={}&relation={}",
+        "{base_url}/api/schema?include_samples=true&sample_limit=20&exom={}&relation={}",
         encode_query_value(exom),
         encode_query_value(relation),
     ))
@@ -74,7 +74,7 @@ fn schema_relation_values(
 }
 
 fn expand_query(base_url: &str, session: &str, query: &str) -> serde_json::Value {
-    ureq::post(&format!("{base_url}/ray-exomem/api/expand-query"))
+    ureq::post(&format!("{base_url}/api/expand-query"))
         .set("Cookie", &format!("ray_exomem_session={session}"))
         .set("Content-Type", "text/plain")
         .send_string(query)
@@ -93,7 +93,7 @@ fn assert_fact_with_id(
 ) {
     let resp = auth_post_raw(
         base_url,
-        "/ray-exomem/api/actions/assert-fact",
+        "/api/actions/assert-fact",
         session,
         json!({
             "exom": exom,
@@ -117,7 +117,7 @@ fn assert_fact_with_id_i64(
 ) {
     let resp = auth_post_raw(
         base_url,
-        "/ray-exomem/api/actions/assert-fact",
+        "/api/actions/assert-fact",
         session,
         json!({
             "exom": exom,
@@ -134,7 +134,7 @@ fn schema_with_samples(base_url: &str, session: &str, exom: &str) -> serde_json:
     auth_get_raw(
         base_url,
         &format!(
-            "/ray-exomem/api/schema?include_samples=true&sample_limit=20&exom={}",
+            "/api/schema?include_samples=true&sample_limit=20&exom={}",
             encode_query_value(exom)
         ),
         session,
@@ -354,7 +354,7 @@ fn login_bootstraps_user_namespace_and_owned_status() {
 
     let owned_status = auth_get_raw(
         &daemon.base_url,
-        "/ray-exomem/api/status?exom=alice%40co.com%2Fmain",
+        "/api/status?exom=alice%40co.com%2Fmain",
         &alice_session,
     )
     .expect("owner should access status for their brain dashboard");
@@ -364,7 +364,7 @@ fn login_bootstraps_user_namespace_and_owned_status() {
 
     match auth_get_raw(
         &daemon.base_url,
-        "/ray-exomem/api/status?exom=main",
+        "/api/status?exom=main",
         &alice_session,
     ) {
         Err(ureq::Error::Status(403, _)) => {}
@@ -523,7 +523,7 @@ fn brain_schema_and_graph_samples_include_native_seed_layers() {
 
     let graph_resp = auth_get_raw(
         &daemon.base_url,
-        "/ray-exomem/api/relation-graph?exom=alice%40co.com%2Fmain",
+        "/api/relation-graph?exom=alice%40co.com%2Fmain",
         &alice_session,
     )
     .expect("relation graph should succeed");
