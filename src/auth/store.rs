@@ -93,7 +93,10 @@ impl AuthStore {
 
         let first_boot = !meta_file.exists();
         if first_boot {
-            let meta = ExomMeta::new_bare();
+            // System-owned: empty `created_by` means no end-user owns this
+            // exom; only top-admin recovery can write to it. The
+            // `_system/auth` exom holds auth state itself, not user data.
+            let meta = ExomMeta::new_bare("");
             exom::write_meta(&exom_disk, &meta)?;
         }
 

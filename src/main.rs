@@ -404,13 +404,18 @@ enum Commands {
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
 
-        /// Dev-only: bypass OAuth and auto-login as this email when the user
-        /// hits `GET /auth/dev-login`. Loopback-only at the route layer; the
-        /// daemon refuses to start unless `--bind` is on a loopback address
-        /// and `--auth-provider` is set. Use solely for local UI dev where
-        /// Google's GSI flow is blocked (e.g. automated browsers).
-        #[arg(long, env = "RAY_EXOMEM_DEV_LOGIN_EMAIL")]
-        dev_login_email: Option<String>,
+        /// Dev-only: bypass OAuth and mint a session for one of these emails
+        /// when the user hits `GET /auth/dev-login[?email=<addr>]`. Pass the
+        /// flag multiple times (`--dev-login-email a@x --dev-login-email b@y`)
+        /// or comma-separate via the `RAY_EXOMEM_DEV_LOGIN_EMAIL` env var to
+        /// allow multiple identities — useful for testing share/permission
+        /// flows from two browser contexts. Loopback-only at the route
+        /// layer; the daemon refuses to start unless `--bind` is on a
+        /// loopback address and `--auth-provider` is set. Use solely for
+        /// local UI dev where Google's GSI flow is blocked (e.g. automated
+        /// browsers).
+        #[arg(long = "dev-login-email", env = "RAY_EXOMEM_DEV_LOGIN_EMAIL", value_delimiter = ',')]
+        dev_login_emails: Vec<String>,
     },
 
     /// Stop a running daemon.
@@ -1475,9 +1480,9 @@ fn main() {
             google_client_id,
             allowed_domains,
             database_url,
-            dev_login_email,
+            dev_login_emails,
         } => {
-            if let Some(ref email) = dev_login_email {
+            if !dev_login_emails.is_empty() {
                 if auth_provider.is_none() {
                     eprintln!(
                         "error: --dev-login-email requires --auth-provider (the dev-login route mints a real session and needs the auth store)"
@@ -1492,7 +1497,9 @@ fn main() {
                     std::process::exit(1);
                 }
                 eprintln!(
-                    "[ray-exomem] WARNING: dev-login enabled for {email}. Anyone who can reach this daemon's loopback /auth/dev-login will be logged in as that user. Use only for local dev."
+                    "[ray-exomem] WARNING: dev-login enabled for {} email(s): {}. Anyone who can reach this daemon's loopback /auth/dev-login will be logged in as one of these users. Use only for local dev.",
+                    dev_login_emails.len(),
+                    dev_login_emails.join(", ")
                 );
             }
             let resolved_data_dir = if no_persist {
@@ -1612,7 +1619,7 @@ fn main() {
                 s.auth_store = Some(store);
                 s.auth_provider = Some(provider);
                 s.bind_addr = Some(bind.to_string());
-                s.dev_login_email = dev_login_email.clone();
+                s.dev_login_emails = dev_login_emails.clone();
             }
 
             eprintln!(
@@ -3171,7 +3178,16 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match ray_exomem::scaffold::init_project(&ray_exomem::storage::tree_root(), &tp) {
+            // CLI scaffold has no logged-in user; honour `RAY_EXOMEM_ACTOR`
+            // so a single-user dev setup can stamp ownership upfront.
+            // Empty actor is fine — startup migration backfills from `main`'s
+            // TOFU claimer once someone writes a fact.
+            let cli_actor = std::env::var("RAY_EXOMEM_ACTOR").unwrap_or_default();
+            match ray_exomem::scaffold::init_project(
+                &ray_exomem::storage::tree_root(),
+                &tp,
+                &cli_actor,
+            ) {
                 Ok(()) => println!("scaffolded {}", tp),
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -3188,7 +3204,12 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match ray_exomem::scaffold::new_bare_exom(&ray_exomem::storage::tree_root(), &tp) {
+            let cli_actor = std::env::var("RAY_EXOMEM_ACTOR").unwrap_or_default();
+            match ray_exomem::scaffold::new_bare_exom(
+                &ray_exomem::storage::tree_root(),
+                &tp,
+                &cli_actor,
+            ) {
                 Ok(()) => println!("created bare exom {}", tp),
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -3451,7 +3472,7 @@ mod tests {
                 google_client_id,
                 allowed_domains,
                 database_url,
-                dev_login_email,
+                dev_login_emails,
             } => {
                 assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
@@ -3461,7 +3482,7 @@ mod tests {
                 assert!(google_client_id.is_none());
                 assert!(allowed_domains.is_none());
                 assert!(database_url.is_none());
-                assert!(dev_login_email.is_none());
+                assert!(dev_login_emails.is_empty());
             }
             _ => panic!("expected serve command"),
         }

@@ -23,31 +23,62 @@ fn access_level_label(level: AccessLevel) -> &'static str {
     }
 }
 
+/// Three-state result of looking up the owner of a `public/*` path.
+/// The variant determines the Model A access decision; see `resolve_access`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PublicOwner {
+    /// No exom is loaded at this path. For `public/*` this is "creatable
+    /// by any authenticated user" — the writer becomes the owner.
+    /// For `public` itself (the root folder) and unloaded subtrees this
+    /// also applies; tree walks already filter unreachable paths.
+    Unknown,
+    /// The exom exists but `created_by` is empty — pre-Model-A legacy
+    /// where startup migration could not infer an owner from the `main`
+    /// branch's TOFU claim. ReadOnly for everyone; only a future
+    /// top-admin recovery route can adopt it.
+    Ownerless,
+    /// Exom exists with a stamped creator.
+    Owner(String),
+}
+
 /// Resolve the effective access level for `user` at `path`.
 ///
 /// The role enum (`Regular`/`Admin`/`TopAdmin`) gates *operator* routes
 /// under `/auth/admin`; it confers no implicit access to user data.
 ///
+/// `public_owner` is the lookup result for the path (Model A): only
+/// meaningful when the path is in the `public/*` namespace. Pass
+/// `PublicOwner::Unknown` outside `public/*` (it's ignored there).
+///
 /// Evaluation order:
-/// 1. Path is in the `public/` namespace -> FullAccess (shared workspace)
+/// 1. Path is in the `public/` namespace ->
+///    - Owner matches user -> FullAccess
+///    - Owner is someone else -> ReadOnly (read + fork)
+///    - Ownerless legacy -> ReadOnly (top-admin recovery only)
+///    - Unknown (path doesn't exist) -> FullAccess (creating a new
+///      exom is the writer's right; they'll be stamped as creator)
 /// 2. Path starts with user's email -> FullAccess (owner)
 /// 3. Share grants for (path, user.email) -> best match
 /// 4. Denied
-pub async fn resolve_access(user: &User, path: &str, store: &AuthStore) -> AccessLevel {
-    // Public namespace — readable + writable by any authenticated user.
-    // Membership in an allowed domain is enforced at login; if the user
-    // holds a session, they're already cleared for collaborative writes
-    // here.
+pub async fn resolve_access(
+    user: &User,
+    path: &str,
+    store: &AuthStore,
+    public_owner: PublicOwner,
+) -> AccessLevel {
     if path == "public" || path.starts_with("public/") {
-        return AccessLevel::FullAccess;
+        return match public_owner {
+            PublicOwner::Owner(ref owner) if owner == &user.email => AccessLevel::FullAccess,
+            PublicOwner::Owner(_) => AccessLevel::ReadOnly,
+            PublicOwner::Ownerless => AccessLevel::ReadOnly,
+            PublicOwner::Unknown => AccessLevel::FullAccess,
+        };
     }
 
-    // Owner namespace
     if path == user.email || path.starts_with(&format!("{}/", user.email)) {
         return AccessLevel::FullAccess;
     }
 
-    // Share grants
     let grants = store.shares_for_grantee(&user.email).await;
     resolve_from_grants(path, &grants)
 }
@@ -91,11 +122,21 @@ pub fn resolve_from_grants(path: &str, grants: &[ShareGrant]) -> AccessLevel {
 /// Extracts the exom path and operation kind from each canonical form,
 /// calls `resolve_access`, and rejects the entire batch if any path is
 /// denied or insufficiently privileged.
-pub async fn authorize_rayfall(
+///
+/// `owner_for` resolves the `created_by` of the target exom — the caller
+/// (typically server::api_*) looks this up from in-memory `ExomState` so
+/// this auth module stays free of any state-cache dependency. Return
+/// `None` for folders or unknown paths; resolve_access treats `None` as
+/// "no public owner" (which forces `public/*` paths to ReadOnly).
+pub async fn authorize_rayfall<F>(
     user: &User,
     forms: &[CanonicalForm],
     store: &AuthStore,
-) -> Result<(), AuthzError> {
+    owner_for: F,
+) -> Result<(), AuthzError>
+where
+    F: Fn(&str) -> PublicOwner,
+{
     for form in forms {
         let (path, is_write) = match form {
             CanonicalForm::Query(q) => (q.exom.as_str(), false),
@@ -113,7 +154,8 @@ pub async fn authorize_rayfall(
             });
         }
 
-        let level = resolve_access(user, path, store).await;
+        let owner = owner_for(path);
+        let level = resolve_access(user, path, store, owner).await;
 
         if is_write && !level.can_write() {
             return Err(AuthzError::Denied {
@@ -219,7 +261,7 @@ mod tests {
         let admin = user("admin@co.com", UserRole::Admin);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&admin, "alice@co.com/proj", &store).await,
+            resolve_access(&admin, "alice@co.com/proj", &store, PublicOwner::Unknown).await,
             AccessLevel::Denied
         );
     }
@@ -229,7 +271,7 @@ mod tests {
         let top = user("top@co.com", UserRole::TopAdmin);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&top, "alice@co.com/proj", &store).await,
+            resolve_access(&top, "alice@co.com/proj", &store, PublicOwner::Unknown).await,
             AccessLevel::Denied
         );
     }
@@ -239,7 +281,7 @@ mod tests {
         let admin = user("admin@co.com", UserRole::Admin);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&admin, "admin@co.com/proj", &store).await,
+            resolve_access(&admin, "admin@co.com/proj", &store, PublicOwner::Unknown).await,
             AccessLevel::FullAccess
         );
     }
@@ -249,11 +291,11 @@ mod tests {
         let alice = user("alice@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&alice, "alice@co.com", &store).await,
+            resolve_access(&alice, "alice@co.com", &store, PublicOwner::Unknown).await,
             AccessLevel::FullAccess
         );
         assert_eq!(
-            resolve_access(&alice, "alice@co.com/proj", &store).await,
+            resolve_access(&alice, "alice@co.com/proj", &store, PublicOwner::Unknown).await,
             AccessLevel::FullAccess
         );
     }
@@ -263,21 +305,75 @@ mod tests {
         let bob = user("bob@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&bob, "alice@co.com/proj", &store).await,
+            resolve_access(&bob, "alice@co.com/proj", &store, PublicOwner::Unknown).await,
             AccessLevel::Denied
         );
     }
 
     #[tokio::test]
-    async fn public_namespace_full_access_for_regular_user() {
+    async fn public_namespace_creator_gets_full_access() {
+        // Model A: only the creator (matched against public_owner) writes a
+        // public exom. Everyone else reads + forks.
+        let alice = user("alice@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(
+                &alice,
+                "public/work/proj/main",
+                &store,
+                PublicOwner::Owner("alice@co.com".into()),
+            )
+            .await,
+            AccessLevel::FullAccess
+        );
+    }
+
+    #[tokio::test]
+    async fn public_namespace_non_creator_is_read_only() {
         let bob = user("bob@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&bob, "public", &store).await,
+            resolve_access(
+                &bob,
+                "public/work/proj/main",
+                &store,
+                PublicOwner::Owner("alice@co.com".into()),
+            )
+            .await,
+            AccessLevel::ReadOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn public_namespace_ownerless_legacy_is_read_only() {
+        // Migration-failed legacy: exom exists but `created_by` is empty.
+        // Ownership is locked until top-admin recovery; nobody auto-claims.
+        let bob = user("bob@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(&bob, "public/legacy/exom", &store, PublicOwner::Ownerless).await,
+            AccessLevel::ReadOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn public_namespace_unknown_path_allows_create() {
+        // Path not loaded (folder root or fresh sub-path). Any
+        // authenticated user can create here; they become the owner.
+        let bob = user("bob@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(&bob, "public", &store, PublicOwner::Unknown).await,
             AccessLevel::FullAccess
         );
         assert_eq!(
-            resolve_access(&bob, "public/work/team/project/concepts/main", &store).await,
+            resolve_access(
+                &bob,
+                "public/work/team/project/concepts/main",
+                &store,
+                PublicOwner::Unknown,
+            )
+            .await,
             AccessLevel::FullAccess
         );
     }
@@ -288,7 +384,7 @@ mod tests {
         let bob = user("bob@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
-            resolve_access(&bob, "publication/foo", &store).await,
+            resolve_access(&bob, "publication/foo", &store, PublicOwner::Unknown).await,
             AccessLevel::Denied
         );
     }

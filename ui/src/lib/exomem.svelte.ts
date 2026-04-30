@@ -161,6 +161,22 @@ function mutationHeaders(): Record<string, string> {
 	};
 }
 
+/**
+ * Error thrown by `postAction` when the server returns a non-2xx response.
+ * Surfaces the structured `code` and `message` from `ApiError` JSON bodies so
+ * callers can branch on `e.code === 'fork_session_unsupported'` etc.
+ */
+export class ApiActionError extends Error {
+	code: string | null;
+	status: number;
+	constructor(message: string, code: string | null, status: number) {
+		super(message);
+		this.name = 'ApiActionError';
+		this.code = code;
+		this.status = status;
+	}
+}
+
 async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	let res: Response;
 	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
@@ -181,7 +197,15 @@ async function postAction<T>(path: string, body?: unknown): Promise<T> {
 	}
 	await handle401(res);
 	if (!res.ok) {
-		throw new Error(`Action failed: ${res.status} ${res.statusText}`);
+		const parsed = await res
+			.json()
+			.catch(() => null as { code?: string; message?: string } | null);
+		const code = parsed && typeof parsed.code === 'string' ? parsed.code : null;
+		const message =
+			parsed && typeof parsed.message === 'string'
+				? parsed.message
+				: `Action failed: ${res.status} ${res.statusText}`;
+		throw new ApiActionError(message, code, res.status);
 	}
 	return res.json();
 }
@@ -325,6 +349,10 @@ export type TreeNode =
 			archived: boolean;
 			closed: boolean;
 			session: any | null;
+			/** Email of the exom's creator. Empty string means ownerless legacy (locked, top-admin recovery only). */
+			created_by: string;
+			/** Set when the exom was created via fork; absent on natively-created exoms. */
+			forked_from?: { source_path: string; source_tx_id: number; forked_at: string } | null;
 	  };
 
 export type TreeExom = Extract<TreeNode, { kind: 'exom' }>;
@@ -434,6 +462,26 @@ export function apiDeletePath(
 
 export function apiNewBareExom(path: string): Promise<{ ok: boolean; path: string }> {
 	return postAction('api/actions/exom-new', { path });
+}
+
+/**
+ * Forks an exom into the caller's namespace. Default target is `{user.email}/{basename}`,
+ * auto-suffixed with `-2`, `-3`, ... if taken. Server refuses session exoms with
+ * `fork_session_unsupported`.
+ */
+export function forkExom(
+	source: string,
+	target?: string
+): Promise<{
+	ok: boolean;
+	source: string;
+	target: string;
+	copied_facts: number;
+	forked_from: { source_path: string; source_tx_id: number; forked_at: string };
+}> {
+	const body: Record<string, string> = { source };
+	if (target) body.target = target;
+	return postAction('api/actions/exom-fork', body);
 }
 
 export function apiSessionNew(body: {

@@ -38,38 +38,63 @@ pub struct ExomMeta {
     pub current_branch: String,
     pub kind: ExomKind,
     pub created_at: String,
+    /// Email of the user who created this exom. Empty string means
+    /// system-owned or pre-Model-A legacy (a startup migration backfills
+    /// from the `main` branch's TOFU claimer; an exom that ends up empty
+    /// is effectively read-only for everyone except top-admin recovery).
+    /// Drives the `public/*` access decision: only the creator gets
+    /// FullAccess on a public exom; everyone else is ReadOnly + can fork.
+    #[serde(default)]
+    pub created_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionMeta>,
+    /// Lineage when this exom was created via `exom-fork`. Carried for
+    /// future sync-request flows; absent on non-fork exoms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkLineage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForkLineage {
+    pub source_path: String,
+    pub source_tx_id: u64,
+    pub forked_at: String,
 }
 
 impl ExomMeta {
-    pub fn new_project_main() -> Self {
+    pub fn new_project_main(created_by: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             current_branch: "main".into(),
             kind: ExomKind::ProjectMain,
             created_at: now_iso8601_basic(),
+            created_by: created_by.to_string(),
             session: None,
+            forked_from: None,
         }
     }
 
-    pub fn new_bare() -> Self {
+    pub fn new_bare(created_by: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             current_branch: "main".into(),
             kind: ExomKind::Bare,
             created_at: now_iso8601_basic(),
+            created_by: created_by.to_string(),
             session: None,
+            forked_from: None,
         }
     }
 
-    pub fn new_session(sess: SessionMeta) -> Self {
+    pub fn new_session(sess: SessionMeta, created_by: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             current_branch: "main".into(),
             kind: ExomKind::Session,
             created_at: now_iso8601_basic(),
+            created_by: created_by.to_string(),
             session: Some(sess),
+            forked_from: None,
         }
     }
 }
@@ -169,11 +194,12 @@ mod tests {
     fn write_and_read_roundtrip() {
         let d = tempdir().unwrap();
         let exom = d.path().join("e");
-        let meta = ExomMeta::new_project_main();
+        let meta = ExomMeta::new_project_main("alice@test");
         write_meta(&exom, &meta).unwrap();
         let got = read_meta(&exom).unwrap();
         assert_eq!(got.format_version, FORMAT_VERSION);
         assert_eq!(got.kind, ExomKind::ProjectMain);
+        assert_eq!(got.created_by, "alice@test");
     }
 
     #[test]

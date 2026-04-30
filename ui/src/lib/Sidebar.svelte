@@ -451,7 +451,7 @@
 					</Button>
 				</div>
 			{:else}
-				{#snippet section(label: string, openKey: 'personal' | 'public' | 'other', sectionRoot: TreeNode | null, emptyHint: string | null = null, emptyAction: { label: string; path: string } | null = null)}
+				{#snippet section(label: string, openKey: 'personal' | 'public' | 'other', sectionRoot: TreeNode | null, emptyHint: string | null = null, emptyAction: { label: string; path: string } | null = null, tooltip: string | null = null)}
 					{#if sectionRoot}
 						{@const isEmpty = sectionRoot.kind === 'folder' && sectionRoot.children.length === 0}
 						<div class="mt-1 first:mt-0">
@@ -459,6 +459,7 @@
 								type="button"
 								class="group flex w-full items-center gap-1 rounded px-1 py-1 text-left text-[10px] font-medium uppercase tracking-wider text-muted-foreground hover:bg-secondary/40 hover:text-foreground"
 								aria-expanded={sectionOpen[openKey]}
+								title={tooltip ?? undefined}
 								onclick={() => (sectionOpen[openKey] = !sectionOpen[openKey])}
 							>
 								<ChevronDown
@@ -510,7 +511,14 @@
 					'Empty — your private memory lives here.',
 					userEmail ? { label: 'New folder', path: `${userEmail}/notes` } : null
 				)}
-				{@render section('Public', 'public', publicRoot)}
+				{@render section(
+					'Public',
+					'public',
+					publicRoot,
+					null,
+					null,
+					'Read by everyone. Fork to contribute.'
+				)}
 				{@render section('Other', 'other', otherRoot)}
 			{/if}
 		</div>

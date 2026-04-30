@@ -62,6 +62,15 @@ pub enum TreeNode {
         archived: bool,
         closed: bool,
         session: Option<exom::SessionMeta>,
+        /// Email of the user who created this exom (Model A ownership stamp).
+        /// Empty string means ownerless legacy. The UI compares against the
+        /// signed-in user's email to decide whether to show a "Fork" button.
+        #[serde(default)]
+        created_by: String,
+        /// Set when this exom was created via `exom-fork`. Surfaces as a
+        /// lineage subtitle in the UI ("forked from {source} ↗").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<exom::ForkLineage>,
     },
 }
 
@@ -134,6 +143,8 @@ fn walk_inner(
                 archived,
                 closed,
                 session: meta.session,
+                created_by: meta.created_by,
+                forked_from: meta.forked_from,
             })
         }
         NodeKind::Folder => {
@@ -417,7 +428,7 @@ mod tests {
     fn walks_a_scaffolded_project() {
         let d = tempdir().unwrap();
         let sym = d.path().join("sym");
-        crate::scaffold::init_project(d.path(), &"work::team::project::repo".parse().unwrap()).unwrap();
+        crate::scaffold::init_project(d.path(), &"work::team::project::repo".parse().unwrap(), "test@example.com").unwrap();
         let root: crate::path::TreePath = "work".parse().unwrap();
         let node = walk(
             d.path(),

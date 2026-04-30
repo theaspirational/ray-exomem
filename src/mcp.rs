@@ -1518,7 +1518,7 @@ async fn tool_init(
     let path_slash = path.to_slash_string();
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store).await;
+        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store, crate::server::lookup_owner(state, &path_slash)).await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -1532,7 +1532,7 @@ async fn tool_init(
         message: "daemon has no tree_root configured".into(),
     })?;
 
-    crate::scaffold::init_project(tree_root, &path).map_err(|e| JsonRpcError {
+    crate::scaffold::init_project(tree_root, &path, &user.email).map_err(|e| JsonRpcError {
         code: -32000,
         message: e.to_string(),
     })?;
@@ -1564,7 +1564,7 @@ async fn tool_exom_new(
     let path_slash = path.to_slash_string();
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store).await;
+        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store, crate::server::lookup_owner(state, &path_slash)).await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -1578,7 +1578,7 @@ async fn tool_exom_new(
         message: "daemon has no tree_root configured".into(),
     })?;
 
-    crate::scaffold::new_bare_exom(tree_root, &path).map_err(|e| JsonRpcError {
+    crate::scaffold::new_bare_exom(tree_root, &path, &user.email).map_err(|e| JsonRpcError {
         code: -32000,
         message: e.to_string(),
     })?;
@@ -1632,7 +1632,7 @@ async fn tool_tree(
             let path_slash = path.to_slash_string();
             if let Some(ref auth_store) = state.auth_store {
                 let level =
-                    crate::auth::access::resolve_access(user, &path_slash, auth_store).await;
+                    crate::auth::access::resolve_access(user, &path_slash, auth_store, crate::server::lookup_owner(state, &path_slash)).await;
                 if !level.can_read() {
                     return Err(JsonRpcError {
                         code: -32000,
@@ -1688,7 +1688,7 @@ async fn tool_merge_branch(
     };
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store).await;
+        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store, crate::server::lookup_owner(state, &exom_slash)).await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -1734,7 +1734,7 @@ async fn tool_archive_branch(
     let branch = require_str(args, "branch")?.to_string();
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store).await;
+        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store, crate::server::lookup_owner(state, &exom_slash)).await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,

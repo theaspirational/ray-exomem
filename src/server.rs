@@ -68,6 +68,11 @@ pub struct ExomState {
     pub typed_facts: storage::TypedFactTables,
     pub rules: Vec<ParsedRule>,
     pub exom_disk: Option<PathBuf>,
+    /// Cached `ExomMeta.created_by` (email of the creator). Empty string
+    /// means ownerless (system exom or unmigrated legacy). The auth layer
+    /// reads this when resolving access in the `public/*` namespace —
+    /// only the creator gets FullAccess; everyone else is ReadOnly+fork.
+    pub created_by: String,
 }
 
 pub struct AppState {
@@ -87,10 +92,12 @@ pub struct AppState {
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
     pub bind_addr: Option<String>,
-    /// When `Some`, exposes a loopback-only `GET /auth/dev-login` route that
-    /// mints a session for this email without OAuth. Set via the `--dev-login-email`
-    /// flag on `serve`. Refuses to start if the bind address is non-loopback.
-    pub dev_login_email: Option<String>,
+    /// When non-empty, exposes a loopback-only `GET /auth/dev-login` route that
+    /// mints a session for one of these emails without OAuth. Set via repeated
+    /// `--dev-login-email` flags on `serve`. The route picks the email from
+    /// `?email=` (must be in this allow-list) or defaults to the first entry.
+    /// Refuses to start if the bind address is non-loopback.
+    pub dev_login_emails: Vec<String>,
 }
 
 impl AppState {
@@ -111,7 +118,7 @@ impl AppState {
             auth_store: None,
             auth_provider: None,
             bind_addr: None,
-            dev_login_email: None,
+            dev_login_emails: Vec::new(),
         }
     }
 
@@ -358,6 +365,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/folder-new", post(api_folder_new))
         .route("/actions/delete", post(api_delete))
         .route("/actions/exom-new", post(api_exom_new))
+        .route("/actions/exom-fork", post(api_exom_fork))
         .route("/actions/session-new", post(api_session_new))
         .route("/actions/session-join", post(api_session_join))
         .route("/actions/branch-create", post(api_branch_create))
@@ -437,8 +445,12 @@ async fn api_sse(
                     (Some(_), Some(_), None) => None,
                     // Per-exom event with an authenticated subscriber. Filter by access.
                     (Some(exom_path), Some(store), Some(user)) => {
+                        let owner = lookup_owner(&state, &exom_path);
                         let level = crate::auth::access::resolve_access(
-                            &user, &exom_path, store,
+                            &user,
+                            &exom_path,
+                            store,
+                            owner,
                         )
                         .await;
                         if level.can_read() {
@@ -651,9 +663,13 @@ pub fn load_exom_from_tree_path(
     slash_key: &str,
 ) -> anyhow::Result<ExomState> {
     let mut brain = Brain::open_exom(exom_disk, sym_path)?;
+    // Load meta (and run the Model A migration if `created_by` is empty:
+    // backfill from `main`'s TOFU claimer once, persist, and surface the
+    // owner email for caching on ExomState).
+    let mut created_by = String::new();
     let meta_p = exom_disk.join(crate::exom::META_FILENAME);
     if meta_p.exists() {
-        if let Ok(meta) = crate::exom::read_meta(exom_disk) {
+        if let Ok(mut meta) = crate::exom::read_meta(exom_disk) {
             if brain
                 .branches()
                 .iter()
@@ -661,6 +677,28 @@ pub fn load_exom_from_tree_path(
             {
                 let _ = brain.switch_branch(&meta.current_branch);
             }
+            if meta.created_by.is_empty() {
+                if let Some(claimer) = brain
+                    .branches()
+                    .iter()
+                    .find(|b| b.branch_id == "main")
+                    .and_then(|b| b.claimed_by_user_email.clone())
+                {
+                    meta.created_by = claimer;
+                    if let Err(e) = crate::exom::write_meta(exom_disk, &meta) {
+                        eprintln!(
+                            "[ray-exomem] WARNING: failed to backfill created_by for '{}': {}",
+                            slash_key, e
+                        );
+                    } else {
+                        eprintln!(
+                            "[ray-exomem] migration: backfilled created_by='{}' for '{}'",
+                            meta.created_by, slash_key
+                        );
+                    }
+                }
+            }
+            created_by = meta.created_by.clone();
         }
     }
     let datoms = storage::build_datoms_table(&brain)?;
@@ -689,6 +727,7 @@ pub fn load_exom_from_tree_path(
         typed_facts,
         rules,
         exom_disk: Some(exom_disk.to_path_buf()),
+        created_by,
     })
 }
 
@@ -824,6 +863,25 @@ fn emit_tree_changed(state: &AppState) {
     ));
 }
 
+/// Look up the public-namespace owner state for an exom path.
+///
+/// - In-memory `ExomState` with non-empty `created_by` → `Owner(email)`
+/// - Loaded ExomState with empty `created_by` (migration-failed legacy)
+///   → `Ownerless`
+/// - Path not loaded (folder, missing exom, or pre-load) → `Unknown`
+///
+/// Caller passes the result to `resolve_access` for the Model A decision
+/// on `public/*` paths. Outside `public/*` the value is ignored.
+pub fn lookup_owner(state: &AppState, exom_slash: &str) -> crate::auth::access::PublicOwner {
+    use crate::auth::access::PublicOwner;
+    let exoms = state.exoms.lock().unwrap();
+    match exoms.get(exom_slash) {
+        Some(es) if !es.created_by.is_empty() => PublicOwner::Owner(es.created_by.clone()),
+        Some(_) => PublicOwner::Ownerless,
+        None => PublicOwner::Unknown,
+    }
+}
+
 async fn guard_read(
     state: &AppState,
     maybe_user: &MaybeUser,
@@ -831,7 +889,14 @@ async fn guard_read(
 ) -> Option<axum::response::Response> {
     if let Some(ref auth_store) = state.auth_store {
         if let Some(ref user) = maybe_user.0 {
-            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
+            let owner = lookup_owner(state, exom_slash);
+            let level = crate::auth::access::resolve_access(
+                user,
+                exom_slash,
+                auth_store,
+                owner,
+            )
+            .await;
             if !level.can_read() {
                 return Some(
                     ApiError::new("forbidden", format!("read access denied to {}", exom_slash))
@@ -851,7 +916,14 @@ async fn guard_write(
 ) -> Option<axum::response::Response> {
     if let Some(ref auth_store) = state.auth_store {
         if let Some(ref user) = maybe_user.0 {
-            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
+            let owner = lookup_owner(state, exom_slash);
+            let level = crate::auth::access::resolve_access(
+                user,
+                exom_slash,
+                auth_store,
+                owner,
+            )
+            .await;
             if !level.can_write() {
                 return Some(
                     ApiError::new(
@@ -874,7 +946,14 @@ async fn guard_owner(
 ) -> Option<axum::response::Response> {
     if let Some(ref auth_store) = state.auth_store {
         if let Some(ref user) = maybe_user.0 {
-            let level = crate::auth::access::resolve_access(user, exom_slash, auth_store).await;
+            let owner = lookup_owner(state, exom_slash);
+            let level = crate::auth::access::resolve_access(
+                user,
+                exom_slash,
+                auth_store,
+                owner,
+            )
+            .await;
             if !level.is_owner() {
                 return Some(
                     ApiError::new(
@@ -1004,8 +1083,14 @@ async fn build_tree_path_for_user(
     let tree_root = server_tree_root(state);
     let sym_path = server_sym_path(state);
     let requested_slash = requested.to_slash_string();
-    let direct_level =
-        crate::auth::access::resolve_access(user, &requested_slash, auth_store).await;
+    let direct_owner = lookup_owner(state, &requested_slash);
+    let direct_level = crate::auth::access::resolve_access(
+        user,
+        &requested_slash,
+        auth_store,
+        direct_owner,
+    )
+    .await;
     if direct_level.can_read() {
         let walk_result = if requested.len() == 1 {
             crate::tree::walk_or_empty(&tree_root, &sym_path, requested, opts)
@@ -1437,7 +1522,12 @@ async fn api_init(
         return resp;
     }
     let tree_root = server_tree_root(&state);
-    match crate::scaffold::init_project(&tree_root, &path) {
+    let created_by = maybe_user
+        .0
+        .as_ref()
+        .map(|u| u.email.as_str())
+        .unwrap_or("");
+    match crate::scaffold::init_project(&tree_root, &path, created_by) {
         Ok(()) => {
             emit_tree_changed(&state);
             Json(serde_json::json!({"ok": true, "path": path.to_slash_string()})).into_response()
@@ -1552,13 +1642,258 @@ async fn api_exom_new(
         return resp;
     }
     let tree_root = server_tree_root(&state);
-    match crate::scaffold::new_bare_exom(&tree_root, &path) {
+    let created_by = maybe_user
+        .0
+        .as_ref()
+        .map(|u| u.email.as_str())
+        .unwrap_or("");
+    match crate::scaffold::new_bare_exom(&tree_root, &path, created_by) {
         Ok(()) => {
             emit_tree_changed(&state);
             Json(serde_json::json!({"ok": true, "path": path.to_slash_string()})).into_response()
         }
         Err(e) => ApiError::from(e).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct ExomForkBody {
+    /// Path of the exom to fork (must be readable by the caller; not a session exom).
+    source: String,
+    /// Optional target path. Defaults to `{user.email}/{source_basename}`,
+    /// suffixed with `-2`, `-3`, ... if the default is taken.
+    #[serde(default)]
+    target: Option<String>,
+}
+
+/// `POST /api/actions/exom-fork`
+///
+/// Model A's contribution path. Read-share gives you read; if you want to
+/// write, you fork into your own namespace (or any path you can write to)
+/// and own the result. The new exom carries:
+/// - `created_by = user.email` (Model A ownership stamp)
+/// - `forked_from = { source_path, source_tx_id, forked_at }` (lineage for
+///   future sync-request flows; never overwritten)
+/// - all currently-active facts from `source`'s `main`, asserted as new
+///   tx records attributed to the forker. Original `fact_id`s are
+///   preserved so cross-exom diffs can match identities.
+///
+/// Refused for session exoms (sessions are time-bounded multi-agent
+/// contexts, not knowledge artifacts; fork the parent project instead).
+async fn api_exom_fork(
+    State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ExomForkBody>,
+) -> impl IntoResponse {
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
+    };
+
+    let source_path: crate::path::TreePath = match body.source.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_source", e.to_string()).into_response(),
+    };
+    let source_slash = source_path.to_slash_string();
+
+    // Read access on source.
+    if let Some(resp) = guard_read(&state, &maybe_user, &source_slash).await {
+        return resp;
+    }
+
+    // Default target: {user.email}/{basename}, with collision suffixes.
+    let target_slash = match body.target.as_deref() {
+        Some(t) => t.to_string(),
+        None => {
+            let basename = source_path.last().unwrap_or("forked");
+            let base = format!("{}/{}", user.email, basename);
+            let tree_root = server_tree_root(&state);
+            let mut candidate = base.clone();
+            let mut i = 2;
+            while tree_root.join(&candidate).exists() {
+                candidate = format!("{}-{}", base, i);
+                i += 1;
+                if i > 100 {
+                    return ApiError::new(
+                        "fork_collision",
+                        "could not find a free target path; pass `target` explicitly",
+                    )
+                    .into_response();
+                }
+            }
+            candidate
+        }
+    };
+    let target_path: crate::path::TreePath = match target_slash.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_target", e.to_string()).into_response(),
+    };
+
+    // Write access on target.
+    if let Some(resp) = guard_write(&state, &maybe_user, &target_slash).await {
+        return resp;
+    }
+
+    let tree_root = server_tree_root(&state);
+    let sym_path = server_sym_path(&state);
+
+    // Refuse session exoms.
+    let source_disk = source_path.to_disk_path(&tree_root);
+    let source_meta = match crate::exom::read_meta(&source_disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ApiError::new("no_such_exom", format!("no such exom {}", source_slash))
+                .with_status(404)
+                .into_response();
+        }
+        Err(e) => return ApiError::new("io", e.to_string()).into_response(),
+    };
+    if source_meta.kind == crate::exom::ExomKind::Session {
+        return ApiError::new(
+            "fork_session_unsupported",
+            "session exoms cannot be forked; fork the parent project's main instead",
+        )
+        .with_status(400)
+        .into_response();
+    }
+
+    // Target must not exist (avoid clobber). The default-target loop above
+    // already auto-suffixed; a caller-supplied target gets the strict check.
+    let target_disk = target_path.to_disk_path(&tree_root);
+    if target_disk.exists() {
+        return ApiError::new(
+            "target_exists",
+            format!("target path already exists: {}", target_slash),
+        )
+        .with_status(409)
+        .into_response();
+    }
+
+    // Snapshot source facts + the source tip tx_id under the lock.
+    let snapshot: Vec<(String, String, crate::fact_value::FactValue, f64, String, String, Option<String>)>;
+    let source_tip_tx: u64;
+    {
+        let mut exoms = state.exoms.lock().unwrap();
+        let es = match get_or_load_exom(
+            &mut exoms,
+            &state.engine,
+            &source_slash,
+            Some(&tree_root),
+            Some(&sym_path),
+        ) {
+            Ok(es) => es,
+            Err(e) => return ApiError::new("source_load_failed", e.to_string()).into_response(),
+        };
+        // Tip = max created_by_tx among current_facts (fine for v1; if no
+        // facts, use 0). This is what `forked_at_tx` records.
+        source_tip_tx = es
+            .brain
+            .current_facts()
+            .iter()
+            .map(|f| f.created_by_tx as u64)
+            .max()
+            .unwrap_or(0);
+        snapshot = es
+            .brain
+            .current_facts()
+            .iter()
+            .map(|f| {
+                (
+                    f.fact_id.clone(),
+                    f.predicate.clone(),
+                    f.value.clone(),
+                    f.confidence,
+                    f.provenance.clone(),
+                    f.valid_from.clone(),
+                    f.valid_to.clone(),
+                )
+            })
+            .collect();
+    }
+
+    // Create the target exom (bare; same shape as exom-new).
+    if let Err(e) = crate::scaffold::new_bare_exom(&tree_root, &target_path, &user.email) {
+        return ApiError::from(e).into_response();
+    }
+
+    // Stamp lineage into the target's ExomMeta.
+    let lineage = crate::exom::ForkLineage {
+        source_path: source_slash.clone(),
+        source_tx_id: source_tip_tx,
+        forked_at: crate::exom::now_iso8601_basic(),
+    };
+    if let Ok(mut tmeta) = crate::exom::read_meta(&target_disk) {
+        tmeta.forked_from = Some(lineage.clone());
+        if let Err(e) = crate::exom::write_meta(&target_disk, &tmeta) {
+            eprintln!(
+                "[ray-exomem] WARNING: forked exom created but lineage stamp failed: {}",
+                e
+            );
+        }
+    }
+
+    // Replay the snapshot into the new exom under the forker's identity.
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let write_ctx = MutationContext::from_user(user, header_agent, header_model);
+    let mut copied: usize = 0;
+    {
+        // mutate_exom_async lazy-loads from disk, so the new exom will be
+        // picked up. We loop sequentially; each assert_fact is its own tx.
+        for (fact_id, predicate, value, confidence, provenance, valid_from, valid_to) in
+            snapshot.iter()
+        {
+            let target = target_slash.clone();
+            let fact_id_for_log = fact_id.clone();
+            let target_for_log = target_slash.clone();
+            let source_for_log = source_slash.clone();
+            let fact_id_owned = fact_id.clone();
+            let predicate_owned = predicate.clone();
+            let value_owned = value.clone();
+            let confidence_owned = *confidence;
+            let provenance_owned = provenance.clone();
+            let valid_from_owned = valid_from.clone();
+            let valid_to_owned = valid_to.clone();
+            let ctx = write_ctx.clone();
+            let r = mutate_exom_async(&state, &target, move |ex| {
+                ex.brain.assert_fact(
+                    &fact_id_owned,
+                    &predicate_owned,
+                    value_owned,
+                    confidence_owned,
+                    &provenance_owned,
+                    Some(valid_from_owned.as_str()),
+                    valid_to_owned.as_deref(),
+                    &ctx,
+                )
+            })
+            .await;
+            match r {
+                Ok(_) => copied += 1,
+                Err(e) => {
+                    eprintln!(
+                        "[ray-exomem] fork: failed to copy fact {} from {} to {}: {}",
+                        fact_id_for_log, source_for_log, target_for_log, e
+                    );
+                }
+            }
+        }
+    }
+
+    emit_tree_changed(&state);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "source": source_slash,
+        "target": target_slash,
+        "copied_facts": copied,
+        "forked_from": {
+            "source_path": lineage.source_path,
+            "source_tx_id": lineage.source_tx_id,
+            "forked_at": lineage.forked_at,
+        }
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -2616,8 +2951,14 @@ async fn api_eval_inner(
                 })
                 .collect();
             if !canonical_forms.is_empty() {
-                if let Err(e) =
-                    crate::auth::access::authorize_rayfall(user, &canonical_forms, auth_store).await
+                let state_for_owner = state.clone();
+                if let Err(e) = crate::auth::access::authorize_rayfall(
+                    user,
+                    &canonical_forms,
+                    auth_store,
+                    |path| lookup_owner(&state_for_owner, path),
+                )
+                .await
                 {
                     return ApiError::new("forbidden", e.to_string())
                         .with_status(403)

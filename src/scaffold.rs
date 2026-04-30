@@ -18,7 +18,11 @@ pub enum ScaffoldError {
     NotFound(String),
 }
 
-pub fn init_project(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldError> {
+pub fn init_project(
+    tree_root: &Path,
+    path: &TreePath,
+    created_by: &str,
+) -> Result<(), ScaffoldError> {
     crate::tree::check_no_exom_ancestor(tree_root, path).map_err(ScaffoldError::NestInsideExom)?;
     let leaf = path.to_disk_path(tree_root);
     std::fs::create_dir_all(&leaf)?;
@@ -27,7 +31,7 @@ pub fn init_project(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldErr
     let main_path = leaf.join("main");
     match classify(&main_path) {
         NodeKind::Missing => {
-            exom::write_meta(&main_path, &ExomMeta::new_project_main())?;
+            exom::write_meta(&main_path, &ExomMeta::new_project_main(created_by))?;
         }
         NodeKind::Exom => {
             let meta = exom::read_meta(&main_path)?;
@@ -131,7 +135,11 @@ pub fn delete_subtree(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldE
     Ok(())
 }
 
-pub fn new_bare_exom(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldError> {
+pub fn new_bare_exom(
+    tree_root: &Path,
+    path: &TreePath,
+    created_by: &str,
+) -> Result<(), ScaffoldError> {
     if let Some(last) = path.last() {
         ensure_not_reserved_as_exom(last)?;
     }
@@ -140,7 +148,7 @@ pub fn new_bare_exom(tree_root: &Path, path: &TreePath) -> Result<(), ScaffoldEr
     match classify(&disk) {
         NodeKind::Missing => {
             std::fs::create_dir_all(&disk)?;
-            exom::write_meta(&disk, &ExomMeta::new_bare())?;
+            exom::write_meta(&disk, &ExomMeta::new_bare(created_by))?;
             Ok(())
         }
         NodeKind::Exom => Ok(()), // idempotent
@@ -163,7 +171,7 @@ mod tests {
     #[test]
     fn init_creates_main_and_sessions() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::team::project::repo")).unwrap();
+        init_project(d.path(), &tp("work::team::project::repo"), "test@example.com").unwrap();
         assert_eq!(
             classify(&d.path().join("work/team/project/repo/main")),
             NodeKind::Exom
@@ -177,15 +185,15 @@ mod tests {
     #[test]
     fn init_is_idempotent() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::team")).unwrap();
-        init_project(d.path(), &tp("work::team")).unwrap();
+        init_project(d.path(), &tp("work::team"), "test@example.com").unwrap();
+        init_project(d.path(), &tp("work::team"), "test@example.com").unwrap();
     }
 
     #[test]
     fn projects_nest_freely() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::team::project::repo")).unwrap();
-        init_project(d.path(), &tp("work::team")).unwrap();
+        init_project(d.path(), &tp("work::team::project::repo"), "test@example.com").unwrap();
+        init_project(d.path(), &tp("work::team"), "test@example.com").unwrap();
         assert_eq!(classify(&d.path().join("work/team/main")), NodeKind::Exom);
         assert_eq!(
             classify(&d.path().join("work/team/project/repo/main")),
@@ -196,8 +204,8 @@ mod tests {
     #[test]
     fn cannot_nest_inside_exom() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work")).unwrap(); // work/main is exom
-        let err = init_project(d.path(), &tp("work::main::deeper"));
+        init_project(d.path(), &tp("work"), "test@example.com").unwrap(); // work/main is exom
+        let err = init_project(d.path(), &tp("work::main::deeper"), "test@example.com");
         assert!(matches!(err, Err(ScaffoldError::NestInsideExom(_))));
     }
 
@@ -205,7 +213,7 @@ mod tests {
     fn new_bare_exom_rejects_reserved() {
         let d = tempdir().unwrap();
         assert!(matches!(
-            new_bare_exom(d.path(), &tp("work::sessions")),
+            new_bare_exom(d.path(), &tp("work::sessions"), "test@example.com"),
             Err(ScaffoldError::Path(_))
         ));
     }
@@ -213,7 +221,7 @@ mod tests {
     #[test]
     fn new_bare_exom_is_idempotent() {
         let d = tempdir().unwrap();
-        new_bare_exom(d.path(), &tp("work::ath::notes")).unwrap();
-        new_bare_exom(d.path(), &tp("work::ath::notes")).unwrap();
+        new_bare_exom(d.path(), &tp("work::ath::notes"), "test@example.com").unwrap();
+        new_bare_exom(d.path(), &tp("work::ath::notes"), "test@example.com").unwrap();
     }
 }

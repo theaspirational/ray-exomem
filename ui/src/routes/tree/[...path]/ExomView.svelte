@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { invalidateAll } from '$app/navigation';
-	import { Loader2 } from '@lucide/svelte';
+	import { goto, invalidateAll } from '$app/navigation';
+	import { base } from '$app/paths';
+	import { GitFork, Loader2 } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
+	import { auth } from '$lib/auth.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
@@ -14,10 +16,12 @@
 	import RightRailAnchors from '$lib/Notebook/RightRailAnchors.svelte';
 	import { entityForFactId } from '$lib/predicateRendering.svelte';
 	import {
+		ApiActionError,
 		exportBackupText,
 		fetchBranches,
 		fetchFactsList,
 		fetchRelationGraph,
+		forkExom,
 		parseFactsFromExport,
 		unarchiveSessionExom,
 		type BranchRow,
@@ -246,6 +250,35 @@
 			}
 		});
 	}
+
+	let forkBusy = $state(false);
+
+	const canFork = $derived.by(() => {
+		const me = auth.user?.email;
+		if (!me) return false;
+		if (node.exom_kind === 'session') return false;
+		if (!node.created_by) return false;
+		if (node.created_by === me) return false;
+		return true;
+	});
+
+	async function onFork() {
+		if (!canFork || forkBusy) return;
+		forkBusy = true;
+		try {
+			const r = await forkExom(node.path);
+			toast.success(`Forked to ${r.target}`);
+			await goto(`${base}/tree/${r.target}`);
+		} catch (e) {
+			if (e instanceof ApiActionError && e.code === 'fork_session_unsupported') {
+				toast.error("Sessions can't be forked — fork the parent project instead.");
+			} else {
+				toast.error(e instanceof Error ? e.message : 'Fork failed');
+			}
+		} finally {
+			forkBusy = false;
+		}
+	}
 </script>
 
 <div
@@ -264,18 +297,38 @@
 					<Badge variant="outline" class="border-destructive/50 text-destructive">closed</Badge>
 				{/if}
 			</div>
-			{#if showUnarchive}
-				<Button
-					size="sm"
-					variant="secondary"
-					disabled={unarchiveBusy}
-					onclick={() => void onUnarchive()}
-				>
-					{#if unarchiveBusy}
-						<Loader2 class="mr-1 size-3 animate-spin" />
+			{#if canFork || showUnarchive}
+				<div class="flex items-center gap-2">
+					{#if canFork}
+						<Button
+							size="sm"
+							variant="secondary"
+							disabled={forkBusy}
+							onclick={() => void onFork()}
+							title="Fork into your namespace"
+						>
+							{#if forkBusy}
+								<Loader2 class="mr-1 size-3 animate-spin" />
+							{:else}
+								<GitFork class="mr-1 size-3" />
+							{/if}
+							Fork
+						</Button>
 					{/if}
-					Unarchive
-				</Button>
+					{#if showUnarchive}
+						<Button
+							size="sm"
+							variant="secondary"
+							disabled={unarchiveBusy}
+							onclick={() => void onUnarchive()}
+						>
+							{#if unarchiveBusy}
+								<Loader2 class="mr-1 size-3 animate-spin" />
+							{/if}
+							Unarchive
+						</Button>
+					{/if}
+				</div>
 			{/if}
 		</div>
 
@@ -283,6 +336,17 @@
 			{node.path.split('/').filter(Boolean).join('/')}
 		</div>
 		<h1 class="font-serif text-3xl text-foreground">{titleText}</h1>
+		{#if node.forked_from}
+			<p class="font-mono text-[11px] text-muted-foreground">
+				forked from
+				<a
+					href="{base}/tree/{node.forked_from.source_path}"
+					class="underline-offset-2 hover:text-foreground hover:underline"
+				>
+					{node.forked_from.source_path}
+				</a>
+			</p>
+		{/if}
 		{#if headerBlurb}
 			<p class="font-serif text-sm leading-relaxed text-muted-foreground">{headerBlurb}</p>
 		{/if}

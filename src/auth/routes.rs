@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Path as AxumPath, State},
+    extract::{ConnectInfo, Path as AxumPath, Query, State},
     response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
@@ -554,7 +554,11 @@ async fn bootstrap_public_tree(state: &AppState, actor_email: &str) -> Result<()
         if crate::tree::classify(&main_disk) == crate::tree::NodeKind::Missing {
             changed = true;
         }
-        crate::scaffold::init_project(tree_root, &project_path).map_err(ApiError::from)?;
+        // Bootstrap-seeded fixtures live under `public/` and are owned by
+        // the user whose login triggered the seed. Subsequent logins are
+        // no-ops (seed_bootstrap_exom checks `exom_is_bootstrapped`).
+        crate::scaffold::init_project(tree_root, &project_path, actor_email)
+            .map_err(ApiError::from)?;
 
         let exom_path = format!("{}/main", seed.path);
         seed_bootstrap_exom(state, &exom_path, actor_email, seed).await?;
@@ -707,26 +711,58 @@ async fn login(
     ))
 }
 
+#[derive(Deserialize, Default)]
+struct DevLoginQuery {
+    /// Optional email to mint a session for. Must be in the configured
+    /// allow-list (`--dev-login-email`). Defaults to the first allow-listed
+    /// email when omitted.
+    #[serde(default)]
+    email: Option<String>,
+}
+
 /// GET /auth/dev-login
 ///
 /// Loopback-only OAuth bypass for local UI development. Mints a session for
-/// the email configured via `--dev-login-email` (or `RAY_EXOMEM_DEV_LOGIN_EMAIL`)
-/// at daemon startup. Returns 404 when the flag is unset, 403 when the request
-/// peer is not a loopback address. Mirrors `login()`'s session creation,
-/// bootstrap seeding, and top-admin promotion so a dev session is
+/// one of the emails configured via repeated `--dev-login-email` flags (or the
+/// comma-separated `RAY_EXOMEM_DEV_LOGIN_EMAIL` env var) at daemon startup.
+/// The email is picked by `?email=<addr>` (must be in the allow-list) or
+/// defaults to the first allow-listed entry. Returns 404 when the allow-list
+/// is empty, 403 when the request peer is not a loopback address, 400 when
+/// the requested email is not allow-listed. Mirrors `login()`'s session
+/// creation, bootstrap seeding, and top-admin promotion so a dev session is
 /// indistinguishable from a real Google login at the cookie layer.
 async fn dev_login(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(q): Query<DevLoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let email = state.dev_login_email.as_ref().ok_or_else(|| {
-        ApiError::new("not_found", "dev-login is not enabled").with_status(404)
-    })?;
+    if state.dev_login_emails.is_empty() {
+        return Err(
+            ApiError::new("not_found", "dev-login is not enabled").with_status(404),
+        );
+    }
     if !addr.ip().is_loopback() {
         return Err(
             ApiError::new("forbidden", "dev-login is loopback-only").with_status(403),
         );
     }
+    let email = match q.email.as_deref() {
+        Some(requested) => {
+            if !state.dev_login_emails.iter().any(|e| e == requested) {
+                return Err(ApiError::new(
+                    "email_not_allowed",
+                    format!(
+                        "email '{}' is not in the dev-login allow-list",
+                        requested
+                    ),
+                )
+                .with_status(400));
+            }
+            requested.to_string()
+        }
+        None => state.dev_login_emails[0].clone(),
+    };
+    let email = &email;
     let store = require_auth_store(&state)?;
 
     let role = store.login_role(email).await.map_err(|e| {

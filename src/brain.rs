@@ -1898,14 +1898,17 @@ pub fn session_new(
         }
     }
 
-    let meta = ExomMeta::new_session(SessionMeta {
-        session_type,
-        label: label.to_string(),
-        initiated_by: user_email.to_string(),
-        agents: agents_final.clone(),
-        closed_at: None,
-        archived_at: None,
-    });
+    let meta = ExomMeta::new_session(
+        SessionMeta {
+            session_type,
+            label: label.to_string(),
+            initiated_by: user_email.to_string(),
+            agents: agents_final.clone(),
+            closed_at: None,
+            archived_at: None,
+        },
+        user_email,
+    );
     exom::write_meta(&disk, &meta)?;
 
     // Pre-create branch records for every participant.
@@ -2019,7 +2022,7 @@ mod session_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap()).unwrap();
+        crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap(), "test@example.com").unwrap();
         let project: TreePath = "work::ath".parse().unwrap();
         let session = session_new(
             d.path(),
@@ -2051,7 +2054,7 @@ mod session_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
+        crate::scaffold::init_project(d.path(), &"work".parse().unwrap(), "test@example.com").unwrap();
         let session = session_new(
             d.path(),
             &sym,
@@ -2092,7 +2095,7 @@ mod session_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &"work".parse().unwrap()).unwrap();
+        crate::scaffold::init_project(d.path(), &"work".parse().unwrap(), "test@example.com").unwrap();
         let p: TreePath = "work".parse().unwrap();
         assert!(
             session_new(d.path(), &sym, &p, SessionType::Single, "", "me", None, None, &[])
@@ -2173,7 +2176,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         let err =
             precheck_write(d.path(), &sym, &tp("work::main"), "main", "", None, None)
                 .unwrap_err();
@@ -2186,7 +2189,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         let session = session_new(
             d.path(),
             &sym,
@@ -2214,7 +2217,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         // Create a branch "agent_a" via create_branch.
         create_branch(d.path(), &sym, &tp("work::main"), "agent_a").unwrap();
         // First write claims it for alice.
@@ -2259,7 +2262,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         let err = precheck_write(
             d.path(),
             &sym,
@@ -2279,7 +2282,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("work")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         // "main" branch should exist implicitly for any exom.
         assert!(
             precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice", None, None).is_ok()
@@ -2292,7 +2295,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("proj"), "test@example.com").unwrap();
         let session = session_new(
             d.path(),
             &sym,
@@ -2327,7 +2330,7 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &tp("proj")).unwrap();
+        crate::scaffold::init_project(d.path(), &tp("proj"), "test@example.com").unwrap();
         let session = session_new(
             d.path(),
             &sym,
