@@ -75,8 +75,29 @@ is an *event* (a tx in the tx log), not a value-interval.
 | `{email}/...`      | Owner has full access; everyone else denied unless explicitly shared. |
 | Anything else      | Admin-only. |
 
-Bootstrap fixtures seed under `public/...`; private agent state belongs under
-`{user-email}/...`.
+**Default to private. Write to `{user-email}/...` unless the user explicitly
+named a `public/...` path or asked for a shared workflow.** Anything an agent
+authors on behalf of one user — scratch, tests, drafts, in-progress notes,
+agent-private state, regression probes — belongs in that user's private
+namespace. `public/...` is reserved for bootstrap fixtures and intentionally
+shared knowledge: a stray write there is visible (and writable) to every
+authenticated user in the allowed domain. When in doubt, write private; the
+user can graduate work to `public/...` later, but you can't undo public
+exposure cleanly.
+
+Conventional sub-roots inside `{user-email}/`:
+
+- `{user-email}/main` — the user's primary private exom (seeded on first
+  login).
+- `{user-email}/test/...` — dedicated test/scratch root. Stress-test runs,
+  regression probes, and other ephemeral test exoms live here so they don't
+  pollute `{user-email}/main` or the public tree.
+- `{user-email}/<topic>/...` — any other private project the user owns.
+
+Sub-agents spawned by a parent runner inherit the parent's bearer token and
+therefore share the parent's `user_email` — they have full access to the
+parent's `{user-email}/...` namespace. Multi-agent workflows under a single
+user do **not** require `public/...`; only cross-user collaboration does.
 
 ### Fact identity
 
