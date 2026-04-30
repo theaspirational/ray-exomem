@@ -18,7 +18,7 @@ or trailing tokens):
 | Flag                          | Meaning                                                                 |
 |-------------------------------|-------------------------------------------------------------------------|
 | `--with-team`                 | Run Ch09 (multi-agent collision/idempotency) by spawning a 2-agent team. Sub-agents inherit the parent's bearer, so they share `user_email` with the orchestrator and can read/write the parent's private namespace — Ch09 steps 1–4 work in private scratch unchanged. Auto-on for "full stress test". |
-| `--with-collision-user <key>` | Bearer token of a *second* user — unlocks the BranchOwned probe in Ch11 and the cross-user residual in Ch09 step 5. The collision user is a different `user_email` and so cannot see private scratch. Setting this flag implies `--scratch public`; if private scratch is forced, Ch09 step 5 auto-skips with reason "collision-user cannot see private scratch". |
+| `--with-collision-user <key>` | Bearer token of a *second* user — unlocks the cross-user write/fork probes in Ch13 step 7 (Model A's auth-layer 403), the BranchOwned residual in Ch09 step 5, and the corresponding Ch11 row. The collision user is a different `user_email` and so cannot see private scratch. Setting this flag implies `--scratch public`; if private scratch is forced, the cross-user steps auto-skip with reason "collision-user cannot see private scratch". For local dev without a second OAuth bearer, the daemon's `--dev-login-email` flag accepts multiple emails (loopback only) — use `GET /auth/dev-login?email=<addr>` to mint a session for any email in the allow-list. |
 | `--with-admin-probes`         | Allow `/actions/factory-reset` / `/actions/wipe`. **DEFAULT OFF.** Never enable without explicit user opt-in. |
 | `--cleanup`                   | After teardown, archive the scratch session (admin-gated).              |
 | `--scratch public`            | Place scratch under `public/stress-test/...` instead of the **default** `{user_email}/test/...`. Use this when you intentionally want the run visible to other users in the allowed domain (cross-user collision probes, shared regression evidence). Default-private keeps probe noise out of the public tree and makes the test exoms invisible to other users by default. |
@@ -159,9 +159,11 @@ Order:
 7. Ch07 — Sessions  *(includes init/exom-new via MCP)*
 8. Ch08 — Attribution
 9. Ch10 — Reads
-10. Ch11 — Error surface  *(BranchOwned skipped without `--with-collision-user`)*
+10. Ch11 — Error surface  *(BranchOwned/Model A `forbidden` covered in Ch09 / Ch13)*
 11. Ch12 — Regression probes
-12. Ch09 — Multi-agent  *(gated `--with-team`; runs LAST so its branches are
+12. Ch13 — Model A: public ownership + fork  *(steps 1–6 always run; step 7
+    needs `--with-collision-user`)*
+13. Ch09 — Multi-agent  *(gated `--with-team`; runs LAST so its branches are
     visible to the rest of the report and aren't disturbed by single-agent
     chapters)*
 

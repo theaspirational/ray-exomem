@@ -46,9 +46,26 @@ response. **All steps here expect a failure** — a success is itself a failure.
       `invalid 'predicate'` and `non-empty`. (Brain layer is the trust
       boundary; server.rs and mcp.rs both validate eagerly.)
 
-7. **`BranchOwned`** *(gated `--with-collision-user`)* —
-   covered in Ch09 step 5. Mark as `skipped` here with reason "covered/skipped
-   in Ch09" if Ch09 didn't run, or copy the result if it did.
+7. **`BranchOwned` *(legacy)* / Model A `forbidden`** *(gated
+   `--with-collision-user`)* —
+   The original probe expected the brain layer's `branch_owned` error when
+   a collision user wrote to the runner's branch. Under **Model A**
+   (shipped 2026-04-30) the auth layer intercepts first for `public/*`
+   paths and returns `forbidden` with `write access denied`, *before* the
+   branch layer runs. Two outcomes are now valid:
+
+   - **Cross-user write to a `public/*` exom** → expect `forbidden` /
+     `write access denied`. This is the canonical Model A path; covered
+     in **Ch13 step 7c**. Mark this row `pass (covered Ch13)` if Ch13
+     ran, or `skipped` with reason "no collision-user".
+   - **Cross-user write to a *shared* `{owner_email}/...` exom** with a
+     `read-write` share but the runner having claimed `main` → still
+     hits the original brain-layer `branch_owned` error. Covered in
+     **Ch09 step 5** under `--with-team` + `--with-collision-user`.
+     Mark `pass (covered Ch09)` / `skipped`.
+
+   If both Ch09 and Ch13 ran, take the more specific evidence (the verbatim
+   error string from each) and record it here.
 
 8. **`session_closed`** — already covered in Ch07 step 3. Mark this row
    as `pass (covered Ch07)` if Ch07 passed, or `fail (Ch07 step 3 failed)`.

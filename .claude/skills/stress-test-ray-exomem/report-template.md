@@ -12,7 +12,7 @@
 
 | Chapter | Scenario                                  | Status      | Evidence                                                  |
 |---------|-------------------------------------------|-------------|-----------------------------------------------------------|
-| Ch01    | MCP surface complete                      | <pass/fail> | tools/list contains init / exom_new / tree / merge_branch / archive_branch (+ branch arg on query/eval) |
+| Ch01    | MCP surface complete                      | <pass/fail> | tools/list contains init / exom_new / exom_fork / tree / merge_branch / archive_branch (+ branch arg on query/eval) |
 | Ch01    | guide returns markdown                    | <pass/fail> | <bytes returned>                                          |
 | Ch01    | list_exoms ≥ 1                            | <pass/fail> | <count + first-3 paths>                                   |
 | Ch01    | exom_status of session                    | <pass/fail> | <{current_branch, facts, beliefs, transactions}> — expect `transactions==0` (genesis is `tx/0`, not counted) |
@@ -85,12 +85,20 @@
 | Ch11    | invalid value (array)                     | <pass/fail> | <error string>                                            |
 | Ch11    | missing required parameter                | <pass/fail> | <error: "missing required parameter: predicate">          |
 | Ch11    | empty-string predicate rejected           | <pass/fail> | <error: "invalid 'predicate': must be non-empty">         |
-| Ch11    | BranchOwned                               | <skip/p/f>  | <error string> *(needs --with-collision-user)*            |
+| Ch11    | BranchOwned / Model A `forbidden`         | <skip/p/f>  | <error string> — Model A path covered Ch13 step 7c; legacy `branch_owned` path covered Ch09 step 5 *(needs --with-collision-user)* |
 | Ch12    | hyphen attr probe (tx/user-email = 0 rows)| <pass/fail> | <row counts>                                              |
 | Ch12    | default-fact-id supersede                 | <pass/fail> | <fact_history rows>                                       |
 | Ch12    | sym health (no domain error on query)     | <pass/fail> | <ok / RAY_ERROR text>                                     |
 | Ch12    | cache staleness post-join                 | <pass/fail> | <claim triple populated immediately>                      |
 | Ch12    | cross-branch cursor restoration           | <pass/fail> | <main is_current after non-main query>                    |
+| Ch13    | created_by stamped on fresh exom          | <pass/fail> | <created_by per scratch_bare / scratch_project/main / session> |
+| Ch13    | forked_from absent on non-fork            | <pass/fail> | <field absent in tree node JSON>                          |
+| Ch13    | exom_fork to explicit target              | <pass/fail> | <fork target path, copied_facts count, forked_from block> |
+| Ch13    | default-target auto-suffix on collision   | <pass/fail> | <first target, second target = ...-2 / ...-3>             |
+| Ch13    | fork refuses session exoms                | <pass/fail> | <error: "fork_session_unsupported">                       |
+| Ch13    | replayed facts attributed to forker       | <pass/fail> | <tx/user_email == runner email per fact>                  |
+| Ch13    | cross-user write → `forbidden` (Model A)  | <skip/p/f>  | <error: contains "forbidden" + "write access denied", NOT "branch_owned"> *(needs --with-collision-user)* |
+| Ch13    | cross-user fork succeeds                  | <skip/p/f>  | <forked target path, copied_facts> *(needs --with-collision-user)* |
 | Ch09    | TeamCreate + 2 sub-agents joined          | <skip/p/f>  | <team id, agent ids> *(--with-team)*                      |
 | Ch09    | each agent asserted 2 facts on its branch | <skip/p/f>  | <fact_ids per agent>                                      |
 | Ch09    | list_branches: full claim triple per      | <skip/p/f>  | <branch-row tuples>                                       |

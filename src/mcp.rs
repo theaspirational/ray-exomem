@@ -521,6 +521,18 @@ fn tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "exom_fork",
+            "description": "Fork an exom you can read into a new exom you'll own. Copies currently-active facts as new tx records attributed to you, stamps lineage (`forked_from`) on the target's meta, and gives you full ownership of the result. Refused on session exoms. Default target is `{your_email}/{source_basename}`, auto-suffixed (`-2`, `-3`, ...) if taken.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "Path of the exom to fork. You must have read access (own it, share grant, or it's in `public/*`)." },
+                    "target": { "type": "string", "description": "Optional target path. Defaults to `{your_email}/{source_basename}` with auto-suffix on collision." }
+                },
+                "required": ["source"]
+            }
+        }),
+        serde_json::json!({
             "name": "tree",
             "description": "Walk the auth-aware tree for the calling user. Returns the user's own namespace, plus any namespaces they have shares for, plus the public/* subtree. Use to discover which projects/sessions exist before calling `init`/`session_new`.",
             "inputSchema": {
@@ -613,6 +625,7 @@ async fn handle_tool_call(
         "export" => tool_export(state, &arguments),
         "init" => tool_init(state, user, &arguments).await,
         "exom_new" => tool_exom_new(state, user, &arguments).await,
+        "exom_fork" => tool_exom_fork(state, user, &arguments).await,
         "tree" => tool_tree(state, user, &arguments).await,
         "merge_branch" => tool_merge_branch(state, user, &arguments).await,
         "archive_branch" => tool_archive_branch(state, user, &arguments).await,
@@ -1593,6 +1606,283 @@ async fn tool_exom_new(
         "path": path_slash,
     })
     .to_string())
+}
+
+/// MCP `exom_fork`. Mirrors `POST /api/actions/exom-fork`. The HTTP handler
+/// is the canonical reference; this duplicates its flow because the two
+/// surfaces have different async/error idioms (axum extractors vs JsonRpc).
+/// Keep them in sync — if you find drift, the HTTP handler wins.
+async fn tool_exom_fork(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let source_str = require_str(args, "source")?.to_string();
+    let target_arg = get_str(args, "target").map(str::to_string);
+
+    let source_path: crate::path::TreePath =
+        source_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
+            code: -32602,
+            message: format!("invalid 'source': {e}"),
+        })?;
+    let source_slash = source_path.to_slash_string();
+
+    // Read access on source.
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(
+            user,
+            &source_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &source_slash),
+        )
+        .await;
+        if !level.can_read() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: read access denied to {}", source_slash),
+            });
+        }
+    }
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    // Resolve target with auto-suffix on collision (default
+    // `{user.email}/{basename}`).
+    let target_slash = match target_arg {
+        Some(t) => t,
+        None => {
+            let basename = source_path.last().unwrap_or("forked");
+            let base = format!("{}/{}", user.email, basename);
+            let mut candidate = base.clone();
+            let mut i = 2;
+            while tree_root.join(&candidate).exists() {
+                candidate = format!("{}-{}", base, i);
+                i += 1;
+                if i > 100 {
+                    return Err(JsonRpcError {
+                        code: -32000,
+                        message: "fork_collision: could not find a free target path; pass `target` explicitly".into(),
+                    });
+                }
+            }
+            candidate
+        }
+    };
+    let target_path: crate::path::TreePath =
+        target_slash.parse().map_err(|e: crate::path::PathError| JsonRpcError {
+            code: -32602,
+            message: format!("invalid 'target': {e}"),
+        })?;
+
+    // Write access on target.
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(
+            user,
+            &target_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &target_slash),
+        )
+        .await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", target_slash),
+            });
+        }
+    }
+
+    // Refuse session exoms.
+    let source_disk = source_path.to_disk_path(tree_root);
+    let source_meta = match crate::exom::read_meta(&source_disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("no_such_exom: {}", source_slash),
+            });
+        }
+        Err(e) => {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: e.to_string(),
+            });
+        }
+    };
+    if source_meta.kind == crate::exom::ExomKind::Session {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "fork_session_unsupported: session exoms cannot be forked; fork the parent project's main instead".into(),
+        });
+    }
+
+    let target_disk = target_path.to_disk_path(tree_root);
+    if target_disk.exists() {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("target_exists: {}", target_slash),
+        });
+    }
+
+    // Phase 1: ensure the source exom is loaded into memory + bound. Done
+    // synchronously so we never hold a MutexGuard across an .await (axum
+    // handlers must be Send; std::sync::Mutex isn't Send-safe across awaits).
+    let source_loaded = {
+        let exoms = state.exoms.lock().unwrap();
+        exoms.contains_key(&source_slash)
+    };
+    if !source_loaded {
+        let sym_path = state.sym_path.as_deref().ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: "daemon has no sym_path configured".into(),
+        })?;
+        let es_loaded = crate::server::load_exom_from_tree_path(
+            &source_disk,
+            sym_path,
+            &source_slash,
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("source_load_failed: {e}"),
+        })?;
+        state
+            .engine
+            .bind_named_db(crate::storage::sym_intern(&source_slash), &es_loaded.datoms)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("source_bind_failed: {e}"),
+            })?;
+        state.exoms.lock().unwrap().insert(source_slash.clone(), es_loaded);
+    }
+
+    // Phase 2: snapshot source facts + tip tx under a short-lived lock.
+    let (snapshot, source_tip_tx) = {
+        let exoms = state.exoms.lock().unwrap();
+        let es = exoms.get(&source_slash).ok_or_else(|| JsonRpcError {
+            code: -32000,
+            message: format!("source unexpectedly missing after load: {}", source_slash),
+        })?;
+        let tip = es
+            .brain
+            .current_facts()
+            .iter()
+            .map(|f| f.created_by_tx as u64)
+            .max()
+            .unwrap_or(0);
+        let snap: Vec<(String, String, crate::fact_value::FactValue, f64, String, String, Option<String>)> =
+            es.brain
+                .current_facts()
+                .iter()
+                .map(|f| {
+                    (
+                        f.fact_id.clone(),
+                        f.predicate.clone(),
+                        f.value.clone(),
+                        f.confidence,
+                        f.provenance.clone(),
+                        f.valid_from.clone(),
+                        f.valid_to.clone(),
+                    )
+                })
+                .collect();
+        (snap, tip)
+        // MutexGuard drops here at end of block, before the .await below.
+    };
+
+    // Phase 3: create target + replay facts. Async; lock-free.
+    let copied = build_fork_lineage_and_replay(
+        state,
+        user,
+        args,
+        &source_slash,
+        &target_path,
+        &target_slash,
+        &target_disk,
+        source_tip_tx,
+        snapshot,
+    )
+    .await?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "source": source_slash,
+        "target": target_slash,
+        "copied_facts": copied,
+        "forked_from": {
+            "source_path": source_slash,
+            "source_tx_id": source_tip_tx,
+        }
+    })
+    .to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_fork_lineage_and_replay(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+    source_slash: &str,
+    target_path: &crate::path::TreePath,
+    target_slash: &str,
+    target_disk: &std::path::Path,
+    source_tip_tx: u64,
+    snapshot: Vec<(String, String, crate::fact_value::FactValue, f64, String, String, Option<String>)>,
+) -> Result<usize, JsonRpcError> {
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    crate::scaffold::new_bare_exom(tree_root, target_path, &user.email).map_err(|e| {
+        JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        }
+    })?;
+
+    let lineage = crate::exom::ForkLineage {
+        source_path: source_slash.to_string(),
+        source_tx_id: source_tip_tx,
+        forked_at: crate::exom::now_iso8601_basic(),
+    };
+    if let Ok(mut tmeta) = crate::exom::read_meta(target_disk) {
+        tmeta.forked_from = Some(lineage);
+        let _ = crate::exom::write_meta(target_disk, &tmeta);
+    }
+
+    let ctx = mcp_mutation_ctx(user, args);
+    let mut copied = 0usize;
+    for (fact_id, predicate, value, confidence, provenance, valid_from, valid_to) in
+        snapshot.into_iter()
+    {
+        let target = target_slash.to_string();
+        let ctx_cloned = ctx.clone();
+        let r = crate::server::mutate_exom_async(state, &target, move |ex| {
+            ex.brain.assert_fact(
+                &fact_id,
+                &predicate,
+                value,
+                confidence,
+                &provenance,
+                Some(valid_from.as_str()),
+                valid_to.as_deref(),
+                &ctx_cloned,
+            )
+        })
+        .await;
+        if r.is_ok() {
+            copied += 1;
+        }
+    }
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(copied)
 }
 
 async fn tool_tree(
