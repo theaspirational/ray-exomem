@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -86,6 +87,10 @@ pub struct AppState {
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
     pub bind_addr: Option<String>,
+    /// When `Some`, exposes a loopback-only `GET /auth/dev-login` route that
+    /// mints a session for this email without OAuth. Set via the `--dev-login-email`
+    /// flag on `serve`. Refuses to start if the bind address is non-loopback.
+    pub dev_login_email: Option<String>,
 }
 
 impl AppState {
@@ -106,6 +111,7 @@ impl AppState {
             auth_store: None,
             auth_provider: None,
             bind_addr: None,
+            dev_login_email: None,
         }
     }
 
@@ -349,6 +355,8 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/welcome/summary", get(api_welcome_summary))
         .route("/guide", get(api_guide))
         .route("/actions/init", post(api_init))
+        .route("/actions/folder-new", post(api_folder_new))
+        .route("/actions/delete", post(api_delete))
         .route("/actions/exom-new", post(api_exom_new))
         .route("/actions/session-new", post(api_session_new))
         .route("/actions/session-join", post(api_session_join))
@@ -570,7 +578,11 @@ pub async fn serve(bind: &str, state: Arc<AppState>) -> anyhow::Result<()> {
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1432,6 +1444,97 @@ async fn api_init(
         }
         Err(e) => ApiError::from(e).into_response(),
     }
+}
+
+async fn api_folder_new(
+    State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
+    Json(body): Json<PathBody>,
+) -> impl IntoResponse {
+    let path_str = body.path.unwrap_or_default();
+    let path: crate::path::TreePath = match path_str.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
+    };
+    let path_slash = path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash).await {
+        return resp;
+    }
+    let tree_root = server_tree_root(&state);
+    match crate::scaffold::new_folder(&tree_root, &path) {
+        Ok(()) => {
+            emit_tree_changed(&state);
+            Json(serde_json::json!({"ok": true, "path": path.to_slash_string()})).into_response()
+        }
+        Err(e) => ApiError::from(e).into_response(),
+    }
+}
+
+async fn api_delete(
+    State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
+    Json(body): Json<PathBody>,
+) -> impl IntoResponse {
+    let path_str = body.path.unwrap_or_default();
+    let path: crate::path::TreePath = match path_str.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_path", e.to_string()).into_response(),
+    };
+    if state.auth_store.is_some() && path.len() == 1 {
+        return ApiError::new(
+            "namespace_root_immutable",
+            "cannot delete a top-level namespace root",
+        )
+        .with_status(403)
+        .into_response();
+    }
+    let path_slash = path.to_slash_string();
+    if let Some(resp) = guard_write(&state, &maybe_user, &path_slash).await {
+        return resp;
+    }
+    let tree_root = server_tree_root(&state);
+
+    let exoms_under = match crate::scaffold::collect_exoms_under(&tree_root, &path) {
+        Ok(v) => v,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+
+    // Drop in-memory ExomState entries for everything we're about to remove.
+    // Hold the guard only for the structural mutation; reconcile_engine and
+    // the disk delete run after so the lock isn't held across IO.
+    {
+        let mut exoms = state.exoms.lock().unwrap();
+        for slash in &exoms_under {
+            exoms.remove(slash);
+        }
+    }
+
+    if let Err(e) = crate::scaffold::delete_subtree(&tree_root, &path) {
+        // Engine bindings are now stale w.r.t. what's still on disk, but
+        // reconcile will rebind only what remains in `state.exoms`. Forcing
+        // a reconcile here keeps the engine consistent with the in-memory map.
+        let exoms = state.exoms.lock().unwrap();
+        reconcile_engine(&state, &exoms);
+        return ApiError::from(e).into_response();
+    }
+
+    {
+        let exoms = state.exoms.lock().unwrap();
+        reconcile_engine(&state, &exoms);
+    }
+
+    if let Some(ref auth_store) = state.auth_store {
+        auth_store.delete_shares_under(&path_slash).await;
+    }
+
+    emit_tree_changed(&state);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "deleted": path_slash,
+        "removed_exoms": exoms_under,
+    }))
+    .into_response()
 }
 
 async fn api_exom_new(

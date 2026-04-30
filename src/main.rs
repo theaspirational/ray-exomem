@@ -403,6 +403,14 @@ enum Commands {
         /// PostgreSQL connection URL. When set, auth (users, sessions, API keys, shares) is stored in Postgres instead of auth.jsonl. Exom data always lives in local splay tables.
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
+
+        /// Dev-only: bypass OAuth and auto-login as this email when the user
+        /// hits `GET /auth/dev-login`. Loopback-only at the route layer; the
+        /// daemon refuses to start unless `--bind` is on a loopback address
+        /// and `--auth-provider` is set. Use solely for local UI dev where
+        /// Google's GSI flow is blocked (e.g. automated browsers).
+        #[arg(long, env = "RAY_EXOMEM_DEV_LOGIN_EMAIL")]
+        dev_login_email: Option<String>,
     },
 
     /// Stop a running daemon.
@@ -1467,7 +1475,26 @@ fn main() {
             google_client_id,
             allowed_domains,
             database_url,
+            dev_login_email,
         } => {
+            if let Some(ref email) = dev_login_email {
+                if auth_provider.is_none() {
+                    eprintln!(
+                        "error: --dev-login-email requires --auth-provider (the dev-login route mints a real session and needs the auth store)"
+                    );
+                    std::process::exit(1);
+                }
+                if !bind.ip().is_loopback() {
+                    eprintln!(
+                        "error: --dev-login-email is only allowed when --bind is on a loopback address (got {})",
+                        bind.ip()
+                    );
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "[ray-exomem] WARNING: dev-login enabled for {email}. Anyone who can reach this daemon's loopback /auth/dev-login will be logged in as that user. Use only for local dev."
+                );
+            }
             let resolved_data_dir = if no_persist {
                 None
             } else {
@@ -1585,6 +1612,7 @@ fn main() {
                 s.auth_store = Some(store);
                 s.auth_provider = Some(provider);
                 s.bind_addr = Some(bind.to_string());
+                s.dev_login_email = dev_login_email.clone();
             }
 
             eprintln!(
@@ -3423,6 +3451,7 @@ mod tests {
                 google_client_id,
                 allowed_domains,
                 database_url,
+                dev_login_email,
             } => {
                 assert_eq!(bind.to_string(), ray_exomem::server::DEFAULT_BIND_ADDR);
                 assert!(ui_dir.is_none());
@@ -3432,6 +3461,7 @@ mod tests {
                 assert!(google_client_id.is_none());
                 assert!(allowed_domains.is_none());
                 assert!(database_url.is_none());
+                assert!(dev_login_email.is_none());
             }
             _ => panic!("expected serve command"),
         }

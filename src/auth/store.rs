@@ -1170,6 +1170,52 @@ impl AuthStore {
         removed
     }
 
+    /// Revoke every share grant whose path is the given prefix or lives
+    /// underneath it. Used when a folder/exom is deleted so dangling
+    /// shares don't survive their resource. Returns the number of grants
+    /// removed.
+    pub async fn delete_shares_under(&self, path_prefix: &str) -> usize {
+        let prefix_slash = format!("{}/", path_prefix);
+        if let Some(ref db) = self.auth_db {
+            let all = match db.list_all_shares().await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("auth: delete_shares_under list: {e}");
+                    return 0;
+                }
+            };
+            let mut removed = 0;
+            for grant in all {
+                if grant.path == path_prefix || grant.path.starts_with(&prefix_slash) {
+                    match db.revoke_share(&grant.share_id).await {
+                        Ok(true) => removed += 1,
+                        Ok(false) => {}
+                        Err(e) => eprintln!("auth: delete_shares_under revoke {}: {e}", grant.share_id),
+                    }
+                }
+            }
+            return removed;
+        }
+        let mut grants = self.share_grants.lock().unwrap();
+        let before = grants.len();
+        let mut removed_ids: Vec<String> = Vec::new();
+        grants.retain(|g| {
+            let hit = g.path == path_prefix || g.path.starts_with(&prefix_slash);
+            if hit {
+                removed_ids.push(g.share_id.clone());
+            }
+            !hit
+        });
+        let removed_count = before - grants.len();
+        drop(grants);
+
+        for share_id in &removed_ids {
+            let entry = serde_json::json!({ "kind": "share-revoke", "share_id": share_id });
+            let _ = self.append_entry(&entry);
+        }
+        removed_count
+    }
+
     /// Add an allowed domain (persists to JSONL).
     pub async fn add_domain(&self, domain: &str) {
         if let Some(ref db) = self.auth_db {
