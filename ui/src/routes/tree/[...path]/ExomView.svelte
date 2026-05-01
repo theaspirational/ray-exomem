@@ -228,17 +228,7 @@
 		return list[0].name === 'main' || list[0].is_current;
 	}
 
-	const kindLabel = $derived(
-		node.exom_kind === 'project-main'
-			? 'project-main'
-			: node.exom_kind === 'session'
-				? 'session'
-				: node.exom_kind === 'bare'
-					? 'bare'
-					: node.exom_kind
-	);
-
-		function onUnarchive() {
+	function onUnarchive() {
 		actorPrompt.run(async () => {
 			unarchiveBusy = true;
 			try {
@@ -333,7 +323,6 @@
 	<header class="space-y-3">
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<div class="flex flex-wrap items-center gap-2 text-xs">
-				<Badge variant="secondary" class="text-[10px] capitalize text-foreground">{kindLabel}</Badge>
 				{#if aclMode === 'co-edit'}
 					<Badge
 						variant="outline"
