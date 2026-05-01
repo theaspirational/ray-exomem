@@ -1,10 +1,10 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { Calendar, GitBranch, Route, Search } from '@lucide/svelte';
+	import { Calendar, Search } from '@lucide/svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
-	import { exportBackupText, fetchExomemStatus, parseFactsFromExport } from '$lib/exomem.svelte';
+	import { exportBackupText, parseFactsFromExport } from '$lib/exomem.svelte';
 	import type { FactEntry } from '$lib/types';
 
 	let { exomPath, notebookMode = false }: { exomPath: string; notebookMode?: boolean } = $props();
@@ -12,7 +12,6 @@
 	const INITIAL_TIMELINE_LIMIT = 20;
 
 	let facts = $state<FactEntry[]>([]);
-	let currentBranch = $state('main');
 	let loading = $state(true);
 	let searchQuery = $state('');
 	let showAllTimeline = $state(false);
@@ -49,16 +48,6 @@
 		Math.max(0, sortedFilteredFacts.length - visibleFacts.length)
 	);
 
-	const branchRoleCounts = $derived({
-		local: temporalFacts.filter((f) => f.branchRole === 'local').length,
-		inherited: temporalFacts.filter((f) => f.branchRole === 'inherited').length,
-		override: temporalFacts.filter((f) => f.branchRole === 'override').length
-	});
-
-	const openEndedCount = $derived(
-		temporalFacts.filter((f) => !f.validTo).length
-	);
-
 	const timelineGroups = $derived.by(() => {
 		const groups: Array<[string, FactEntry[]]> = [];
 		for (const fact of visibleFacts) {
@@ -75,15 +64,10 @@
 		loading = true;
 		showAllTimeline = false;
 		try {
-			const [dlText, status] = await Promise.all([
-				exportBackupText(exomPath),
-				fetchExomemStatus(exomPath)
-			]);
+			const dlText = await exportBackupText(exomPath);
 			facts = parseFactsFromExport(dlText);
-			currentBranch = status.current_branch ?? 'main';
 		} catch {
 			facts = [];
-			currentBranch = 'main';
 		} finally {
 			loading = false;
 		}
@@ -100,46 +84,6 @@
 	<p class="font-serif text-sm text-muted-foreground">No changes recorded yet.</p>
 {:else}
 <div class="flex flex-col gap-4">
-	<div class="grid gap-3 xl:grid-cols-4">
-		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
-			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Current branch</p>
-			<p class="mt-1 font-mono text-lg font-semibold">{currentBranch}</p>
-			<p class="mt-1 text-xs text-muted-foreground">Visibility scope for the exported fact set.</p>
-		</div>
-		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
-			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Open-ended facts</p>
-			<p class="mt-1 text-lg font-semibold">{openEndedCount}</p>
-			<p class="mt-1 text-xs text-muted-foreground">Facts still valid with no explicit end date.</p>
-		</div>
-		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
-			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Inherited visibility</p>
-			<p class="mt-1 text-lg font-semibold">{branchRoleCounts.inherited}</p>
-			<p class="mt-1 text-xs text-muted-foreground">Facts visible from ancestor branches.</p>
-		</div>
-		<div class="rounded-lg border border-border/60 bg-card px-4 py-3">
-			<p class="text-[0.65rem] uppercase tracking-wide text-muted-foreground">Override/local</p>
-			<p class="mt-1 text-lg font-semibold">{branchRoleCounts.override + branchRoleCounts.local}</p>
-			<p class="mt-1 text-xs text-muted-foreground">Facts asserted or overridden in the active branch.</p>
-		</div>
-	</div>
-
-	<div class="rounded-lg border border-border/60 bg-card p-4">
-		<div class="flex items-center justify-between gap-3">
-			<div>
-				<h2 class="text-sm font-medium text-muted-foreground">Visibility model</h2>
-				<p class="mt-1 text-sm text-foreground">
-					Timeline cards expose branch role and branch origin so you can tell whether a visible fact is local, inherited, or overriding ancestor history.
-				</p>
-			</div>
-			<Route class="size-4 text-muted-foreground" />
-		</div>
-		<div class="mt-3 flex flex-wrap gap-2">
-			<Badge variant="outline" class="h-5 px-2 text-[0.65rem]"><GitBranch class="mr-1 size-3" /> local {branchRoleCounts.local}</Badge>
-			<Badge variant="outline" class="h-5 px-2 text-[0.65rem]"><GitBranch class="mr-1 size-3" /> inherited {branchRoleCounts.inherited}</Badge>
-			<Badge variant="outline" class="h-5 px-2 text-[0.65rem]"><GitBranch class="mr-1 size-3" /> override {branchRoleCounts.override}</Badge>
-		</div>
-	</div>
-
 	<div class="flex flex-col gap-3 sm:flex-row sm:items-center">
 		<div class="relative flex-1 max-w-md">
 			<Search class="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />

@@ -51,11 +51,11 @@
 	} = $props();
 
 	const railSections = [
+		{ id: 'branches', label: 'Branches' },
+		{ id: 'connections', label: 'Connections' },
 		{ id: 'facts', label: 'Facts' },
 		{ id: 'timeline', label: 'Timeline' },
-		{ id: 'branches', label: 'Branches' },
-		{ id: 'rules', label: 'Rules' },
-		{ id: 'connections', label: 'Connections' }
+		{ id: 'rules', label: 'Rules' }
 	];
 
 	function factGroupKey(f: FactEntry): string {
@@ -313,6 +313,9 @@
 		const owner = node.created_by || 'the creator';
 		return `solo-edit · only ${owner} writes the trunk`;
 	});
+
+	const hasHeaderActions = $derived(canFork || showUnarchive || canFlipMode);
+	const hasStatusBadges = $derived(aclMode === 'co-edit' || node.archived || node.closed);
 </script>
 
 <div
@@ -320,9 +323,9 @@
 	class:opacity-60={contentDimmed}
 	data-read-only={readOnly ? 'true' : undefined}
 >
-	<header class="space-y-3">
-		<div class="flex flex-wrap items-center justify-between gap-2">
-			<div class="flex flex-wrap items-center gap-2 text-xs">
+	<header class="relative space-y-3">
+		{#if hasStatusBadges}
+			<div class="flex flex-wrap items-center gap-2 pr-32 text-xs">
 				{#if aclMode === 'co-edit'}
 					<Badge
 						variant="outline"
@@ -337,61 +340,64 @@
 					<Badge variant="outline" class="border-destructive/50 text-destructive">closed</Badge>
 				{/if}
 			</div>
-			{#if canFork || showUnarchive || canFlipMode}
-				<div class="flex items-center gap-2">
-					{#if canFlipMode}
-						<Button
-							size="sm"
-							variant="outline"
-							disabled={modeFlipBusy}
-							onclick={() => void onFlipMode()}
-							title={aclMode === 'co-edit'
-								? 'Switch to solo-edit (only you write main)'
-								: 'Switch to co-edit (anyone with access writes main)'}
-						>
-							{#if modeFlipBusy}
-								<Loader2 class="mr-1 size-3 animate-spin" />
-							{/if}
-							Switch to {aclMode === 'co-edit' ? 'solo-edit' : 'co-edit'}
-						</Button>
-					{/if}
-					{#if canFork}
-						<Button
-							size="sm"
-							variant="secondary"
-							disabled={forkBusy}
-							onclick={() => void onFork()}
-							title="Fork into your namespace"
-						>
-							{#if forkBusy}
-								<Loader2 class="mr-1 size-3 animate-spin" />
-							{:else}
-								<GitFork class="mr-1 size-3" />
-							{/if}
-							Fork
-						</Button>
-					{/if}
-					{#if showUnarchive}
-						<Button
-							size="sm"
-							variant="secondary"
-							disabled={unarchiveBusy}
-							onclick={() => void onUnarchive()}
-						>
-							{#if unarchiveBusy}
-								<Loader2 class="mr-1 size-3 animate-spin" />
-							{/if}
-							Unarchive
-						</Button>
-					{/if}
-				</div>
-			{/if}
-		</div>
-		<p class="font-mono text-[11px] text-muted-foreground">
+		{/if}
+		{#if hasHeaderActions}
+			<div class="absolute right-0 top-0 flex items-center gap-2">
+				{#if canFlipMode}
+					<Button
+						size="sm"
+						variant="outline"
+						disabled={modeFlipBusy}
+						onclick={() => void onFlipMode()}
+						title={aclMode === 'co-edit'
+							? 'Switch to solo-edit (only you write main)'
+							: 'Switch to co-edit (anyone with access writes main)'}
+					>
+						{#if modeFlipBusy}
+							<Loader2 class="mr-1 size-3 animate-spin" />
+						{/if}
+						Switch to {aclMode === 'co-edit' ? 'solo-edit' : 'co-edit'}
+					</Button>
+				{/if}
+				{#if canFork}
+					<Button
+						size="sm"
+						variant="secondary"
+						disabled={forkBusy}
+						onclick={() => void onFork()}
+						title="Fork into your namespace"
+					>
+						{#if forkBusy}
+							<Loader2 class="mr-1 size-3 animate-spin" />
+						{:else}
+							<GitFork class="mr-1 size-3" />
+						{/if}
+						Fork
+					</Button>
+				{/if}
+				{#if showUnarchive}
+					<Button
+						size="sm"
+						variant="secondary"
+						disabled={unarchiveBusy}
+						onclick={() => void onUnarchive()}
+					>
+						{#if unarchiveBusy}
+							<Loader2 class="mr-1 size-3 animate-spin" />
+						{/if}
+						Unarchive
+					</Button>
+				{/if}
+			</div>
+		{/if}
+		<p class="font-mono text-[11px] text-muted-foreground" class:pr-32={hasHeaderActions}>
 			{modeStripBlurb}
 		</p>
 
-		<div class="font-mono text-[11px] leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+		<div
+			class="font-mono text-[11px] leading-relaxed text-muted-foreground [overflow-wrap:anywhere]"
+			class:pr-32={hasHeaderActions}
+		>
 			{node.path.split('/').filter(Boolean).join('/')}
 		</div>
 		<h1 class="font-serif text-3xl text-foreground">{titleText}</h1>
@@ -419,34 +425,6 @@
 		class="flex flex-col gap-6 md:grid md:grid-cols-[1fr_minmax(140px,160px)] md:items-start"
 	>
 		<article class="order-2 min-w-0 space-y-0 md:order-1 md:col-start-1 md:row-start-1">
-			<NotebookSection id="facts" title="Facts">
-				{#if sessionModes}
-					<SessionFactsPanel exomPath={node.path} />
-				{:else if factsLoading}
-					<LoadingState message="Loading facts…" />
-				{:else if factsErr}
-					<ErrorState
-						message={factsErr}
-						onRetry={() => {
-							factsErr = null;
-							factsRetry++;
-						}}
-					/>
-				{:else if bodyFacts.length === 0}
-					<p class="font-serif text-sm text-muted-foreground">This exom has no facts yet.</p>
-				{:else}
-					<div class="space-y-4">
-						{#each entityGroups as [ek, fgs] (ek)}
-							<NotebookEntity entityKey={ek} facts={fgs} exomPath={node.path} />
-						{/each}
-					</div>
-				{/if}
-			</NotebookSection>
-
-			<NotebookSection id="timeline" title="Timeline">
-				<TimelinePanel exomPath={node.path} notebookMode />
-			</NotebookSection>
-
 			<NotebookSection id="branches" title="Branches">
 				{#if branchesLoading}
 					<LoadingState message="Loading branches…" />
@@ -484,10 +462,6 @@
 				{/if}
 			</NotebookSection>
 
-			<NotebookSection id="rules" title="Rules">
-				<RulesPanel exomPath={node.path} />
-			</NotebookSection>
-
 			<NotebookSection id="connections" title="Connections">
 				{#if graphLoaded && graphEdges === 0}
 					<p class="mb-3 font-serif text-sm text-muted-foreground">
@@ -498,6 +472,38 @@
 					</p>
 				{/if}
 				<GraphPanel exomPath={node.path} />
+			</NotebookSection>
+
+			<NotebookSection id="facts" title="Facts">
+				{#if sessionModes}
+					<SessionFactsPanel exomPath={node.path} />
+				{:else if factsLoading}
+					<LoadingState message="Loading facts…" />
+				{:else if factsErr}
+					<ErrorState
+						message={factsErr}
+						onRetry={() => {
+							factsErr = null;
+							factsRetry++;
+						}}
+					/>
+				{:else if bodyFacts.length === 0}
+					<p class="font-serif text-sm text-muted-foreground">This exom has no facts yet.</p>
+				{:else}
+					<div class="space-y-4">
+						{#each entityGroups as [ek, fgs] (ek)}
+							<NotebookEntity entityKey={ek} facts={fgs} exomPath={node.path} />
+						{/each}
+					</div>
+				{/if}
+			</NotebookSection>
+
+			<NotebookSection id="timeline" title="Timeline">
+				<TimelinePanel exomPath={node.path} notebookMode />
+			</NotebookSection>
+
+			<NotebookSection id="rules" title="Rules">
+				<RulesPanel exomPath={node.path} />
 			</NotebookSection>
 		</article>
 
