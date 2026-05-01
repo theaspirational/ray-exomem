@@ -2,16 +2,20 @@
 	import { browser } from '$app/environment';
 	import { Calendar, GitBranch, Route, Search } from '@lucide/svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
+	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { exportBackupText, fetchExomemStatus, parseFactsFromExport } from '$lib/exomem.svelte';
 	import type { FactEntry } from '$lib/types';
 
 	let { exomPath, notebookMode = false }: { exomPath: string; notebookMode?: boolean } = $props();
 
+	const INITIAL_TIMELINE_LIMIT = 20;
+
 	let facts = $state<FactEntry[]>([]);
 	let currentBranch = $state('main');
 	let loading = $state(true);
 	let searchQuery = $state('');
+	let showAllTimeline = $state(false);
 
 	const temporalFacts = $derived(
 		facts.filter((f) => f.validFrom != null)
@@ -29,6 +33,22 @@
 		);
 	});
 
+	function compareTimelineFactsNewestFirst(a: FactEntry, b: FactEntry): number {
+		return (b.validFrom ?? '').localeCompare(a.validFrom ?? '');
+	}
+
+	const sortedFilteredFacts = $derived(
+		filteredFacts.slice().sort(compareTimelineFactsNewestFirst)
+	);
+
+	const visibleFacts = $derived(
+		showAllTimeline ? sortedFilteredFacts : sortedFilteredFacts.slice(0, INITIAL_TIMELINE_LIMIT)
+	);
+
+	const hiddenTimelineCount = $derived(
+		Math.max(0, sortedFilteredFacts.length - visibleFacts.length)
+	);
+
 	const branchRoleCounts = $derived({
 		local: temporalFacts.filter((f) => f.branchRole === 'local').length,
 		inherited: temporalFacts.filter((f) => f.branchRole === 'inherited').length,
@@ -40,19 +60,20 @@
 	);
 
 	const timelineGroups = $derived.by(() => {
-		const groups = new Map<string, FactEntry[]>();
-		for (const fact of filteredFacts) {
+		const groups: Array<[string, FactEntry[]]> = [];
+		for (const fact of visibleFacts) {
 			const from = fact.validFrom ?? 'unknown';
 			const key = from.includes('T') ? from.split('T')[0] : from;
-			const existing = groups.get(key);
-			if (existing) existing.push(fact);
-			else groups.set(key, [fact]);
+			const existing = groups.find(([date]) => date === key);
+			if (existing) existing[1].push(fact);
+			else groups.push([key, [fact]]);
 		}
-		return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+		return groups.sort(([a], [b]) => b.localeCompare(a));
 	});
 
 	async function loadTimeline() {
 		loading = true;
+		showAllTimeline = false;
 		try {
 			const [dlText, status] = await Promise.all([
 				exportBackupText(exomPath),
@@ -183,6 +204,19 @@
 				</div>
 			{/each}
 		</div>
+		{#if hiddenTimelineCount > 0}
+			<div class="flex justify-center pt-2">
+				<Button variant="outline" size="sm" onclick={() => (showAllTimeline = true)}>
+					Show all {sortedFilteredFacts.length} timeline events
+				</Button>
+			</div>
+		{:else if showAllTimeline && sortedFilteredFacts.length > INITIAL_TIMELINE_LIMIT}
+			<div class="flex justify-center pt-2">
+				<Button variant="outline" size="sm" onclick={() => (showAllTimeline = false)}>
+					Show latest {INITIAL_TIMELINE_LIMIT}
+				</Button>
+			</div>
+		{/if}
 	{/if}
 </div>
 {/if}
