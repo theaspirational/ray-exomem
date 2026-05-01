@@ -33,6 +33,45 @@ changes, and multi-agent coordination.
 Fresh persistent state starts empty. Create exoms explicitly with `init` or `exom-new`, or enable auth and
 let first login seed `{email}/main`.
 
+### Permissions and `acl_mode`
+
+Each exom carries an `acl_mode` (`solo-edit` (default) or `co-edit`) that
+combines with the namespace to produce the write policy:
+
+- `public/...` solo-edit → Model A: read-for-all, write-for-creator. Forking
+  is the contribution path.
+- `public/...` co-edit → Wikipedia-style commons: any authenticated user
+  in the allowed domain can write to the shared `main` trunk.
+- `{email}/...` solo-edit → owner-only writes; sharing reads requires an
+  explicit share grant.
+- `{email}/...` co-edit → grantees with any share can write to the shared
+  trunk (the share's `permission` field becomes informational).
+
+Auth and branch-claim (TOFU) are independent decisions: co-edit short-circuits
+TOFU **only on `main`**; non-`main` branches keep first-writer-wins. Sessions
+are always solo-edit and rejected by `exom-mode` flips
+(`acl_mode_not_applicable`). Forking always produces a solo-edit exom owned
+by the forker, regardless of the source's mode.
+
+`init` and `exom-new` accept an optional `acl_mode` field at creation time;
+the creator can flip the mode later via `POST /api/actions/exom-mode`
+(creator-only — others get 403 `not_creator`).
+
+### Forks
+
+`POST /api/actions/exom-fork { source, target? }` (and the matching MCP
+`exom_fork` tool) copies the currently-active facts of `source` into a new
+exom owned by the forker, with `forked_from = { source_path, source_tx_id,
+forked_at }` stamped on the target's meta and every replayed fact attributed
+to the forker. The default `target` is `{your_email}/forked/<source-subpath>`:
+
+- `public/X/Y/Z` → `{your_email}/forked/X/Y/Z`
+- `{other_email}/X/Y` → `{your_email}/forked/{other_email}/X/Y`
+
+When the default is taken, the leaf segment is auto-suffixed (`-2`, `-3`, …
+up to 100). Session exoms cannot be forked (`fork_session_unsupported`); fork
+the parent project's `main` instead.
+
 Path forms:
 
 ```text
@@ -255,8 +294,10 @@ Canonical API routes:
 - `GET /api/tree`
 - `GET /api/welcome/summary`
 - `GET /api/guide`
-- `POST /api/actions/init`
-- `POST /api/actions/exom-new`
+- `POST /api/actions/init` (accepts `acl_mode`)
+- `POST /api/actions/exom-new` (accepts `acl_mode`)
+- `POST /api/actions/exom-fork` (Model A contribution path; default target `{user_email}/forked/<source-subpath>`, auto-suffixed on collision)
+- `POST /api/actions/exom-mode` (creator-only `solo-edit` ↔ `co-edit` flip; rejected on session exoms)
 - `POST /api/actions/session-new`
 - `POST /api/actions/session-join`
 - `POST /api/actions/branch-create`
@@ -292,9 +333,15 @@ Canonical API routes:
 - `GET /api/beliefs/{id}/support`
 
 The embedded UI is served by the same daemon and includes tree, exom, query,
-graph, guide, login, profile, and admin surfaces. Server-Sent Events stream from
-`/events`. The MCP Streamable HTTP endpoint is `/mcp`; `/mcp/sse` is an alias
-for MCP clients whose configuration examples use an `/sse`-suffixed URL.
+graph, guide, login, profile, and admin surfaces. The sidebar groups exoms
+into three sections in concentric-circles order: **PERSONAL** (`{email}/*`),
+**SHARED** (explicit share grants from other users, displayed as
+`{owner_email}/path/...`), and **PUBLIC** (`public/*`). Co-edit exoms get a
+`co-edit` badge in the tree and a header strip in the exom view; the
+creator sees a "Switch to {mode}" button there. Server-Sent Events stream
+from `/events`. The MCP Streamable HTTP endpoint is `/mcp`; `/mcp/sse` is
+an alias for MCP clients whose configuration examples use an `/sse`-suffixed
+URL.
 
 ## Auth and Local Development
 
@@ -327,6 +374,30 @@ Postgres.
 `ray-exomem daemon` currently does not expose the auth provider flags. Use
 foreground `serve` for authenticated development and deployment until that is
 wired through.
+
+### Multi-user dev via loopback dev-login
+
+For two-user (or N-user) local testing without juggling separate OAuth
+sessions, pass `--dev-login-email` (repeatable, or comma-separated, or set
+`RAY_EXOMEM_DEV_LOGIN_EMAIL`) on `serve`. The flag is **only honoured on
+loopback binds** (`127.0.0.1`, `[::1]`) and **requires `--auth-provider`**
+(the route mints a real session against the auth store). Each listed email
+becomes a permitted identity:
+
+```bash
+ray-exomem serve --bind 127.0.0.1:9780 \
+  --auth-provider google --google-client-id "$GOOGLE_CLIENT_ID" \
+  --allowed-domains "$ALLOWED_DOMAINS" --database-url "$DATABASE_URL" \
+  --dev-login-email user1@example.com \
+  --dev-login-email user2@example.com
+```
+
+Hitting `GET /auth/dev-login` (no params) logs in as the first allow-listed
+email; `GET /auth/dev-login?email=user2@example.com` logs in as the named
+user. Non-allow-listed emails return 400 `email_not_allowed`. Combined with
+Chrome's `isolatedContext` (or two browser profiles), this gives clean
+cookie-isolated sessions for cross-user permission/sharing/co-edit testing
+without running multiple daemons.
 
 ## Attribution Model
 

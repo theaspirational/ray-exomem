@@ -4,106 +4,75 @@
 - **Started:** `<UTC-ISO>`
 - **Finished:** `<UTC-ISO>`
 - **Base URL:** `<base_url>`
+- **user1 email:** `<user1_email>` *(orchestrator)*
+- **user2 email:** `<user2_email>` *(cross-user; from `--dev-login-email` allow-list)*
 - **Build identity:** `<n/a from MCP-only run — /api/status requires bearer/cookie auth and the MCP guide() tool doesn't expose it; if a build identity is needed, fetch /api/status out-of-band with a bearer token>`
-- **Scratch session:** `<session-path>`
-- **Flags:** `--with-team=<bool>` `--with-collision-user=<bool>` `--with-admin-probes=<bool>` `--scratch=<public|private>`
+- **Scratch (private):** `<scratch_project>` *(Phase 1+2)*
+- **Scratch (public):** `<public_scratch>` *(Phase 3)*
+- **Session:** `<session>`
+- **Flags:** `--no-cross-user=<bool>` `--with-team=<bool>` `--with-admin-probes=<bool>` `--scratch=<public|private>`
 
 ## Matrix
 
-| Chapter | Scenario                                  | Status      | Evidence                                                  |
-|---------|-------------------------------------------|-------------|-----------------------------------------------------------|
-| Ch01    | MCP surface complete                      | <pass/fail> | tools/list contains init / exom_new / exom_fork / tree / merge_branch / archive_branch (+ branch arg on query/eval) |
-| Ch01    | guide returns markdown                    | <pass/fail> | <bytes returned>                                          |
-| Ch01    | list_exoms ≥ 1                            | <pass/fail> | <count + first-3 paths>                                   |
-| Ch01    | exom_status of session                    | <pass/fail> | <{current_branch, facts, beliefs, transactions}> — expect `transactions==0` (genesis is `tx/0`, not counted) |
-| Ch01    | schema lists tx/user_email + tx-row arity | <pass/fail> | <attrs found / attrs missing> — `belief-row` is arity 4 (`?belief ?claim ?status ?tx`), `observation-row` is arity 4 (`?obs ?source_type ?content ?tx`) |
-| Ch01    | list_branches: main + 2 unclaimed agents  | <pass/fail> | <branch labels list>                                      |
-| Ch02    | I64 from JSON number                      | <pass/fail> | <fact_id>                                                 |
-| Ch02    | I64 from round-trip string                | <pass/fail> | <fact_id>                                                 |
-| Ch02    | Str from non-round-trip "007"             | <pass/fail> | <fact_id>                                                 |
-| Ch02    | Str from "+5"                             | <pass/fail> | <fact_id>                                                 |
-| Ch02    | Sym from `{"$sym":"active"}`              | <pass/fail> | <fact_id>                                                 |
-| Ch02    | facts_i64 EAV returns 2 rows              | <pass/fail> | <returned tuples>                                         |
-| Ch02    | facts_str EAV returns 2 rows              | <pass/fail> | <returned tuples>                                         |
-| Ch02    | facts_sym EAV returns 1 row               | <pass/fail> | <returned tuple>                                          |
-| Ch02    | facts_i64 cmp filter `< 100`              | <pass/fail> | <returned tuple>                                          |
-| Ch03    | backfill assert (valid_from past)         | <pass/fail> | <fact_id, tx_id>                                          |
-| Ch03    | supersede same fact_id                    | <pass/fail> | <new tx_id>                                               |
-| Ch03    | explicit valid_to                         | <pass/fail> | <tx_id, valid_to>                                         |
-| Ch03    | retract_fact                              | <pass/fail> | <retract tx_id>                                           |
-| Ch03    | fact_history shows 3 value-interval tuples| <pass/fail> | <history rows summary>                                    |
-| Ch03    | superseded_by / revoked_by back-pointers  | <pass/fail> | <T1→T2, T2→T3, T3 revoked_by=T4>                          |
-| Ch03    | valid_to chains correctly                 | <pass/fail> | <T1.valid_to == T2.valid_from; T3.valid_to == retract_t>  |
-| Ch03    | retract event in tx-log                   | <pass/fail> | <1 row, action="retract-fact">                            |
-| Ch03    | every history row carries full triple     | <pass/fail> | <user_email/agent/model presence>                         |
-| Ch04    | believe v1 with supports=[Ch02 fact]      | <pass/fail> | <belief_id>                                               |
-| Ch04    | supersede same belief_id (in-place)       | <pass/fail> | <new tx_id; belief-row claim_text now reflects new revision — view returns 1 row per belief_id, no separate "superseded" row> |
-| Ch04    | revoke_belief                             | <pass/fail> | <belief-row status="revoked">                             |
-| Ch04    | believe v2 fresh id                       | <pass/fail> | <belief-row status="active">                              |
-| Ch04    | belief/supports links to Ch02 fact        | <pass/fail> | <support tuple>                                           |
-| Ch04    | belief-row total = 2 (v1 revoked + v2 active) | <pass/fail> | <row count + statuses>                                |
-| Ch05    | observe with 3 tags                       | <pass/fail> | <obs_id>                                                  |
-| Ch05    | observe second w/ same source_type        | <pass/fail> | <obs_id>                                                  |
-| Ch05    | observation-row arity                     | <pass/fail> | <2 rows>                                                  |
-| Ch05    | obs/tag triple count                      | <pass/fail> | <3 tag rows for first obs>                                |
-| Ch05    | obs/tx recoverable                        | <pass/fail> | <both tx_ids>                                             |
-| Ch06    | create_branch feature-x                   | <pass/fail> | <branch row>                                              |
-| Ch06    | assert on feature-x                       | <pass/fail> | <fact_id, tx_id>                                          |
-| Ch06    | branch isolation: feature-x visible       | <pass/fail> | <fact returned>                                           |
-| Ch06    | branch isolation: main NOT visible        | <pass/fail> | <empty rows>                                              |
-| Ch06    | list_branches: feature-x present          | <pass/fail> | <is_current=false after cross-branch query>               |
-| Ch06    | merge feature-x → main                    | <pass/fail> | <merge tx_id, fx/marker now on main>                      |
-| Ch06    | archive feature-x                         | <pass/fail> | <branch/archived="true">                                  |
-| Ch07    | session_new single → only main            | <pass/fail> | <list_branches output>                                    |
-| Ch07    | session_close blocks writes               | <pass/fail> | <error: "session_closed">                                 |
-| Ch07    | multi-session closed_at unset → set       | <pass/fail> | <pre/post values>                                         |
-| Ch07    | bad label "/" rejected                    | <pass/fail> | <error: "invalid label">                                  |
-| Ch07    | session_join unknown agent_label          | <pass/fail> | <error: "BranchMissing">                                  |
-| Ch07    | init scaffolds project                    | <pass/fail> | <main + sessions/ in tree>                                |
-| Ch07    | exom_new creates bare exom                | <pass/fail> | <Exom node visible in tree>                               |
-| Ch08    | full triple (agent + model)               | <pass/fail> | <tx-row tuple>                                            |
-| Ch08    | no agent → API-key-label fallback         | <pass/fail> | <tx/agent value>                                          |
-| Ch08    | no model → no tx/model row                | <pass/fail> | <empty EAV vs strict tx-row>                              |
-| Ch08    | tx-row arity 8                            | <pass/fail> | <tuple width>                                             |
-| Ch10    | view: fact-row                            | <pass/fail> | <row count>                                               |
-| Ch10    | view: fact-meta                           | <pass/fail> | <row count>                                               |
-| Ch10    | view: fact-with-tx                        | <pass/fail> | <row count>                                               |
-| Ch10    | view: tx-row                              | <pass/fail> | <row count>                                               |
-| Ch10    | view: observation-row                     | <pass/fail> | <row count>                                               |
-| Ch10    | view: belief-row (= 2; Ch04 v1 revoked + v2 active, in-place supersede merges into v1) | <pass/fail> | <row count> |
-| Ch10    | view: branch-row                          | <pass/fail> | <row count>                                               |
-| Ch10    | view: claim-owner-row (?fact ?owner)      | <pass/fail> | <row count>                                               |
-| Ch10    | EDB: facts_i64 / facts_str / facts_sym    | <pass/fail> | <row counts>                                              |
-| Ch10    | explain by predicate                      | <pass/fail> | <result snippet>                                          |
-| Ch10    | explain by fact_id                        | <pass/fail> | <result snippet>                                          |
-| Ch10    | export json                               | <pass/fail> | <bytes>                                                   |
-| Ch10    | export jsonl                              | <pass/fail> | <line count>                                              |
-| Ch11    | unknown_exom                              | <pass/fail> | <error string>                                            |
-| Ch11    | unknown_branch                            | <pass/fail> | <error string>                                            |
-| Ch11    | query missing database name               | <pass/fail> | <error string>                                            |
-| Ch11    | server-side arity error                   | <pass/fail> | <error: "rule '...' expects N args, got M">               |
-| Ch11    | invalid value (array)                     | <pass/fail> | <error string>                                            |
-| Ch11    | missing required parameter                | <pass/fail> | <error: "missing required parameter: predicate">          |
-| Ch11    | empty-string predicate rejected           | <pass/fail> | <error: "invalid 'predicate': must be non-empty">         |
-| Ch11    | BranchOwned / Model A `forbidden`         | <skip/p/f>  | <error string> — Model A path covered Ch13 step 7c; legacy `branch_owned` path covered Ch09 step 5 *(needs --with-collision-user)* |
-| Ch12    | hyphen attr probe (tx/user-email = 0 rows)| <pass/fail> | <row counts>                                              |
-| Ch12    | default-fact-id supersede                 | <pass/fail> | <fact_history rows>                                       |
-| Ch12    | sym health (no domain error on query)     | <pass/fail> | <ok / RAY_ERROR text>                                     |
-| Ch12    | cache staleness post-join                 | <pass/fail> | <claim triple populated immediately>                      |
-| Ch12    | cross-branch cursor restoration           | <pass/fail> | <main is_current after non-main query>                    |
-| Ch13    | created_by stamped on fresh exom          | <pass/fail> | <created_by per scratch_bare / scratch_project/main / session> |
-| Ch13    | forked_from absent on non-fork            | <pass/fail> | <field absent in tree node JSON>                          |
-| Ch13    | exom_fork to explicit target              | <pass/fail> | <fork target path, copied_facts count, forked_from block> |
-| Ch13    | default-target auto-suffix on collision   | <pass/fail> | <first target, second target = ...-2 / ...-3>             |
-| Ch13    | fork refuses session exoms                | <pass/fail> | <error: "fork_session_unsupported">                       |
-| Ch13    | replayed facts attributed to forker       | <pass/fail> | <tx/user_email == runner email per fact>                  |
-| Ch13    | cross-user write → `forbidden` (Model A)  | <skip/p/f>  | <error: contains "forbidden" + "write access denied", NOT "branch_owned"> *(needs --with-collision-user)* |
-| Ch13    | cross-user fork succeeds                  | <skip/p/f>  | <forked target path, copied_facts> *(needs --with-collision-user)* |
-| Ch09    | TeamCreate + 2 sub-agents joined          | <skip/p/f>  | <team id, agent ids> *(--with-team)*                      |
-| Ch09    | each agent asserted 2 facts on its branch | <skip/p/f>  | <fact_ids per agent>                                      |
-| Ch09    | list_branches: full claim triple per      | <skip/p/f>  | <branch-row tuples>                                       |
-| Ch09    | cross-branch query agent-a returns its tx | <skip/p/f>  | <tx_id>                                                   |
-| Ch09    | second join of same branch idempotent     | <skip/p/f>  | <ok, no error>                                            |
+| Phase | Group / Step                                                    | Status      | Evidence |
+|-------|-----------------------------------------------------------------|-------------|----------|
+| **0** | Preconditions (MCP, Chrome, dev-login, loopback)                | <pass/fail> | <abort cause if any>                              |
+| 0     | Discovery: user1 + user2 emails resolved                        | <pass/fail> | <both emails>                                     |
+| 0     | Init `<scratch_project>` + session_new                          | <pass/fail> | <ok responses>                                    |
+| 0     | Schema snapshot (attrs, view arities)                           | <pass/fail> | <attr count, view arities>                        |
+| 0     | Two Chrome contexts dev-login OK                                | <skip/p/f>  | <`/auth/me` per context>                          |
+| **1** | A: read-tool surface (guide, list_exoms, exom_status, list_branches) | <pass/fail> | <bytes, count, status, branch count>          |
+| 1     | B: typed values (i64×2 + str×2 + sym×1 land in correct EDB)     | <pass/fail> | <fact_ids + EDB row counts>                       |
+| 1     | B: cmp filter `< 100` returns `84`                              | <pass/fail> | <result>                                          |
+| 1     | C: bitemporal — 4 transitions, 3 value-intervals, back-pointers | <pass/fail> | <T1..T4, history rows>                            |
+| 1     | C: retract event in tx-log                                      | <pass/fail> | <tx row>                                          |
+| 1     | D: belief lifecycle (believe + supersede + revoke + v2)         | <pass/fail> | <belief_ids, statuses>                            |
+| 1     | D: belief-row total = 2                                         | <pass/fail> | <row count>                                       |
+| 1     | E: 2 observations + 3-tag obs                                   | <pass/fail> | <obs_ids, tag count>                              |
+| 1     | F: builtin-view sweep (8 views, expected ≥ counts)              | <pass/fail> | <per-view row counts>                             |
+| 1     | G: attribution triple non-empty                                 | <pass/fail> | <tx-row tuple>                                    |
+| 1     | H: explain (predicate + fact_id) + export (canonical + jsonl)   | <pass/fail> | <bytes / line count>                              |
+| **2** | A: branch lifecycle (create / assert / isolation / list / merge / archive) | <pass/fail> | <T_fx, merge_tx, archived flag>           |
+| 2     | B: session lifecycle (single / bad-label / unknown-agent / close / closed_at) | <pass/fail> | <error strings>                            |
+| 2     | C: scaffolding (init / exom_new / folder_new / rename / delete) | <pass/fail> | <`<scratch_bare>` path>                           |
+| 2     | D1: hyphen attr probe → 0 rows                                  | <pass/fail> | <count>                                           |
+| 2     | D2: default-fact-id supersede → 2 intervals                     | <pass/fail> | <fact_history>                                    |
+| 2     | D3: sym health (no domain error)                                | <pass/fail> | <ok / RAY_ERROR text>                             |
+| 2     | D4: cache staleness post-join (claim populated immediately)     | <pass/fail> | <list_branches probe-d row>                       |
+| **3** | A: Model A 403 (auth-layer; NOT branch_owned)                   | <skip/p/f>  | <verbatim error>                                  |
+| 3     | A: created_by stamp + forked_from absent on non-fork            | <skip/p/f>  | <tree node fields>                                |
+| 3     | B: fork default-target shape (public → `{email}/forked/...`)    | <skip/p/f>  | <returned target verbatim>                        |
+| 3     | B: fork explicit target overrides default                       | <skip/p/f>  | <returned target == explicit value>               |
+| 3     | B: fork lineage in tree (created_by, acl_mode, forked_from)     | <skip/p/f>  | <tree node fields>                                |
+| 3     | B: fork replayed attribution (every row → forker email)         | <skip/p/f>  | <forker email per row>                            |
+| 3     | B: fork auto-suffix on collision (leaf segment `-2`/`-3`)       | <skip/p/f>  | <first/second targets>                            |
+| 3     | B: fork default-target shape (`{other_email}/*` source)         | <skip/p/f>  | <returned target preserves owner email subpath>   |
+| 3     | B: fork refuses session                                         | <skip/p/f>  | <verbatim `fork_session_unsupported`>             |
+| 3     | C1: flip solo→co-edit (creator) returns ok+changed              | <skip/p/f>  | <flip response>                                   |
+| 3     | C2: main claim cleared after flip                               | <skip/p/f>  | <list_branches main row>                          |
+| 3     | C3: co-edit auth elevation (user2 write succeeds)               | <skip/p/f>  | <ok+tx_id>                                        |
+| 3     | C4+5: symmetric retracts (each user retracts the other's fact)  | <skip/p/f>  | <facts removed>                                   |
+| 3     | C6: `_meta/acl_mode` audit-trail fact present                   | <skip/p/f>  | <fact row>                                        |
+| 3     | C7: non-creator flip → 403 not_creator                          | <skip/p/f>  | <verbatim error>                                  |
+| 3     | C8: session flip → 400 acl_mode_not_applicable                  | <skip/p/f>  | <verbatim error>                                  |
+| 3     | D: co-edit non-`main` TOFU preserved (user2 → 400 branch_owned) | <skip/p/f>  | <verbatim error>                                  |
+| 3     | E: co-edit child session is solo-edit owned by spawner          | <skip/p/f>  | <session tree node>                               |
+| 3     | F: `{email}/*` co-edit + rw share → user2 writes successfully   | <skip/p/f>  | <ok+tx_id>                                        |
+| 3     | F: flip-back to solo-edit → user2 hits 400 branch_owned         | <skip/p/f>  | <verbatim error>                                  |
+| 3     | G: acl_mode persists across daemon restart                      | <skip/p/f>  | <pre/post values per exom>                        |
+| **4** | unknown_exom                                                    | <pass/fail> | <verbatim error>                                  |
+| 4     | unknown_branch                                                  | <pass/fail> | <verbatim error>                                  |
+| 4     | query missing database name                                     | <pass/fail> | <verbatim error>                                  |
+| 4     | server-side arity error (non-empty msg)                         | <pass/fail> | <verbatim error>                                  |
+| 4     | invalid value (array)                                           | <pass/fail> | <verbatim error>                                  |
+| 4     | missing required parameter (predicate)                          | <pass/fail> | <verbatim error>                                  |
+| 4     | empty-string predicate rejected                                 | <pass/fail> | <verbatim error>                                  |
+| 4     | cannot archive `main`                                           | <pass/fail> | <verbatim error>                                  |
+| **5** | TeamCreate + 2 sub-agents joined                                | <skip/p/f>  | <team id> *(--with-team)*                         |
+| 5     | each agent claimed its branch (full triple)                     | <skip/p/f>  | <branch-row tuples>                               |
+| 5     | cross-branch query returns agent-a's 2 tx                       | <skip/p/f>  | <tx_ids>                                          |
+| 5     | second join idempotent                                          | <skip/p/f>  | <ok>                                              |
+| 5     | bonus: cross-user write rejected (if `--scratch public`)        | <skip/p/f>  | <verbatim error>                                  |
 
 **Summary:** `<P> / <T> passed, <F> failed, <S> skipped`
 
@@ -114,6 +83,4 @@ diff vs. expected. No paraphrasing.>
 
 ## Notes
 
-<Any observations the skill's runner thinks the user should know — for example,
-"Build identity unchanged across this run", or "Ch11 BranchOwned skipped because
-no second bearer was supplied".>
+<Anything the operator should know — public-namespace exoms left visible after the run, build identity unchanged across this run, Phase 5 skipped because `--with-team` not provided, etc.>

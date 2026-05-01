@@ -335,6 +335,11 @@ export async function fetchExomemLogs(exom = DEFAULT_EXOM): Promise<ExomemLogged
 // Tree (nested exoms)
 // ---------------------------------------------------------------------------
 
+/** Per-exom write policy. `solo-edit` (default) restricts main-trunk
+ *  writes to `created_by`; `co-edit` opens main to all auth-admitted
+ *  writers (Wikipedia-style). Sessions are always `solo-edit`. */
+export type AclMode = 'solo-edit' | 'co-edit';
+
 export type TreeNode =
 	| { kind: 'folder'; name: string; path: string; children: TreeNode[] }
 	| {
@@ -351,6 +356,8 @@ export type TreeNode =
 			session: any | null;
 			/** Email of the exom's creator. Empty string means ownerless legacy (locked, top-admin recovery only). */
 			created_by: string;
+			/** Write policy. Defaults to `solo-edit` when absent (legacy exoms). */
+			acl_mode?: AclMode;
 			/** Set when the exom was created via fork; absent on natively-created exoms. */
 			forked_from?: { source_path: string; source_tx_id: number; forked_at: string } | null;
 	  };
@@ -446,8 +453,13 @@ export async function fetchFactsList(
 	return r.facts ?? [];
 }
 
-export function apiInitFolder(path: string): Promise<{ ok: boolean; path: string }> {
-	return postAction('api/actions/init', { path });
+export function apiInitFolder(
+	path: string,
+	opts?: { acl_mode?: AclMode }
+): Promise<{ ok: boolean; path: string; acl_mode: AclMode }> {
+	const body: Record<string, unknown> = { path };
+	if (opts?.acl_mode) body.acl_mode = opts.acl_mode;
+	return postAction('api/actions/init', body);
 }
 
 export function apiNewFolder(path: string): Promise<{ ok: boolean; path: string }> {
@@ -460,8 +472,35 @@ export function apiDeletePath(
 	return postAction('api/actions/delete', { path });
 }
 
-export function apiNewBareExom(path: string): Promise<{ ok: boolean; path: string }> {
-	return postAction('api/actions/exom-new', { path });
+export function apiNewBareExom(
+	path: string,
+	opts?: { acl_mode?: AclMode }
+): Promise<{ ok: boolean; path: string; acl_mode: AclMode }> {
+	const body: Record<string, unknown> = { path };
+	if (opts?.acl_mode) body.acl_mode = opts.acl_mode;
+	return postAction('api/actions/exom-new', body);
+}
+
+/**
+ * Flip an exom's `acl_mode` between `solo-edit` and `co-edit`.
+ * Creator-only at the server. Rejected on session exoms.
+ *
+ * - `solo-edit → co-edit`: clears the `main` branch's TOFU claim, so any
+ *   auth-admitted writer can land on the shared trunk.
+ * - `co-edit → solo-edit`: deterministically re-claims `main` for the
+ *   creator, returning exclusive trunk-write to them.
+ */
+export function setExomMode(
+	exom: string,
+	mode: AclMode
+): Promise<{
+	ok: boolean;
+	exom: string;
+	mode: AclMode;
+	previous_mode: AclMode;
+	changed: boolean;
+}> {
+	return postAction('api/actions/exom-mode', { exom, mode });
 }
 
 /**

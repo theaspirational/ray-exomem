@@ -1808,6 +1808,14 @@ pub fn precheck_write(
         return Err(WriteError::BranchMissing(branch.to_string()));
     }
 
+    // Co-edit short-circuits TOFU on the `main` trunk only. Non-`main`
+    // branches keep TOFU regardless of mode (sandbox / feature-branch
+    // pattern is preserved). Sessions are guaranteed `SoloEdit` by the
+    // mode-flip endpoint, so this clause never elides session attribution.
+    if matches!(meta.acl_mode, exom::AclMode::CoEdit) && branch == "main" {
+        return Ok(());
+    }
+
     claim_branch(tree_root, sym_path, exom_path, branch, user_email, agent, model)
 }
 

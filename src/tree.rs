@@ -67,6 +67,12 @@ pub enum TreeNode {
         /// signed-in user's email to decide whether to show a "Fork" button.
         #[serde(default)]
         created_by: String,
+        /// Write policy. `solo-edit` (default) means only the creator
+        /// writes; `co-edit` means any auth-admitted writer can land on
+        /// `main`. The UI renders a `co-edit` badge when this is
+        /// `CoEdit`.
+        #[serde(default)]
+        acl_mode: exom::AclMode,
         /// Set when this exom was created via `exom-fork`. Surfaces as a
         /// lineage subtitle in the UI ("forked from {source} ↗").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +150,7 @@ fn walk_inner(
                 closed,
                 session: meta.session,
                 created_by: meta.created_by,
+                acl_mode: meta.acl_mode,
                 forked_from: meta.forked_from,
             })
         }

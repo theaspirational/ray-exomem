@@ -14,6 +14,26 @@ pub enum ExomKind {
     Bare,
 }
 
+/// Per-exom write policy.
+///
+/// - `SoloEdit` (default): only `created_by` writes the trunk; non-creators
+///   with grants get whatever their grant says (the existing model).
+/// - `CoEdit`: the `main` branch's TOFU claim is bypassed, so any user
+///   admitted by the auth layer can write to `main`. Non-`main` branches
+///   keep TOFU regardless of mode. Concurrent same-`fact_id` writes resolve
+///   last-write-wins (existing `assert_fact` behaviour).
+///
+/// Only `Bare` and `ProjectMain` exoms may be `CoEdit`; `Session` exoms
+/// are always `SoloEdit` (their structured-collab model uses
+/// orchestrator-allocated branches instead).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AclMode {
+    #[default]
+    SoloEdit,
+    CoEdit,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionType {
@@ -46,6 +66,12 @@ pub struct ExomMeta {
     /// FullAccess on a public exom; everyone else is ReadOnly + can fork.
     #[serde(default)]
     pub created_by: String,
+    /// Write policy. `SoloEdit` is the default; `CoEdit` opens the `main`
+    /// branch to all auth-admitted writers (Wikipedia-style commons). The
+    /// creator can flip via `PATCH /api/actions/exom-mode`. Absent in
+    /// pre-co-edit `exom.json` files; deserialises as `SoloEdit`.
+    #[serde(default)]
+    pub acl_mode: AclMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionMeta>,
     /// Lineage when this exom was created via `exom-fork`. Carried for
@@ -69,6 +95,7 @@ impl ExomMeta {
             kind: ExomKind::ProjectMain,
             created_at: now_iso8601_basic(),
             created_by: created_by.to_string(),
+            acl_mode: AclMode::SoloEdit,
             session: None,
             forked_from: None,
         }
@@ -81,6 +108,7 @@ impl ExomMeta {
             kind: ExomKind::Bare,
             created_at: now_iso8601_basic(),
             created_by: created_by.to_string(),
+            acl_mode: AclMode::SoloEdit,
             session: None,
             forked_from: None,
         }
@@ -93,6 +121,9 @@ impl ExomMeta {
             kind: ExomKind::Session,
             created_at: now_iso8601_basic(),
             created_by: created_by.to_string(),
+            // Sessions cannot be co-edit (Q7): structured-collab is
+            // orchestrator-allocated branches, not a shared trunk.
+            acl_mode: AclMode::SoloEdit,
             session: Some(sess),
             forked_from: None,
         }

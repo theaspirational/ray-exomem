@@ -23,7 +23,9 @@
 		fetchRelationGraph,
 		forkExom,
 		parseFactsFromExport,
+		setExomMode,
 		unarchiveSessionExom,
+		type AclMode,
 		type BranchRow,
 		type TreeExom
 	} from '$lib/exomem.svelte';
@@ -279,6 +281,48 @@
 			forkBusy = false;
 		}
 	}
+
+	const aclMode = $derived<AclMode>(node.acl_mode ?? 'solo-edit');
+
+	const isCreator = $derived(
+		auth.user?.email != null && node.created_by !== '' && auth.user.email === node.created_by
+	);
+
+	/** Mode-flip button visible only to creator on non-session exoms (Q4, Q7). */
+	const canFlipMode = $derived(node.exom_kind !== 'session' && isCreator);
+
+	let modeFlipBusy = $state(false);
+
+	async function onFlipMode() {
+		if (!canFlipMode || modeFlipBusy) return;
+		const target: AclMode = aclMode === 'co-edit' ? 'solo-edit' : 'co-edit';
+		const confirmMsg =
+			target === 'co-edit'
+				? 'Switch to co-edit?\n\nAnyone with access will be able to write the shared trunk.\nYou can switch back at any time.'
+				: 'Switch to solo-edit?\n\nThe trunk re-claims to you. Other contributors keep read access (and any non-main branches they own) but lose write rights on main.';
+		if (typeof window !== 'undefined' && !window.confirm(confirmMsg)) return;
+		modeFlipBusy = true;
+		try {
+			const r = await setExomMode(node.path, target);
+			toast.success(`Switched to ${r.mode}`);
+			await invalidateAll();
+		} catch (e) {
+			toast.error(e instanceof Error ? e.message : 'Mode switch failed');
+		} finally {
+			modeFlipBusy = false;
+		}
+	}
+
+	const modeStripBlurb = $derived.by(() => {
+		if (aclMode === 'co-edit') {
+			return isCreator
+				? 'co-edit · anyone with access can write the shared trunk'
+				: 'co-edit · you can write to the shared trunk';
+		}
+		if (isCreator) return 'solo-edit · only you write the trunk';
+		const owner = node.created_by || 'the creator';
+		return `solo-edit · only ${owner} writes the trunk`;
+	});
 </script>
 
 <div
@@ -290,6 +334,13 @@
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<div class="flex flex-wrap items-center gap-2 text-xs">
 				<Badge variant="secondary" class="text-[10px] capitalize text-foreground">{kindLabel}</Badge>
+				{#if aclMode === 'co-edit'}
+					<Badge
+						variant="outline"
+						class="border-primary/40 bg-primary/10 text-[10px] uppercase tracking-wide text-primary"
+						title="co-edit · anyone with access writes the shared trunk"
+					>co-edit</Badge>
+				{/if}
 				{#if node.archived}
 					<Badge variant="outline" class="border-primary/40 text-primary">archived</Badge>
 				{/if}
@@ -297,8 +348,24 @@
 					<Badge variant="outline" class="border-destructive/50 text-destructive">closed</Badge>
 				{/if}
 			</div>
-			{#if canFork || showUnarchive}
+			{#if canFork || showUnarchive || canFlipMode}
 				<div class="flex items-center gap-2">
+					{#if canFlipMode}
+						<Button
+							size="sm"
+							variant="outline"
+							disabled={modeFlipBusy}
+							onclick={() => void onFlipMode()}
+							title={aclMode === 'co-edit'
+								? 'Switch to solo-edit (only you write main)'
+								: 'Switch to co-edit (anyone with access writes main)'}
+						>
+							{#if modeFlipBusy}
+								<Loader2 class="mr-1 size-3 animate-spin" />
+							{/if}
+							Switch to {aclMode === 'co-edit' ? 'solo-edit' : 'co-edit'}
+						</Button>
+					{/if}
 					{#if canFork}
 						<Button
 							size="sm"
@@ -331,6 +398,9 @@
 				</div>
 			{/if}
 		</div>
+		<p class="font-mono text-[11px] text-muted-foreground">
+			{modeStripBlurb}
+		</p>
 
 		<div class="font-mono text-[11px] leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
 			{node.path.split('/').filter(Boolean).join('/')}

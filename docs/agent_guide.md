@@ -69,11 +69,37 @@ is an *event* (a tx in the tx log), not a value-interval.
 
 ### Permissions
 
+Two layered access decisions, in order: the **auth layer** (does this user
+have any write access at all?) and the **branch layer** (TOFU on whichever
+branch the write targets). Failures at either layer surface different errors
+(`forbidden` from auth, `branch_owned` from TOFU).
+
+#### Auth layer — namespace × creator × `acl_mode`
+
 | First path segment | Default access for an authenticated user |
 |--------------------|------------------------------------------|
-| `public/...`       | Read + Write for everyone in the allowed domain. |
-| `{email}/...`      | Owner has full access; everyone else denied unless explicitly shared. |
-| Anything else      | Admin-only. |
+| `public/...` (creator)             | Full access. |
+| `public/...` (other, `solo-edit`)  | Read-only — Model A: read-for-all, write-for-creator. To contribute, fork. |
+| `public/...` (other, `co-edit`)    | Read + Write — anyone authenticated can write to the shared trunk. |
+| `{email}/...` (owner)              | Full access. |
+| `{email}/...` (other, share grant) | Per the share's `permission` field (`read` or `read-write`). |
+| `{email}/...` (no share)           | Denied. |
+| Anything else                      | Admin-only. |
+
+`acl_mode` is `solo-edit` (default) or `co-edit`, set per-exom on creation
+via `init` / `exom_new` (see §4) and flippable later by the creator via the
+HTTP route `POST /api/actions/exom-mode` (no MCP tool yet — see §7).
+
+#### Branch layer — TOFU on `claimed_by_user_email`
+
+Independent of the namespace decision. Once auth says "yes, write," the brain
+checks whether the target branch has been claimed by a different user. First
+writer wins (TOFU); a colliding write returns `branch_owned`.
+
+`co-edit` short-circuits the branch layer **only on `main`** — every co-editor
+lands on the shared trunk. Non-`main` branches keep TOFU regardless of mode.
+Flipping `co-edit → solo-edit` re-claims `main` deterministically for the
+exom's `created_by`.
 
 **Default to private. Write to `{user-email}/...` unless the user explicitly
 named a `public/...` path or asked for a shared workflow.** Anything an agent
@@ -231,18 +257,56 @@ subtree. `path` narrows the walk to a sub-path (slash or `::` form);
 `depth` caps how deep it descends. Use this before `init` / `session_new`
 to confirm a path is/isn't already taken.
 
-### `init` `{ path }`
+### `init` `{ path, acl_mode? }`
 
 Scaffold a project at `<path>`: creates `<path>/main` (the project's main
 exom) and an empty `<path>/sessions/` folder. Idempotent. Use this once
 per project before issuing `session_new` calls under it. Permission-gated
 the same way `assert_fact` is.
 
-### `exom_new` `{ path }`
+`acl_mode` is `"solo-edit"` (default) or `"co-edit"` and is stamped on the
+project's `main` only — sessions are always solo-edit. Co-edit lets any
+authenticated user write to `main` directly without forking; solo-edit
+restricts writes to the creator (Model A in `public/*`, owner in
+`{email}/*`). The mode can be flipped later via
+`POST /api/actions/exom-mode` (no MCP tool yet).
+
+### `exom_new` `{ path, acl_mode? }`
 
 Create a free-standing bare exom at `<path>` (no `main`/`sessions`
 scaffolding). Use for ad-hoc namespaces or scratch exoms that aren't part
 of a project. For project setup use `init` instead. Idempotent.
+
+`acl_mode` is `"solo-edit"` (default) or `"co-edit"`; same semantics as
+`init`.
+
+### `exom_fork` `{ source, target? }`
+
+Fork an exom you can read into a new exom you'll own. Copies currently-active
+facts as new tx records attributed to the forker, stamps `forked_from =
+{ source_path, source_tx_id, forked_at }` on the target's meta, and gives
+the forker `created_by` ownership. The fork is always created as
+`solo-edit` regardless of the source's mode (the forker can flip it
+afterward via `exom-mode`).
+
+Refused on session exoms (`fork_session_unsupported` 400) — fork the parent
+project's `main` instead.
+
+**Default `target`** (when omitted) is `{your_email}/forked/<source-subpath>`,
+where the namespace marker is stripped from the source so the lineage is
+readable in the path:
+
+- `public/X/Y/Z` → `{your_email}/forked/X/Y/Z`
+- `{other_email}/X/Y` → `{your_email}/forked/{other_email}/X/Y`
+  (preserves the source owner so the fork's path itself records who you
+  forked from)
+- `{your_email}/X/Y` (self-fork) → `{your_email}/forked/X/Y`
+
+If the default target already exists, the leaf segment is auto-suffixed
+with `-2`, `-3`, … up to 100 attempts, after which `fork_collision` is
+returned and the caller must pass `target` explicitly. Passing `target`
+explicitly always overrides the default (subject to write-access on the
+target path).
 
 ### `exom_status` `{ exom }`
 
@@ -540,9 +604,13 @@ audits, not for incremental sync.
 | `invalid 'predicate': must be non-empty` | Predicate name is empty / whitespace / contains quotes | Use a `<namespace>/<name>` form with no whitespace or quotes. |
 | `invalid 'value'` | `value` JSON couldn't deserialize as a `FactValue` | Send a JSON number, string, or `{"$sym": "..."}`. Anything else (arrays, nested objects without `$sym`) is rejected. |
 | `forbidden: write access denied to <path>` | Caller lacks write permission on the target path | See §2 permissions table; private paths need an explicit share. |
-| `branch_owned` | Another user already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). |
+| `branch_owned` | Another user already claimed the branch under TOFU | Write to a branch you own (yours from `session_join`, or `main` if you're the orchestrator). On a `co-edit` exom this is bypassed for `main` only — writing to a non-`main` branch claimed by someone else still hits this. |
 | `session_closed` | The session exom has `session/closed_at` set; writes are rejected | Retract `session/closed_at` to reopen, or pick a different session. |
 | `cannot archive branch 'main'` | Tried to `archive_branch` on `main` | Archive a feature branch instead; `main` is the trunk and is permanent. |
+| `fork_session_unsupported` | Tried to fork a session exom | Fork the parent project's `main` instead; sessions aren't durable knowledge artifacts. |
+| `fork_collision` | The default fork target and 100 auto-suffixed variants are all taken | Pass `target` explicitly to choose a free path. |
+| `not_creator` | Tried to flip `acl_mode` on an exom you didn't create | Mode flips are creator-only; ask the creator. (HTTP route only.) |
+| `acl_mode_not_applicable` | Tried to flip `acl_mode` on a session exom | Sessions are always `solo-edit`; flip the parent project instead. |
 | 0 rows from a pinned EAV query (no error, just empty result) | Often: pinned the wrong slot. `(?tx 'tx/id "tx/22")` returns 0 because `"tx/22"` is the entity ref; the `tx/id` *value* is `"22"`. Same with `fact_id` vs predicate name. | Run the unpinned form first (`(?tx 'tx/id ?id)`) to see what the value actually is, then pin against that. |
 
 ---
@@ -554,6 +622,10 @@ audits, not for incremental sync.
   convenience tool yet).
 - Branch `rename` and `diff` (create / list / merge / archive are MCP tools;
   rename and diff are HTTP-only today).
+- `acl_mode` flip — `POST /api/actions/exom-mode { exom, mode }` is the
+  only entry point today (creator-only, body `mode: "solo-edit" | "co-edit"`,
+  rejected on session exoms with `acl_mode_not_applicable`). Use `exom_new`
+  / `init` with `acl_mode` to set the mode at creation time from MCP.
 - API-key issuance / rotation — issue keys via the UI at `/auth/api-keys`.
 - Group-based access — sharing private `{email}/...` paths is per-email today.
 

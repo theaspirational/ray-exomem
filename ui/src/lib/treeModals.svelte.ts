@@ -1,6 +1,8 @@
 /**
  * Shared modal + drawer refresh coordination for tree context menu and command palette.
  */
+import type { AclMode } from '$lib/exomem.svelte';
+
 const LAST_TOUCHED_KEY = 'ray-exomem:last-touched-tree-path';
 
 function readLastTouched(): string {
@@ -22,10 +24,12 @@ class TreeModalsState {
 
 	initOpen = $state(false);
 	initPath = $state('');
+	initAclMode = $state<AclMode>('solo-edit');
 	folderOpen = $state(false);
 	folderPathField = $state('');
 	exomOpen = $state(false);
 	exomPathField = $state('');
+	exomAclMode = $state<AclMode>('solo-edit');
 	sessionOpen = $state(false);
 	sessionProjectPath = $state('');
 	sessionLabelField = $state('adhoc');
@@ -65,6 +69,7 @@ class TreeModalsState {
 
 	openInit(path: string) {
 		this.initPath = path;
+		this.initAclMode = 'solo-edit';
 		this.initOpen = true;
 	}
 
@@ -75,6 +80,7 @@ class TreeModalsState {
 
 	openNewExom(suggestedPath: string) {
 		this.exomPathField = suggestedPath;
+		this.exomAclMode = 'solo-edit';
 		this.exomOpen = true;
 	}
 

@@ -73,6 +73,11 @@ pub struct ExomState {
     /// reads this when resolving access in the `public/*` namespace —
     /// only the creator gets FullAccess; everyone else is ReadOnly+fork.
     pub created_by: String,
+    /// Cached `ExomMeta.acl_mode`. The auth layer reads this for `public/*`
+    /// to elevate non-creators from ReadOnly to ReadWrite when co-edit is
+    /// on. The brain layer reads this in `precheck_write` to short-circuit
+    /// `claim_branch` on the `main` trunk when co-edit is on.
+    pub acl_mode: crate::exom::AclMode,
 }
 
 pub struct AppState {
@@ -366,6 +371,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/actions/delete", post(api_delete))
         .route("/actions/exom-new", post(api_exom_new))
         .route("/actions/exom-fork", post(api_exom_fork))
+        .route("/actions/exom-mode", post(api_exom_mode))
         .route("/actions/session-new", post(api_session_new))
         .route("/actions/session-join", post(api_session_join))
         .route("/actions/branch-create", post(api_branch_create))
@@ -667,6 +673,7 @@ pub fn load_exom_from_tree_path(
     // backfill from `main`'s TOFU claimer once, persist, and surface the
     // owner email for caching on ExomState).
     let mut created_by = String::new();
+    let mut acl_mode = crate::exom::AclMode::SoloEdit;
     let meta_p = exom_disk.join(crate::exom::META_FILENAME);
     if meta_p.exists() {
         if let Ok(mut meta) = crate::exom::read_meta(exom_disk) {
@@ -699,6 +706,7 @@ pub fn load_exom_from_tree_path(
                 }
             }
             created_by = meta.created_by.clone();
+            acl_mode = meta.acl_mode;
         }
     }
     let datoms = storage::build_datoms_table(&brain)?;
@@ -728,6 +736,7 @@ pub fn load_exom_from_tree_path(
         rules,
         exom_disk: Some(exom_disk.to_path_buf()),
         created_by,
+        acl_mode,
     })
 }
 
@@ -876,7 +885,10 @@ pub fn lookup_owner(state: &AppState, exom_slash: &str) -> crate::auth::access::
     use crate::auth::access::PublicOwner;
     let exoms = state.exoms.lock().unwrap();
     match exoms.get(exom_slash) {
-        Some(es) if !es.created_by.is_empty() => PublicOwner::Owner(es.created_by.clone()),
+        Some(es) if !es.created_by.is_empty() => PublicOwner::Owner {
+            email: es.created_by.clone(),
+            acl_mode: es.acl_mode,
+        },
         Some(_) => PublicOwner::Ownerless,
         None => PublicOwner::Unknown,
     }
@@ -1505,6 +1517,10 @@ async fn api_not_found(uri: Uri) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct PathBody {
     path: Option<String>,
+    /// Optional `acl_mode` for the created exom (or each created exom in
+    /// `init`'s case). Defaults to `solo-edit`. Ignored on Session exoms.
+    #[serde(default)]
+    acl_mode: Option<crate::exom::AclMode>,
 }
 
 async fn api_init(
@@ -1527,10 +1543,30 @@ async fn api_init(
         .as_ref()
         .map(|u| u.email.as_str())
         .unwrap_or("");
+    let acl_mode = body.acl_mode.unwrap_or(crate::exom::AclMode::SoloEdit);
     match crate::scaffold::init_project(&tree_root, &path, created_by) {
         Ok(()) => {
+            // Stamp acl_mode on the project's `main` exom only. Sessions
+            // under `<path>/sessions/` are always SoloEdit (Q7).
+            if acl_mode == crate::exom::AclMode::CoEdit {
+                let main_disk = path.to_disk_path(&tree_root).join("main");
+                if let Ok(mut m) = crate::exom::read_meta(&main_disk) {
+                    m.acl_mode = acl_mode;
+                    if let Err(e) = crate::exom::write_meta(&main_disk, &m) {
+                        eprintln!(
+                            "[ray-exomem] WARNING: init created but acl_mode stamp failed on main: {}",
+                            e
+                        );
+                    }
+                }
+            }
             emit_tree_changed(&state);
-            Json(serde_json::json!({"ok": true, "path": path.to_slash_string()})).into_response()
+            Json(serde_json::json!({
+                "ok": true,
+                "path": path.to_slash_string(),
+                "acl_mode": acl_mode,
+            }))
+            .into_response()
         }
         Err(e) => ApiError::from(e).into_response(),
     }
@@ -1647,10 +1683,30 @@ async fn api_exom_new(
         .as_ref()
         .map(|u| u.email.as_str())
         .unwrap_or("");
+    let acl_mode = body.acl_mode.unwrap_or(crate::exom::AclMode::SoloEdit);
     match crate::scaffold::new_bare_exom(&tree_root, &path, created_by) {
         Ok(()) => {
+            // Stamp acl_mode on the freshly-created exom.json. Only persists
+            // a non-default mode; SoloEdit is the constructor's default.
+            if acl_mode == crate::exom::AclMode::CoEdit {
+                let disk = path.to_disk_path(&tree_root);
+                if let Ok(mut m) = crate::exom::read_meta(&disk) {
+                    m.acl_mode = acl_mode;
+                    if let Err(e) = crate::exom::write_meta(&disk, &m) {
+                        eprintln!(
+                            "[ray-exomem] WARNING: exom-new created but acl_mode stamp failed: {}",
+                            e
+                        );
+                    }
+                }
+            }
             emit_tree_changed(&state);
-            Json(serde_json::json!({"ok": true, "path": path.to_slash_string()})).into_response()
+            Json(serde_json::json!({
+                "ok": true,
+                "path": path.to_slash_string(),
+                "acl_mode": acl_mode,
+            }))
+            .into_response()
         }
         Err(e) => ApiError::from(e).into_response(),
     }
@@ -1660,8 +1716,13 @@ async fn api_exom_new(
 struct ExomForkBody {
     /// Path of the exom to fork (must be readable by the caller; not a session exom).
     source: String,
-    /// Optional target path. Defaults to `{user.email}/{source_basename}`,
-    /// suffixed with `-2`, `-3`, ... if the default is taken.
+    /// Optional target path. When omitted, the default is
+    /// `{user.email}/forked/<source_subpath>`:
+    /// - `public/X/Y/Z` → `{user.email}/forked/X/Y/Z` (drop `public/` prefix).
+    /// - `{other_email}/X/Y` → `{user.email}/forked/{other_email}/X/Y`
+    ///   (preserve the source owner's email so lineage is readable in the path).
+    /// - `{user.email}/X/Y` (self-fork) → `{user.email}/forked/X/Y`.
+    /// Suffixed with `-2`, `-3`, ... on the leaf segment if the default is taken.
     #[serde(default)]
     target: Option<String>,
 }
@@ -1702,12 +1763,43 @@ async fn api_exom_fork(
         return resp;
     }
 
-    // Default target: {user.email}/{basename}, with collision suffixes.
+    // Default target: {user.email}/forked/<source-subpath>, with collision
+    // suffixes on the leaf segment. The `forked/` prefix groups every fork
+    // the user has made into one place in their personal namespace, and the
+    // sub-path mirrors the source so a fork of `public/work/team/proj/main`
+    // lands at `{user.email}/forked/work/team/proj/main` — readable lineage
+    // without having to read the `forked_from` block.
     let target_slash = match body.target.as_deref() {
         Some(t) => t.to_string(),
         None => {
-            let basename = source_path.last().unwrap_or("forked");
-            let base = format!("{}/{}", user.email, basename);
+            // Strip the source's namespace marker so it doesn't repeat.
+            // - `public/X/Y/Z`         → `X/Y/Z`
+            // - `{user.email}/X/Y`     → `X/Y` (self-fork)
+            // - `{other_email}/X/Y`    → `{other_email}/X/Y` (keep, for lineage)
+            let self_prefix = format!("{}/", user.email);
+            let subpath: String = if source_slash == "public"
+                || source_slash.starts_with("public/")
+            {
+                source_slash
+                    .strip_prefix("public/")
+                    .unwrap_or("forked")
+                    .to_string()
+            } else if source_slash == user.email || source_slash.starts_with(&self_prefix) {
+                source_slash
+                    .strip_prefix(&self_prefix)
+                    .unwrap_or("forked")
+                    .to_string()
+            } else {
+                source_slash.clone()
+            };
+            // Defensive: if subpath is empty (would only happen on a folder root,
+            // which shouldn't reach this code path), fall back to `forked`.
+            let subpath = if subpath.is_empty() {
+                source_path.last().unwrap_or("forked").to_string()
+            } else {
+                subpath
+            };
+            let base = format!("{}/forked/{}", user.email, subpath);
             let tree_root = server_tree_root(&state);
             let mut candidate = base.clone();
             let mut i = 2;
@@ -1892,6 +1984,189 @@ async fn api_exom_fork(
             "source_tx_id": lineage.source_tx_id,
             "forked_at": lineage.forked_at,
         }
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct ExomModeBody {
+    exom: String,
+    mode: crate::exom::AclMode,
+}
+
+/// `POST /api/actions/exom-mode`
+///
+/// Flip an exom's `acl_mode` between `solo-edit` and `co-edit`.
+/// Creator-only; rejected on Session exoms (Q7). Side effects:
+///
+/// - `solo-edit → co-edit`: clears `main.claimed_by_user_email = None` so
+///   any auth-admitted writer lands on the shared trunk.
+/// - `co-edit → solo-edit`: deterministically re-claims `main` for
+///   `created_by` so the creator regains exclusive trunk-write predictably.
+///
+/// Non-`main` branches are not touched (Q5 invariant).
+async fn api_exom_mode(
+    State(state): State<Arc<AppState>>,
+    maybe_user: MaybeUser,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ExomModeBody>,
+) -> impl IntoResponse {
+    let user = match maybe_user.0.as_ref() {
+        Some(u) => u,
+        None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
+    };
+
+    let exom_path: crate::path::TreePath = match body.exom.parse() {
+        Ok(p) => p,
+        Err(e) => return ApiError::new("bad_exom_path", e.to_string()).into_response(),
+    };
+    let exom_slash = exom_path.to_slash_string();
+
+    let tree_root = server_tree_root(&state);
+    let sym_path = server_sym_path(&state);
+    let disk = exom_path.to_disk_path(&tree_root);
+
+    let mut meta = match crate::exom::read_meta(&disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ApiError::new("no_such_exom", format!("no such exom {}", exom_slash))
+                .with_status(404)
+                .into_response();
+        }
+        Err(e) => return ApiError::new("io", e.to_string()).into_response(),
+    };
+
+    if meta.created_by != user.email {
+        return ApiError::new(
+            "not_creator",
+            "only the exom creator may change the acl_mode",
+        )
+        .with_status(403)
+        .into_response();
+    }
+
+    if meta.kind == crate::exom::ExomKind::Session {
+        return ApiError::new(
+            "acl_mode_not_applicable",
+            "session exoms use orchestrator-allocated branches; co-edit is not applicable to this exom kind",
+        )
+        .with_status(400)
+        .into_response();
+    }
+
+    let prev_mode = meta.acl_mode;
+    let new_mode = body.mode;
+
+    if prev_mode == new_mode {
+        return Json(serde_json::json!({
+            "ok": true,
+            "exom": exom_slash,
+            "mode": new_mode,
+            "previous_mode": prev_mode,
+            "changed": false,
+        }))
+        .into_response();
+    }
+
+    // Persist the new mode in exom.json.
+    meta.acl_mode = new_mode;
+    if let Err(e) = crate::exom::write_meta(&disk, &meta) {
+        return ApiError::new("io", format!("failed to write exom.json: {}", e))
+            .into_response();
+    }
+
+    // Adjust the `main` branch claim. Non-`main` branches are not touched.
+    let mut branches = match crate::storage::load_branches_from_disk(&disk, &sym_path) {
+        Ok(b) => b,
+        Err(e) => return ApiError::new("io", e.to_string()).into_response(),
+    };
+    match new_mode {
+        crate::exom::AclMode::CoEdit => {
+            let mut found = false;
+            for b in branches.iter_mut() {
+                if b.branch_id == "main" {
+                    b.claimed_by_user_email = None;
+                    b.claimed_by_agent = None;
+                    b.claimed_by_model = None;
+                    found = true;
+                }
+            }
+            // If `main` is not represented on disk it's implicitly unclaimed
+            // already; nothing to write.
+            if !found {
+                // No-op: nothing to persist.
+            }
+        }
+        crate::exom::AclMode::SoloEdit => {
+            let mut found = false;
+            for b in branches.iter_mut() {
+                if b.branch_id == "main" {
+                    b.claimed_by_user_email = Some(user.email.clone());
+                    b.claimed_by_agent = None;
+                    b.claimed_by_model = None;
+                    found = true;
+                }
+            }
+            if !found {
+                branches.push(crate::brain::Branch {
+                    branch_id: "main".to_string(),
+                    name: "main".to_string(),
+                    parent_branch_id: None,
+                    created_tx_id: 0,
+                    archived: false,
+                    claimed_by_user_email: Some(user.email.clone()),
+                    claimed_by_agent: None,
+                    claimed_by_model: None,
+                });
+            }
+        }
+    }
+    if let Err(e) = crate::storage::save_branches_to_disk(&disk, &sym_path, &branches) {
+        return ApiError::new("io", e.to_string()).into_response();
+    }
+
+    // Update the in-memory ExomState so subsequent guard_write / lookup_owner
+    // calls see the new mode without a daemon restart.
+    {
+        let mut exoms = state.exoms.lock().unwrap();
+        if let Some(es) = exoms.get_mut(&exom_slash) {
+            es.acl_mode = new_mode;
+        }
+    }
+
+    // Append an audit fact tx so the flip is visible in history alongside
+    // every other mutation. `_meta/acl_mode` is a single fact_id so
+    // assert_fact's last-write-wins gives a clean "current mode" view.
+    let (header_agent, header_model) = read_attribution_headers(&headers);
+    let write_ctx = MutationContext::from_user(user, header_agent, header_model);
+    let mode_str = match new_mode {
+        crate::exom::AclMode::CoEdit => "co-edit",
+        crate::exom::AclMode::SoloEdit => "solo-edit",
+    };
+    let exom_for_assert = exom_slash.clone();
+    let ctx = write_ctx.clone();
+    let _ = mutate_exom_async(&state, &exom_for_assert, move |ex| {
+        ex.brain.assert_fact(
+            "_meta/acl_mode",
+            "_meta/acl_mode",
+            crate::fact_value::FactValue::Str(mode_str.to_string()),
+            1.0,
+            "exom-mode-flip",
+            None,
+            None,
+            &ctx,
+        )
+    })
+    .await;
+
+    emit_tree_changed(&state);
+
+    Json(serde_json::json!({
+        "ok": true,
+        "exom": exom_slash,
+        "mode": new_mode,
+        "previous_mode": prev_mode,
+        "changed": true,
     }))
     .into_response()
 }

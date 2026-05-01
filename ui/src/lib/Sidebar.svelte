@@ -155,7 +155,7 @@
 		return makeSyntheticRoot(node.children);
 	});
 
-	const otherRoot = $derived.by((): TreeNode | null => {
+	const sharedRoot = $derived.by((): TreeNode | null => {
 		if (!root || root.kind !== 'folder') return null;
 		const match = root.children.filter((n) => {
 			if (n.path === userEmail) return false;
@@ -165,7 +165,7 @@
 		return match.length ? makeSyntheticRoot(match) : null;
 	});
 
-	const sectionOpen = $state({ personal: true, public: true, other: true });
+	const sectionOpen = $state({ personal: true, shared: true, public: true });
 
 	// Action handlers ------------------------------------------------------------
 
@@ -188,7 +188,9 @@
 		actorPrompt.run(async () => {
 			busy = true;
 			try {
-				await apiInitFolder(treeModals.initPath.trim());
+				await apiInitFolder(treeModals.initPath.trim(), {
+					acl_mode: treeModals.initAclMode
+				});
 				toast.success('Initialized');
 				treeModals.initOpen = false;
 				treeModals.bumpTree();
@@ -225,7 +227,9 @@
 		actorPrompt.run(async () => {
 			busy = true;
 			try {
-				await apiNewBareExom(treeModals.exomPathField.trim());
+				await apiNewBareExom(treeModals.exomPathField.trim(), {
+					acl_mode: treeModals.exomAclMode
+				});
 				toast.success('Exom created');
 				treeModals.exomOpen = false;
 				treeModals.bumpTree();
@@ -451,7 +455,7 @@
 					</Button>
 				</div>
 			{:else}
-				{#snippet section(label: string, openKey: 'personal' | 'public' | 'other', sectionRoot: TreeNode | null, emptyHint: string | null = null, emptyAction: { label: string; path: string } | null = null, tooltip: string | null = null)}
+				{#snippet section(label: string, openKey: 'personal' | 'shared' | 'public', sectionRoot: TreeNode | null, emptyHint: string | null = null, emptyAction: { label: string; path: string } | null = null, tooltip: string | null = null)}
 					{#if sectionRoot}
 						{@const isEmpty = sectionRoot.kind === 'folder' && sectionRoot.children.length === 0}
 						<div class="mt-1 first:mt-0">
@@ -512,14 +516,21 @@
 					userEmail ? { label: 'New folder', path: `${userEmail}/notes` } : null
 				)}
 				{@render section(
+					'Shared',
+					'shared',
+					sharedRoot,
+					null,
+					null,
+					'Paths other users have shared with you, plus your co-edit collaborations.'
+				)}
+				{@render section(
 					'Public',
 					'public',
 					publicRoot,
 					null,
 					null,
-					'Read by everyone. Fork to contribute.'
+					'Read by everyone. Fork or co-edit (when open) to contribute.'
 				)}
-				{@render section('Other', 'other', otherRoot)}
 			{/if}
 		</div>
 
@@ -563,14 +574,48 @@
 				this path.
 			</Dialog.Description>
 		</Dialog.Header>
-		<div class="flex flex-col gap-2 py-2">
-			<label class="text-xs text-muted-foreground" for="sidebar-init-path">Path (slash-separated)</label
-			>
-			<Input
-				id="sidebar-init-path"
-				bind:value={treeModals.initPath}
-				class="border-border bg-background font-mono text-sm"
-			/>
+		<div class="flex flex-col gap-3 py-2">
+			<div class="flex flex-col gap-2">
+				<label class="text-xs text-muted-foreground" for="sidebar-init-path"
+					>Path (slash-separated)</label
+				>
+				<Input
+					id="sidebar-init-path"
+					bind:value={treeModals.initPath}
+					class="border-border bg-background font-mono text-sm"
+				/>
+			</div>
+			<fieldset class="flex flex-col gap-1.5 border-t border-border pt-3">
+				<legend class="text-xs text-muted-foreground">Write policy</legend>
+				<label class="flex items-start gap-2 text-xs text-foreground">
+					<input
+						type="radio"
+						name="init-acl-mode"
+						value="solo-edit"
+						bind:group={treeModals.initAclMode}
+						class="mt-0.5"
+					/>
+					<span>
+						<span class="font-medium">solo-edit</span>
+						<span class="text-muted-foreground"> — only you write the trunk (default)</span>
+					</span>
+				</label>
+				<label class="flex items-start gap-2 text-xs text-foreground">
+					<input
+						type="radio"
+						name="init-acl-mode"
+						value="co-edit"
+						bind:group={treeModals.initAclMode}
+						class="mt-0.5"
+					/>
+					<span>
+						<span class="font-medium">co-edit</span>
+						<span class="text-muted-foreground">
+							 — anyone with access writes the shared trunk; you can switch back later
+						</span>
+					</span>
+				</label>
+			</fieldset>
 		</div>
 		<Dialog.Footer>
 			<Button variant="outline" onclick={() => (treeModals.initOpen = false)}>Cancel</Button>
@@ -623,13 +668,46 @@
 				Creates an exom leaf at the given path (folders are created as needed).
 			</Dialog.Description>
 		</Dialog.Header>
-		<div class="flex flex-col gap-2 py-2">
-			<label class="text-xs text-muted-foreground" for="sidebar-exom-path">Path</label>
-			<Input
-				id="sidebar-exom-path"
-				bind:value={treeModals.exomPathField}
-				class="border-border bg-background font-mono text-sm"
-			/>
+		<div class="flex flex-col gap-3 py-2">
+			<div class="flex flex-col gap-2">
+				<label class="text-xs text-muted-foreground" for="sidebar-exom-path">Path</label>
+				<Input
+					id="sidebar-exom-path"
+					bind:value={treeModals.exomPathField}
+					class="border-border bg-background font-mono text-sm"
+				/>
+			</div>
+			<fieldset class="flex flex-col gap-1.5 border-t border-border pt-3">
+				<legend class="text-xs text-muted-foreground">Write policy</legend>
+				<label class="flex items-start gap-2 text-xs text-foreground">
+					<input
+						type="radio"
+						name="exom-acl-mode"
+						value="solo-edit"
+						bind:group={treeModals.exomAclMode}
+						class="mt-0.5"
+					/>
+					<span>
+						<span class="font-medium">solo-edit</span>
+						<span class="text-muted-foreground"> — only you write the trunk (default)</span>
+					</span>
+				</label>
+				<label class="flex items-start gap-2 text-xs text-foreground">
+					<input
+						type="radio"
+						name="exom-acl-mode"
+						value="co-edit"
+						bind:group={treeModals.exomAclMode}
+						class="mt-0.5"
+					/>
+					<span>
+						<span class="font-medium">co-edit</span>
+						<span class="text-muted-foreground">
+							 — anyone with access writes the shared trunk; you can switch back later
+						</span>
+					</span>
+				</label>
+			</fieldset>
 		</div>
 		<Dialog.Footer>
 			<Button variant="outline" onclick={() => (treeModals.exomOpen = false)}>Cancel</Button>

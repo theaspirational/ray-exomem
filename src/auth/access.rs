@@ -2,6 +2,7 @@
 
 use crate::auth::store::{AuthStore, ShareGrant};
 use crate::auth::{AccessLevel, User};
+use crate::exom::AclMode;
 use crate::rayfall_ast::CanonicalForm;
 
 #[derive(Debug, thiserror::Error)]
@@ -23,8 +24,9 @@ fn access_level_label(level: AccessLevel) -> &'static str {
     }
 }
 
-/// Three-state result of looking up the owner of a `public/*` path.
-/// The variant determines the Model A access decision; see `resolve_access`.
+/// Result of looking up the access-relevant meta of a `public/*` exom.
+/// The variant determines the Model A / co-edit access decision; see
+/// `resolve_access`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PublicOwner {
     /// No exom is loaded at this path. For `public/*` this is "creatable
@@ -37,8 +39,13 @@ pub enum PublicOwner {
     /// branch's TOFU claim. ReadOnly for everyone; only a future
     /// top-admin recovery route can adopt it.
     Ownerless,
-    /// Exom exists with a stamped creator.
-    Owner(String),
+    /// Exom exists with a stamped creator and a known write-policy mode.
+    /// `acl_mode == CoEdit` elevates non-creators to `ReadWrite` in
+    /// `public/*`; `SoloEdit` keeps them at `ReadOnly`.
+    Owner {
+        email: String,
+        acl_mode: AclMode,
+    },
 }
 
 /// Resolve the effective access level for `user` at `path`.
@@ -53,7 +60,8 @@ pub enum PublicOwner {
 /// Evaluation order:
 /// 1. Path is in the `public/` namespace ->
 ///    - Owner matches user -> FullAccess
-///    - Owner is someone else -> ReadOnly (read + fork)
+///    - Owner is someone else AND exom is co-edit -> ReadWrite
+///    - Owner is someone else AND exom is solo-edit -> ReadOnly (read + fork)
 ///    - Ownerless legacy -> ReadOnly (top-admin recovery only)
 ///    - Unknown (path doesn't exist) -> FullAccess (creating a new
 ///      exom is the writer's right; they'll be stamped as creator)
@@ -68,8 +76,14 @@ pub async fn resolve_access(
 ) -> AccessLevel {
     if path == "public" || path.starts_with("public/") {
         return match public_owner {
-            PublicOwner::Owner(ref owner) if owner == &user.email => AccessLevel::FullAccess,
-            PublicOwner::Owner(_) => AccessLevel::ReadOnly,
+            PublicOwner::Owner { ref email, .. } if email == &user.email => {
+                AccessLevel::FullAccess
+            }
+            PublicOwner::Owner {
+                acl_mode: AclMode::CoEdit,
+                ..
+            } => AccessLevel::ReadWrite,
+            PublicOwner::Owner { .. } => AccessLevel::ReadOnly,
             PublicOwner::Ownerless => AccessLevel::ReadOnly,
             PublicOwner::Unknown => AccessLevel::FullAccess,
         };
@@ -313,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn public_namespace_creator_gets_full_access() {
         // Model A: only the creator (matched against public_owner) writes a
-        // public exom. Everyone else reads + forks.
+        // public exom. Everyone else reads + forks (or writes, if co-edit).
         let alice = user("alice@co.com", UserRole::Regular);
         let store = make_test_store();
         assert_eq!(
@@ -321,7 +335,10 @@ mod tests {
                 &alice,
                 "public/work/proj/main",
                 &store,
-                PublicOwner::Owner("alice@co.com".into()),
+                PublicOwner::Owner {
+                    email: "alice@co.com".into(),
+                    acl_mode: AclMode::SoloEdit,
+                },
             )
             .await,
             AccessLevel::FullAccess
@@ -337,10 +354,51 @@ mod tests {
                 &bob,
                 "public/work/proj/main",
                 &store,
-                PublicOwner::Owner("alice@co.com".into()),
+                PublicOwner::Owner {
+                    email: "alice@co.com".into(),
+                    acl_mode: AclMode::SoloEdit,
+                },
             )
             .await,
             AccessLevel::ReadOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn public_namespace_co_edit_non_creator_is_read_write() {
+        let bob = user("bob@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(
+                &bob,
+                "public/work/wiki/main",
+                &store,
+                PublicOwner::Owner {
+                    email: "alice@co.com".into(),
+                    acl_mode: AclMode::CoEdit,
+                },
+            )
+            .await,
+            AccessLevel::ReadWrite
+        );
+    }
+
+    #[tokio::test]
+    async fn public_namespace_co_edit_creator_still_full_access() {
+        let alice = user("alice@co.com", UserRole::Regular);
+        let store = make_test_store();
+        assert_eq!(
+            resolve_access(
+                &alice,
+                "public/work/wiki/main",
+                &store,
+                PublicOwner::Owner {
+                    email: "alice@co.com".into(),
+                    acl_mode: AclMode::CoEdit,
+                },
+            )
+            .await,
+            AccessLevel::FullAccess
         );
     }
 

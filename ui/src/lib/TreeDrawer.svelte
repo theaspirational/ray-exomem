@@ -259,6 +259,13 @@
 												<span class="min-w-0 flex-1 truncate text-[11px] text-foreground"
 													>{node.name}</span
 												>
+												{#if node.acl_mode === 'co-edit'}
+													<Badge
+														variant="outline"
+														class="h-4 shrink-0 border-primary/40 bg-primary/10 px-1 font-mono text-[9px] uppercase tracking-wide text-primary"
+														title="co-edit · anyone with access can write the shared trunk"
+													>co-edit</Badge>
+												{/if}
 												{#if node.branches && node.branches.length > 0}
 													<GitBranch
 														class="size-3 shrink-0 text-muted-foreground"
