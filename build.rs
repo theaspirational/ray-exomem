@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -116,8 +115,7 @@ fn main() {
     // .svelte-kit/output into ui/build/ but never prunes orphans.
     let ui_build = ui_dir.join("build");
     if ui_build.exists() {
-        fs::remove_dir_all(&ui_build)
-            .unwrap_or_else(|e| panic!("failed to clean ui/build/: {e}"));
+        fs::remove_dir_all(&ui_build).unwrap_or_else(|e| panic!("failed to clean ui/build/: {e}"));
     }
 
     eprintln!("[build.rs] npm run build in ui/");
@@ -237,7 +235,10 @@ fn emit_bootstrap_seeds(manifest_dir: &Path) {
     );
     for (name, path) in &entries {
         let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
-        let path_str = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        let path_str = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
         generated.push_str(&format!(
             "    (\"{escaped_name}\", include_str!(\"{path_str}\")),\n"
         ));

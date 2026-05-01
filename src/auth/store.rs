@@ -1193,7 +1193,9 @@ impl AuthStore {
                     match db.revoke_share(&grant.share_id).await {
                         Ok(true) => removed += 1,
                         Ok(false) => {}
-                        Err(e) => eprintln!("auth: delete_shares_under revoke {}: {e}", grant.share_id),
+                        Err(e) => {
+                            eprintln!("auth: delete_shares_under revoke {}: {e}", grant.share_id)
+                        }
                     }
                 }
             }
@@ -1515,7 +1517,9 @@ mod tests {
     #[tokio::test]
     async fn is_login_allowed_admits_individual_email() {
         let store = make_test_store(&["company.com".into()]);
-        store.add_allowed_email("contractor@vendor.io", "Q4 contractor").await;
+        store
+            .add_allowed_email("contractor@vendor.io", "Q4 contractor")
+            .await;
         assert!(store.is_login_allowed("alice@company.com").await);
         assert!(store.is_login_allowed("contractor@vendor.io").await);
         assert!(!store.is_login_allowed("eve@vendor.io").await);

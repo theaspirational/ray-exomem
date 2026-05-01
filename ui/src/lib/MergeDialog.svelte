@@ -3,7 +3,7 @@
 
 	import { Button } from '$lib/components/ui/button';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
-	import { fetchExomemStatus, mergeBranch } from '$lib/exomem.svelte';
+	import { mergeBranch } from '$lib/exomem.svelte';
 
 	interface Props {
 		sourceBranch: string;
@@ -17,18 +17,7 @@
 	let busy = $state(false);
 	let resultMessage = $state<string | null>(null);
 	let errorMessage = $state<string | null>(null);
-	let targetLabel = $state<string>('');
-
-	$effect(() => {
-		void (async () => {
-			try {
-				const s = await fetchExomemStatus(exom);
-				targetLabel = s.current_branch ?? 'main';
-			} catch {
-				targetLabel = 'main';
-			}
-		})();
-	});
+	let targetLabel = $state<string>('main');
 
 	function runMerge() {
 		actorPrompt.run(async () => {
@@ -36,7 +25,7 @@
 			resultMessage = null;
 			errorMessage = null;
 			try {
-				const r = await mergeBranch(sourceBranch, policy, exom);
+				const r = await mergeBranch(sourceBranch, policy, exom, targetLabel);
 				if (r.conflicts.length > 0) {
 					resultMessage = `Merge completed with ${r.conflicts.length} conflict(s) (manual policy may leave conflicts unresolved). Tx ${r.tx_id}.`;
 				} else {
@@ -62,7 +51,7 @@
 			<div>
 				<h2 id="merge-title" class="text-lg font-semibold">Merge branch</h2>
 				<p class="mt-1 text-sm text-muted-foreground">
-					Merge <span class="font-mono text-foreground">{sourceBranch}</span> into the current branch
+					Merge <span class="font-mono text-foreground">{sourceBranch}</span> into branch
 					<span class="font-mono text-foreground">({targetLabel})</span>.
 				</p>
 			</div>

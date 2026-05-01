@@ -4,14 +4,16 @@ Single-context (orchestrator over MCP). All calls target `<session>` unless note
 
 ## A. Branch lifecycle (Ch06 surface)
 
-1. **Create** — `mcp__ray-exomem__create_branch { exom: <session>, branch_name: "feature-x" }`. Capture row.
+1. **Create from explicit parent** — `mcp__ray-exomem__create_branch { exom: <session>, branch_name: "feature-x", parent_branch_id: "main" }`. Capture row. Pass: `feature-x.parent_branch_id == "main"`.
 2. **Assert on `feature-x`** — `assert_fact { exom: <session>, branch: "feature-x", fact_id: "fx/marker", predicate: "fx/marker", value: "branched" }`. Capture `T_fx`.
 3. **Read on `feature-x`** — `query { exom: <session>, branch: "feature-x", query: "(query <session> (find ?id ?p ?v) (where (fact-row ?id ?p ?v)))" }`. Pass: row with `id="fx/marker"`, `value="branched"`.
-4. **Read on main** — same query, no `branch:` arg. Pass: `fx/marker` **not** in result (branch isolation holds).
-5. **list_branches** — pass: `feature-x` present. After step 4 (which queried `main`), `feature-x.is_current == false` and `main.is_current == true` (cross-branch cursor restoration; Ch12 regression).
-6. **Merge** — `mcp__ray-exomem__merge_branch { exom: <session>, branch: "feature-x", policy: "last-writer-wins" }`. Capture `merge_tx_id` and `added`.
-7. **Verify merge** — `(query <session> (find ?tx ?act) (where (?tx 'tx/action "merge")))` → row with `tx == merge_tx_id`. `fact-row` on main now contains `fx/marker`.
-8. **Archive** — `mcp__ray-exomem__archive_branch { exom: <session>, branch: "feature-x" }`. Verify `(query <session> (find ?b ?a) (where (?b 'branch/archived ?a)))` → row for `feature-x` with `a == "true"`.
+4. **Read on main by omission** — same query, no `branch:` arg. Pass: `fx/marker` **not** in result (omitted branch defaults to `main`; branch isolation holds).
+5. **Read on main explicitly** — same query with `branch: "main"`. Pass: same result as step 4. This is the regression marker that reads are branch-param driven, not cursor driven.
+6. **list_branches** — pass: `feature-x` present, no row contains `is_current`, and `claimed_by_user_email` is populated for `feature-x` after step 2's write.
+7. **Merge into explicit target** — `mcp__ray-exomem__merge_branch { exom: <session>, branch: "feature-x", target_branch: "main", policy: "last-writer-wins" }`. Capture `merge_tx_id` and `added`.
+8. **Verify merge** — `(query <session> (find ?tx ?act ?target) (where (?tx 'tx/action "merge") (?tx 'tx/merge_target ?target)))` → row with `tx == merge_tx_id` and `target == "main"`. `fact-row` on main now contains `fx/marker`.
+9. **Query feature after merge** — run the feature query again. Pass: `feature-x` still has `fx/marker`, confirming merge did not mutate selected branch state globally.
+10. **Archive** — `mcp__ray-exomem__archive_branch { exom: <session>, branch: "feature-x" }`. Verify `(query <session> (find ?b ?a) (where (?b 'branch/archived ?a)))` → row for `feature-x` with `a == "true"`.
 
 ## B. Session lifecycle (Ch07 surface)
 
@@ -51,29 +53,43 @@ These have broken before and need explicit guards.
 
 `session_join { session_path: <session>, agent_label: "probe-d" }`. Then immediately `list_branches { exom: <session> }` — the `probe-d` row's `claimed_by_user_email` triple must be **populated** (with the orchestrator's email since the orchestrator is doing the join). If empty until a refresh, the session-cache eviction regressed (`tool_session_join` cache-invalidation).
 
-### D5. Cross-branch cursor restoration
+### D5. No branch cursor state
 
-Already covered in A.5 — read on `main` after a `feature-x` query must restore `main.is_current == true`. Don't duplicate; just confirm the A.5 row passed and reference it here.
+Covered by A.3-A.6: a `feature-x` read followed by omitted-branch and explicit-`main` reads must not leak feature rows into main, and `list_branches` must not expose `is_current`. Also verify `exom_status` does not expose `current_branch`.
+
+### D6. Branch-param API + UI smoke
+
+If a Chrome context is available, run one batched `evaluate_script` as user1:
+
+1. Create a fresh branch `ui-feature` from `main`, assert `ui/branch-marker = "ui-feature"` on `branch: "ui-feature"`, and leave it unmerged/unarchived for this smoke.
+2. Visit `/tree/<session>?branch=ui-feature`.
+3. Fetch `/api/facts?exom=<session>&branch=main` and `/api/facts?exom=<session>&branch=ui-feature`. Pass: the branch-local fact appears only in the branch view, while inherited main facts appear in the branch view.
+4. Fetch `/api/beliefs?exom=<session>&branch=ui-feature`. Pass: response has `branch == "ui-feature"` and only branch-visible active beliefs.
+5. Fetch `/api/observations?exom=<session>`, then fetch it again after changing the page URL's `branch` search param. Pass: same observation ids in both responses; observations are exom-level.
+6. Fetch `/api/schema?exom=<session>&branch=ui-feature` and `/api/relation-graph?exom=<session>&branch=ui-feature`. Pass: both reflect the selected branch.
+7. On the page, clicking a branch in the Branches section updates `window.location.search` to `?branch=<branch_id>` and does **not** call any `/switch` endpoint. The visible section order is `Branches -> Connections -> Facts -> Beliefs -> Timeline`, then an exom-level band containing `Observations | Rules`.
 
 ## Pass criteria
 
-- A: branch lifecycle works including merge + archive; isolation + cursor correct.
+- A: branch lifecycle works including explicit parent, explicit branch reads/writes, explicit-target merge, archive, and no cursor fields.
 - B: all four session error paths fire correctly (bad label, unknown agent, session_closed, closed_at meta).
 - C: scaffolding tools all return ok and the resulting tree shape matches.
 - D1: 0 rows for the wrong attr name.
 - D2: 2 value-intervals on the default fact_id.
 - D3: sym query returns rows without a domain error.
 - D4: claim triple populated immediately, no second list call needed.
+- D5/D6: no `current_branch` / `is_current`; branch-param API/UI smoke behaves as branch-view vs exom-level split.
 
 ## Evidence
 
-A: `T_fx`, `merge_tx_id`, archive flag value.
+A: `T_fx`, `merge_tx_id`, target branch, archive flag value, and a sample branch row proving `is_current` is absent.
 B: each session_new response, the bad-label and session_closed error strings verbatim.
 C: `<scratch_bare>` path; rename roundtrip; delete error string.
 D1: row count (must be 0).
 D2: `fact_history` summary.
 D3: row count (≥ 1) and a confirmation that the response was not RAY_ERROR.
 D4: `list_branches` result for `probe-d` showing the claim triple.
+D5/D6: status/list branch field absence; URL after branch click; facts/beliefs/observations/schema/relation-graph response summaries.
 
 ## Notes
 

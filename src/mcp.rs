@@ -250,7 +250,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "query": { "type": "string", "description": "Rayfall query expression" },
                     "exom": { "type": "string", "description": "Exom name (defaults to main)" },
-                    "branch": { "type": "string", "description": "Branch to query (defaults to the exom's current branch). Switches the brain's view for the duration of the query, then restores. Use to inspect tx/facts/observations/beliefs on sub-agent branches without persistently changing the cursor." }
+                    "branch": { "type": "string", "description": "Branch to query. Defaults to `main`." }
                 },
                 "required": ["query"]
             }
@@ -271,7 +271,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "valid_to": { "type": "string", "description": "ISO-8601 wall-clock timestamp the fact stops being true. Open-ended if omitted." },
                     "agent": { "type": "string", "description": "Tool/integration making the call (e.g. `cursor`, `claude-code-cli`). Falls back to the API key's label. Recorded on the tx and rendered as `via <agent>`." },
                     "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only — no fallback. Rendered as `using <model>`." },
-                    "branch": { "type": "string", "description": "Target branch for the write. Defaults to the exom's current branch (usually `main`). The exom is restored to its prior branch after the write." }
+                    "branch": { "type": "string", "description": "Target branch for the write. Defaults to `main`." }
                 },
                 "required": ["exom", "predicate", "value"]
             }
@@ -286,7 +286,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "fact_id": { "type": "string", "description": "Fact id to retract." },
                     "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
                     "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
-                    "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
+                    "branch": { "type": "string", "description": "Target branch. Defaults to `main`." }
                 },
                 "required": ["exom", "fact_id"]
             }
@@ -308,7 +308,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "valid_to": { "type": "string", "description": "ISO-8601; when it stopped. Open-ended if omitted." },
                     "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
                     "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
-                    "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
+                    "branch": { "type": "string", "description": "Target branch. Defaults to `main`." }
                 },
                 "required": ["exom", "obs_id", "source_type", "content"]
             }
@@ -329,7 +329,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "valid_to": { "type": "string", "description": "ISO-8601; when it stops. Open-ended if omitted." },
                     "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
                     "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
-                    "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
+                    "branch": { "type": "string", "description": "Target branch. Defaults to `main`." }
                 },
                 "required": ["exom", "belief_id", "claim_text"]
             }
@@ -344,7 +344,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                     "belief_id": { "type": "string", "description": "Belief id to revoke. Must currently be active on the target branch." },
                     "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
                     "model": { "type": "string", "description": "LLM identity (e.g. `claude-opus-4-7`). Explicit only." },
-                    "branch": { "type": "string", "description": "Target branch. Defaults to the exom's current branch." }
+                    "branch": { "type": "string", "description": "Target branch. Defaults to `main`." }
                 },
                 "required": ["exom", "belief_id"]
             }
@@ -377,7 +377,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "source": { "type": "string", "description": "Rayfall source to evaluate" },
                     "exom": { "type": "string", "description": "Exom name (defaults to main)" },
-                    "branch": { "type": "string", "description": "Branch to evaluate against (defaults to the exom's current branch). See `query` for semantics." }
+                    "branch": { "type": "string", "description": "Branch to evaluate against. Defaults to `main`." }
                 },
                 "required": ["source"]
             }
@@ -426,6 +426,7 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name" },
                     "branch_name": { "type": "string", "description": "New branch name" },
+                    "parent_branch_id": { "type": "string", "description": "Parent branch id. Defaults to `main`." },
                     "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
                     "model": { "type": "string", "description": "LLM identity. Explicit only." }
                 },
@@ -548,17 +549,18 @@ fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "merge_branch",
-            "description": "Merge `branch` into the exom's current branch using the supplied policy. `last-writer-wins` overwrites conflicting target facts; `keep-target` skips conflicts; `manual` returns the conflict list without writing. Returns added fact ids, conflicts, and the merge tx id.",
+            "description": "Merge `branch` into an explicit target branch using the supplied policy. `last-writer-wins` overwrites conflicting target facts; `keep-target` skips conflicts; `manual` returns the conflict list without writing. Returns added fact ids, conflicts, and the merge tx id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name." },
                     "branch": { "type": "string", "description": "Source branch to merge from." },
+                    "target_branch": { "type": "string", "description": "Target branch to merge into. Defaults to `main`." },
                     "policy": { "type": "string", "enum": ["last-writer-wins", "keep-target", "manual"], "description": "Conflict-resolution policy. Defaults to `last-writer-wins`." },
                     "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
                     "model": { "type": "string", "description": "LLM identity. Explicit only." }
                 },
-                "required": ["exom", "branch"]
+                "required": ["exom", "branch", "target_branch"]
             }
         }),
         serde_json::json!({
@@ -661,6 +663,13 @@ fn exom_slug(args: &serde_json::Value) -> String {
     }
 }
 
+fn branch_arg(args: &serde_json::Value) -> String {
+    get_str(args, "branch")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::brain::MAIN_BRANCH)
+        .to_string()
+}
+
 /// Build a write-side `MutationContext` for an authenticated MCP call.
 ///
 /// Three-axis attribution:
@@ -683,31 +692,6 @@ fn mcp_mutation_ctx(user: &User, args: &serde_json::Value) -> crate::context::Mu
         model,
         session: None,
     }
-}
-
-/// Run a write closure under an optional branch override. If `branch` is
-/// supplied, switch the exom's `current_branch` for the duration of `f`,
-/// then restore — even on error — so concurrent readers never observe the
-/// switched cursor. Safe because `mutate_exom` holds an exclusive lock on
-/// `state.exoms` for the entire closure.
-fn with_optional_branch<R>(
-    es: &mut crate::server::ExomState,
-    branch: Option<&str>,
-    f: impl FnOnce(&mut crate::server::ExomState) -> anyhow::Result<R>,
-) -> anyhow::Result<R> {
-    let prev = match branch {
-        Some(b) if b != es.brain.current_branch_id() => {
-            let p = es.brain.current_branch_id().to_string();
-            es.brain.switch_branch(b)?;
-            Some(p)
-        }
-        _ => None,
-    };
-    let res = f(es);
-    if let Some(p) = prev {
-        let _ = es.brain.switch_branch(&p);
-    }
-    res
 }
 
 fn load_exom<'a>(
@@ -755,70 +739,20 @@ fn load_exom<'a>(
 fn tool_query(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let query_str = require_str(args, "query")?;
     let exom_slash = exom_slug(args);
-    let target_branch = get_str(args, "branch")
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let target_branch = branch_arg(args);
 
     let mut exoms = state.exoms.lock().unwrap();
-
-    // Optional branch switch: save prev cursor, switch the brain, rebind the
-    // engine's datoms to the target branch's view. Restored after the query
-    // (best-effort) so the exom's cursor looks unchanged to other callers.
-    let saved_branch = swap_to_branch(state, &mut exoms, &exom_slash, target_branch.as_deref())?;
+    let _ = load_exom(state, &mut exoms, &exom_slash)?;
+    crate::server::rebind_datoms_only(state, &mut exoms, &exom_slash, &target_branch).map_err(
+        |e| JsonRpcError {
+            code: -32000,
+            message: format!("rebind failed: {e}"),
+        },
+    )?;
 
     let outcome = run_query_body(state, &exoms, &exom_slash, query_str);
 
-    if let Some(prev) = saved_branch {
-        restore_branch(state, &mut exoms, &exom_slash, &prev);
-    }
-
     outcome
-}
-
-/// Switch the exom's brain to `target` if supplied, returning the previous
-/// branch cursor for later restoration. `Ok(None)` means no switch was
-/// needed. Errors map to `unknown_branch`/`unknown_exom`.
-fn swap_to_branch(
-    state: &AppState,
-    exoms: &mut std::collections::HashMap<String, crate::server::ExomState>,
-    exom_slash: &str,
-    target: Option<&str>,
-) -> Result<Option<String>, JsonRpcError> {
-    let Some(target) = target else { return Ok(None) };
-    let prev = {
-        let es = exoms.get_mut(exom_slash).ok_or_else(|| JsonRpcError {
-            code: -32000,
-            message: format!("unknown exom '{}'", exom_slash),
-        })?;
-        let prev = es.brain.current_branch_id().to_string();
-        if prev == target {
-            return Ok(None);
-        }
-        es.brain.switch_branch(target).map_err(|e| JsonRpcError {
-            code: -32602,
-            message: format!("unknown_branch: {e}"),
-        })?;
-        prev
-    };
-    crate::server::rebind_datoms_only(state, exoms, exom_slash).map_err(|e| JsonRpcError {
-        code: -32000,
-        message: format!("rebind failed: {e}"),
-    })?;
-    Ok(Some(prev))
-}
-
-/// Best-effort cursor restoration. Logs (silently) if rebind fails — the
-/// query already returned successfully and we don't want to clobber that.
-fn restore_branch(
-    state: &AppState,
-    exoms: &mut std::collections::HashMap<String, crate::server::ExomState>,
-    exom_slash: &str,
-    prev: &str,
-) {
-    if let Some(es) = exoms.get_mut(exom_slash) {
-        let _ = es.brain.switch_branch(prev);
-    }
-    let _ = crate::server::rebind_datoms_only(state, exoms, exom_slash);
 }
 
 fn run_query_body(
@@ -827,17 +761,12 @@ fn run_query_body(
     _exom_slash: &str,
     query_str: &str,
 ) -> Result<String, JsonRpcError> {
-    let expanded = crate::server::expand_query_validated(
-        exoms,
-        &state.engine,
-        query_str,
-        None,
-        "mcp/query",
-    )
-    .map_err(|e| JsonRpcError {
-        code: -32000,
-        message: e.to_string(),
-    })?;
+    let expanded =
+        crate::server::expand_query_validated(exoms, &state.engine, query_str, None, "mcp/query")
+            .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        })?;
 
     crate::server::bind_typed_facts_for_exom(&state.engine, exoms, &expanded.exom_name).map_err(
         |e| JsonRpcError {
@@ -897,43 +826,49 @@ async fn tool_assert_fact(
         code: -32602,
         message: e.to_string(),
     })?;
-    let value_raw = args.get("value").cloned().unwrap_or(serde_json::Value::Null);
-    let value = match &value_raw {
-        serde_json::Value::Null => {
-            return Err(JsonRpcError {
-                code: -32602,
-                message: "missing required argument 'value'".into(),
-            });
-        }
-        other => serde_json::from_value::<crate::fact_value::FactValue>(other.clone())
-            .map_err(|e| JsonRpcError {
-                code: -32602,
-                message: format!("invalid 'value': {e}"),
-            })?,
-    };
+    let value_raw = args
+        .get("value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let value =
+        match &value_raw {
+            serde_json::Value::Null => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: "missing required argument 'value'".into(),
+                });
+            }
+            other => serde_json::from_value::<crate::fact_value::FactValue>(other.clone())
+                .map_err(|e| JsonRpcError {
+                    code: -32602,
+                    message: format!("invalid 'value': {e}"),
+                })?,
+        };
     let fact_id = get_str(args, "fact_id").unwrap_or(&predicate).to_string();
 
-    let confidence = args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let confidence = args
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
     let source = get_str(args, "source").unwrap_or("mcp").to_string();
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
-    let branch = get_str(args, "branch").map(str::to_string);
+    let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        with_optional_branch(es, branch.as_deref(), |es| {
-            es.brain.assert_fact(
-                &fact_id,
-                &predicate,
-                value.clone(),
-                confidence,
-                &source,
-                valid_from.as_deref(),
-                valid_to.as_deref(),
-                &ctx,
-            )
-        })
+        es.brain.assert_fact(
+            &branch,
+            &fact_id,
+            &predicate,
+            value.clone(),
+            confidence,
+            &source,
+            valid_from.as_deref(),
+            valid_to.as_deref(),
+            &ctx,
+        )
     })
     .await;
 
@@ -962,14 +897,12 @@ async fn tool_retract_fact(
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let fact_id = require_str(args, "fact_id")?.to_string();
-    let branch = get_str(args, "branch").map(str::to_string);
+    let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        with_optional_branch(es, branch.as_deref(), |es| {
-            es.brain.retract_fact(&fact_id, &ctx)
-        })
+        es.brain.retract_fact(&branch, &fact_id, &ctx)
     })
     .await;
 
@@ -997,7 +930,10 @@ async fn tool_observe(
     let source_type = require_str(args, "source_type")?.to_string();
     let source_ref = get_str(args, "source_ref").unwrap_or("").to_string();
     let content = require_str(args, "content")?.to_string();
-    let confidence = args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.8);
+    let confidence = args
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.8);
     let tags: Vec<String> = args
         .get("tags")
         .and_then(|v| v.as_array())
@@ -1009,24 +945,23 @@ async fn tool_observe(
         .unwrap_or_default();
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
-    let branch = get_str(args, "branch").map(str::to_string);
+    let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        with_optional_branch(es, branch.as_deref(), |es| {
-            es.brain.assert_observation(
-                &obs_id,
-                &source_type,
-                &source_ref,
-                &content,
-                confidence,
-                tags.clone(),
-                valid_from.as_deref(),
-                valid_to.as_deref(),
-                &ctx,
-            )
-        })
+        es.brain.assert_observation(
+            &branch,
+            &obs_id,
+            &source_type,
+            &source_ref,
+            &content,
+            confidence,
+            tags.clone(),
+            valid_from.as_deref(),
+            valid_to.as_deref(),
+            &ctx,
+        )
     })
     .await;
 
@@ -1052,7 +987,10 @@ async fn tool_believe(
     let exom_slash = exom_slug(args);
     let belief_id = require_str(args, "belief_id")?.to_string();
     let claim_text = require_str(args, "claim_text")?.to_string();
-    let confidence = args.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.7);
+    let confidence = args
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.7);
     let rationale = get_str(args, "rationale").unwrap_or("").to_string();
     // Distinguish None (key absent → inherit prior supports on revise) from
     // Some(vec![]) (key present and empty → deliberate clear).
@@ -1067,23 +1005,22 @@ async fn tool_believe(
     });
     let valid_from = get_str(args, "valid_from").map(str::to_string);
     let valid_to = get_str(args, "valid_to").map(str::to_string);
-    let branch = get_str(args, "branch").map(str::to_string);
+    let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        with_optional_branch(es, branch.as_deref(), |es| {
-            es.brain.revise_belief(
-                &belief_id,
-                &claim_text,
-                confidence,
-                supports.clone(),
-                &rationale,
-                valid_from.as_deref(),
-                valid_to.as_deref(),
-                &ctx,
-            )
-        })
+        es.brain.revise_belief(
+            &branch,
+            &belief_id,
+            &claim_text,
+            confidence,
+            supports.clone(),
+            &rationale,
+            valid_from.as_deref(),
+            valid_to.as_deref(),
+            &ctx,
+        )
     })
     .await;
 
@@ -1108,14 +1045,12 @@ async fn tool_revoke_belief(
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let belief_id = require_str(args, "belief_id")?.to_string();
-    let branch = get_str(args, "branch").map(str::to_string);
+    let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        with_optional_branch(es, branch.as_deref(), |es| {
-            es.brain.revoke_belief(&belief_id, &ctx)
-        })
+        es.brain.revoke_belief(&branch, &belief_id, &ctx)
     })
     .await;
 
@@ -1144,11 +1079,10 @@ fn tool_exom_status(state: &AppState, args: &serde_json::Value) -> Result<String
     let mut exoms = state.exoms.lock().unwrap();
     let es = load_exom(state, &mut exoms, &exom_slash)?;
     let brain = &es.brain;
-    let facts = brain.current_facts();
-    let beliefs = brain.current_beliefs();
+    let facts = brain.facts_on_branch(crate::brain::MAIN_BRANCH);
+    let beliefs = brain.beliefs_on_branch(crate::brain::MAIN_BRANCH);
     Ok(serde_json::json!({
         "exom": exom_slash,
-        "current_branch": brain.current_branch_id(),
         "facts": facts.len(),
         "beliefs": beliefs.len(),
         "transactions": brain.transactions().len(),
@@ -1158,29 +1092,17 @@ fn tool_exom_status(state: &AppState, args: &serde_json::Value) -> Result<String
 
 fn tool_eval(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let source = require_str(args, "source")?;
-    let target_branch = get_str(args, "branch")
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    // No branch arg: original fast path — eval against whatever the engine
-    // currently has bound, no exom-level coordination.
-    if target_branch.is_none() {
-        return match state.engine.eval(source) {
-            Ok(output) => Ok(output),
-            Err(e) => Err(JsonRpcError {
-                code: -32000,
-                message: e.to_string(),
-            }),
-        };
-    }
-
-    // Branch arg supplied: must coordinate at exom granularity.
+    let target_branch = branch_arg(args);
     let exom_slash = exom_slug(args);
     let mut exoms = state.exoms.lock().unwrap();
-    let saved_branch = swap_to_branch(state, &mut exoms, &exom_slash, target_branch.as_deref())?;
+    let _ = load_exom(state, &mut exoms, &exom_slash)?;
+    crate::server::rebind_datoms_only(state, &mut exoms, &exom_slash, &target_branch).map_err(
+        |e| JsonRpcError {
+            code: -32000,
+            message: format!("rebind failed: {e}"),
+        },
+    )?;
 
-    // Rebind typed-fact env names so rule bodies referencing facts_i64 etc.
-    // see the target branch's view.
     let bind_result = crate::server::bind_typed_facts_for_exom(&state.engine, &exoms, &exom_slash)
         .map_err(|e| JsonRpcError {
             code: -32000,
@@ -1194,10 +1116,6 @@ fn tool_eval(state: &AppState, args: &serde_json::Value) -> Result<String, JsonR
         })
     });
 
-    if let Some(prev) = saved_branch {
-        restore_branch(state, &mut exoms, &exom_slash, &prev);
-    }
-
     outcome
 }
 
@@ -1206,6 +1124,7 @@ fn tool_explain(state: &AppState, args: &serde_json::Value) -> Result<String, Js
     let mut exoms = state.exoms.lock().unwrap();
     let es = load_exom(state, &mut exoms, &exom_slash)?;
     let brain = &es.brain;
+    let branch = branch_arg(args);
 
     if let Some(fact_id) = get_str(args, "fact_id") {
         let history = brain.explain(fact_id);
@@ -1223,7 +1142,7 @@ fn tool_explain(state: &AppState, args: &serde_json::Value) -> Result<String, Js
 
     if let Some(predicate) = get_str(args, "predicate") {
         let facts: Vec<serde_json::Value> = brain
-            .current_facts()
+            .facts_on_branch(&branch)
             .into_iter()
             .filter(|f| f.predicate == predicate)
             .map(|f| {
@@ -1289,7 +1208,6 @@ fn tool_list_branches(state: &AppState, args: &serde_json::Value) -> Result<Stri
                 "branch_id": b.branch_id,
                 "name": b.name,
                 "parent_branch_id": b.parent_branch_id,
-                "is_current": b.branch_id == es.brain.current_branch_id(),
                 "claimed_by_user_email": b.claimed_by_user_email,
                 "claimed_by_agent": b.claimed_by_agent,
                 "claimed_by_model": b.claimed_by_model,
@@ -1306,11 +1224,15 @@ async fn tool_create_branch(
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let branch_name = require_str(args, "branch_name")?;
+    let parent_branch = get_str(args, "parent_branch_id")
+        .unwrap_or(crate::brain::MAIN_BRANCH)
+        .to_string();
 
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
-        es.brain.create_branch(branch_name, branch_name, &ctx)
+        es.brain
+            .create_branch(&parent_branch, branch_name, branch_name, &ctx)
     })
     .await;
 
@@ -1328,13 +1250,19 @@ async fn tool_create_branch(
     }
 }
 
-fn tool_session_new(state: &AppState, user: &User, args: &serde_json::Value) -> Result<String, JsonRpcError> {
+fn tool_session_new(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
     let project_path_str = require_str(args, "project_path")?;
     let project_path: crate::path::TreePath =
-        project_path_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-            code: -32602,
-            message: format!("invalid project_path: {e}"),
-        })?;
+        project_path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid project_path: {e}"),
+            })?;
     let session_type = match require_str(args, "session_type")? {
         "multi" => crate::exom::SessionType::Multi,
         "single" => crate::exom::SessionType::Single,
@@ -1402,13 +1330,19 @@ fn tool_session_new(state: &AppState, user: &User, args: &serde_json::Value) -> 
     }
 }
 
-fn tool_session_join(state: &AppState, user: &User, args: &serde_json::Value) -> Result<String, JsonRpcError> {
+fn tool_session_join(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
     let session_path_str = require_str(args, "session_path")?;
     let session_path: crate::path::TreePath =
-        session_path_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-            code: -32602,
-            message: format!("invalid session_path: {e}"),
-        })?;
+        session_path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid session_path: {e}"),
+            })?;
     let agent_label = require_str(args, "agent_label")?;
 
     let agent = get_str(args, "agent")
@@ -1469,10 +1403,12 @@ async fn tool_session_close(
 ) -> Result<String, JsonRpcError> {
     let session_path_str = require_str(args, "session_path")?;
     let session_path: crate::path::TreePath =
-        session_path_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-            code: -32602,
-            message: format!("invalid session_path: {e}"),
-        })?;
+        session_path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid session_path: {e}"),
+            })?;
     let exom_slash = session_path.to_slash_string();
 
     let ctx = mcp_mutation_ctx(user, args);
@@ -1481,6 +1417,7 @@ async fn tool_session_close(
     let closed_at = now.clone();
     let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
         es.brain.assert_fact(
+            crate::brain::MAIN_BRANCH,
             "session/closed_at",
             "session/closed_at",
             crate::fact_value::FactValue::Str(closed_at.clone()),
@@ -1510,9 +1447,11 @@ async fn tool_session_close(
 
 fn tool_schema(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
+    let branch = branch_arg(args);
     let mut exoms = state.exoms.lock().unwrap();
     let es = load_exom(state, &mut exoms, &exom_slash)?;
-    let ontology = crate::system_schema::build_exom_ontology(&exom_slash, &es.brain, &es.rules);
+    let ontology =
+        crate::system_schema::build_exom_ontology(&exom_slash, &es.brain, &branch, &es.rules);
     Ok(serde_json::to_string_pretty(&ontology).unwrap_or_else(|_| "{}".into()))
 }
 
@@ -1522,16 +1461,23 @@ async fn tool_init(
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let path_str = require_str(args, "path")?;
-    let path: crate::path::TreePath = path_str.parse().map_err(|e: crate::path::PathError| {
-        JsonRpcError {
-            code: -32602,
-            message: format!("invalid path: {e}"),
-        }
-    })?;
+    let path: crate::path::TreePath =
+        path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid path: {e}"),
+            })?;
     let path_slash = path.to_slash_string();
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store, crate::server::lookup_owner(state, &path_slash)).await;
+        let level = crate::auth::access::resolve_access(
+            user,
+            &path_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &path_slash),
+        )
+        .await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -1568,16 +1514,23 @@ async fn tool_exom_new(
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
     let path_str = require_str(args, "path")?;
-    let path: crate::path::TreePath = path_str.parse().map_err(|e: crate::path::PathError| {
-        JsonRpcError {
-            code: -32602,
-            message: format!("invalid path: {e}"),
-        }
-    })?;
+    let path: crate::path::TreePath =
+        path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid path: {e}"),
+            })?;
     let path_slash = path.to_slash_string();
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &path_slash, auth_store, crate::server::lookup_owner(state, &path_slash)).await;
+        let level = crate::auth::access::resolve_access(
+            user,
+            &path_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &path_slash),
+        )
+        .await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -1621,10 +1574,12 @@ async fn tool_exom_fork(
     let target_arg = get_str(args, "target").map(str::to_string);
 
     let source_path: crate::path::TreePath =
-        source_str.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-            code: -32602,
-            message: format!("invalid 'source': {e}"),
-        })?;
+        source_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid 'source': {e}"),
+            })?;
     let source_slash = source_path.to_slash_string();
 
     // Read access on source.
@@ -1672,10 +1627,12 @@ async fn tool_exom_fork(
         }
     };
     let target_path: crate::path::TreePath =
-        target_slash.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-            code: -32602,
-            message: format!("invalid 'target': {e}"),
-        })?;
+        target_slash
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid 'target': {e}"),
+            })?;
 
     // Write access on target.
     if let Some(ref auth_store) = state.auth_store {
@@ -1738,15 +1695,12 @@ async fn tool_exom_fork(
             code: -32000,
             message: "daemon has no sym_path configured".into(),
         })?;
-        let es_loaded = crate::server::load_exom_from_tree_path(
-            &source_disk,
-            sym_path,
-            &source_slash,
-        )
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("source_load_failed: {e}"),
-        })?;
+        let es_loaded =
+            crate::server::load_exom_from_tree_path(&source_disk, sym_path, &source_slash)
+                .map_err(|e| JsonRpcError {
+                    code: -32000,
+                    message: format!("source_load_failed: {e}"),
+                })?;
         state
             .engine
             .bind_named_db(crate::storage::sym_intern(&source_slash), &es_loaded.datoms)
@@ -1754,7 +1708,11 @@ async fn tool_exom_fork(
                 code: -32000,
                 message: format!("source_bind_failed: {e}"),
             })?;
-        state.exoms.lock().unwrap().insert(source_slash.clone(), es_loaded);
+        state
+            .exoms
+            .lock()
+            .unwrap()
+            .insert(source_slash.clone(), es_loaded);
     }
 
     // Phase 2: snapshot source facts + tip tx under a short-lived lock.
@@ -1766,27 +1724,35 @@ async fn tool_exom_fork(
         })?;
         let tip = es
             .brain
-            .current_facts()
+            .facts_on_branch(crate::brain::MAIN_BRANCH)
             .iter()
             .map(|f| f.created_by_tx as u64)
             .max()
             .unwrap_or(0);
-        let snap: Vec<(String, String, crate::fact_value::FactValue, f64, String, String, Option<String>)> =
-            es.brain
-                .current_facts()
-                .iter()
-                .map(|f| {
-                    (
-                        f.fact_id.clone(),
-                        f.predicate.clone(),
-                        f.value.clone(),
-                        f.confidence,
-                        f.provenance.clone(),
-                        f.valid_from.clone(),
-                        f.valid_to.clone(),
-                    )
-                })
-                .collect();
+        let snap: Vec<(
+            String,
+            String,
+            crate::fact_value::FactValue,
+            f64,
+            String,
+            String,
+            Option<String>,
+        )> = es
+            .brain
+            .facts_on_branch(crate::brain::MAIN_BRANCH)
+            .iter()
+            .map(|f| {
+                (
+                    f.fact_id.clone(),
+                    f.predicate.clone(),
+                    f.value.clone(),
+                    f.confidence,
+                    f.provenance.clone(),
+                    f.valid_from.clone(),
+                    f.valid_to.clone(),
+                )
+            })
+            .collect();
         (snap, tip)
         // MutexGuard drops here at end of block, before the .await below.
     };
@@ -1828,7 +1794,15 @@ async fn build_fork_lineage_and_replay(
     target_slash: &str,
     target_disk: &std::path::Path,
     source_tip_tx: u64,
-    snapshot: Vec<(String, String, crate::fact_value::FactValue, f64, String, String, Option<String>)>,
+    snapshot: Vec<(
+        String,
+        String,
+        crate::fact_value::FactValue,
+        f64,
+        String,
+        String,
+        Option<String>,
+    )>,
 ) -> Result<usize, JsonRpcError> {
     let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
         code: -32000,
@@ -1861,6 +1835,7 @@ async fn build_fork_lineage_and_replay(
         let ctx_cloned = ctx.clone();
         let r = crate::server::mutate_exom_async(state, &target, move |ex| {
             ex.brain.assert_fact(
+                crate::brain::MAIN_BRANCH,
                 &fact_id,
                 &predicate,
                 value,
@@ -1890,7 +1865,10 @@ async fn tool_tree(
     user: &User,
     args: &serde_json::Value,
 ) -> Result<String, JsonRpcError> {
-    let depth = args.get("depth").and_then(|v| v.as_u64()).map(|n| n as usize);
+    let depth = args
+        .get("depth")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
     let include_archived = args
         .get("include_archived")
         .and_then(|v| v.as_bool())
@@ -1915,14 +1893,20 @@ async fn tool_tree(
             })?,
         Some(p) => {
             let path: crate::path::TreePath =
-                p.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-                    code: -32602,
-                    message: format!("invalid path: {e}"),
-                })?;
+                p.parse()
+                    .map_err(|e: crate::path::PathError| JsonRpcError {
+                        code: -32602,
+                        message: format!("invalid path: {e}"),
+                    })?;
             let path_slash = path.to_slash_string();
             if let Some(ref auth_store) = state.auth_store {
-                let level =
-                    crate::auth::access::resolve_access(user, &path_slash, auth_store, crate::server::lookup_owner(state, &path_slash)).await;
+                let level = crate::auth::access::resolve_access(
+                    user,
+                    &path_slash,
+                    auth_store,
+                    crate::server::lookup_owner(state, &path_slash),
+                )
+                .await;
                 if !level.can_read() {
                     return Err(JsonRpcError {
                         code: -32000,
@@ -1965,6 +1949,7 @@ async fn tool_merge_branch(
 ) -> Result<String, JsonRpcError> {
     let exom_slash = exom_slug(args);
     let source_branch = require_str(args, "branch")?.to_string();
+    let target_branch = require_str(args, "target_branch")?.to_string();
     let policy = match get_str(args, "policy").unwrap_or("last-writer-wins") {
         "last-writer-wins" => crate::brain::MergePolicy::LastWriterWins,
         "keep-target" => crate::brain::MergePolicy::KeepTarget,
@@ -1978,7 +1963,13 @@ async fn tool_merge_branch(
     };
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store, crate::server::lookup_owner(state, &exom_slash)).await;
+        let level = crate::auth::access::resolve_access(
+            user,
+            &exom_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &exom_slash),
+        )
+        .await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -1990,8 +1981,8 @@ async fn tool_merge_branch(
     let ctx = mcp_mutation_ctx(user, args);
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
-        let target = es.brain.current_branch_id().to_string();
-        es.brain.merge_branch(&source_branch, &target, policy, &ctx)
+        es.brain
+            .merge_branch(&source_branch, &target_branch, policy, &ctx)
     })
     .await;
 
@@ -2024,7 +2015,13 @@ async fn tool_archive_branch(
     let branch = require_str(args, "branch")?.to_string();
 
     if let Some(ref auth_store) = state.auth_store {
-        let level = crate::auth::access::resolve_access(user, &exom_slash, auth_store, crate::server::lookup_owner(state, &exom_slash)).await;
+        let level = crate::auth::access::resolve_access(
+            user,
+            &exom_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &exom_slash),
+        )
+        .await;
         if !level.can_write() {
             return Err(JsonRpcError {
                 code: -32000,
@@ -2060,7 +2057,8 @@ fn tool_export(state: &AppState, args: &serde_json::Value) -> Result<String, Jso
     let mut exoms = state.exoms.lock().unwrap();
     let es = load_exom(state, &mut exoms, &exom_slash)?;
     let brain = &es.brain;
-    let facts = brain.current_facts();
+    let branch = branch_arg(args);
+    let facts = brain.facts_on_branch(&branch);
 
     match format {
         "jsonl" => {

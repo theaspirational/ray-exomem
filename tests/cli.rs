@@ -28,7 +28,10 @@ fn init_creates_project_on_disk() {
         .tree_root()
         .join("work/team/project/repo/main/exom.json")
         .exists());
-    assert!(d.tree_root().join("work/team/project/repo/sessions").is_dir());
+    assert!(d
+        .tree_root()
+        .join("work/team/project/repo/sessions")
+        .is_dir());
 }
 
 #[test]

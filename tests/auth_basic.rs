@@ -27,10 +27,7 @@ fn encode_query_value(value: &str) -> String {
 fn export_json(base_url: &str, session: &str, exom: &str) -> serde_json::Value {
     auth_get_raw(
         base_url,
-        &format!(
-            "/api/actions/export-json?exom={}",
-            encode_query_value(exom)
-        ),
+        &format!("/api/actions/export-json?exom={}", encode_query_value(exom)),
         session,
     )
     .expect("export-json should succeed")
@@ -362,11 +359,7 @@ fn login_bootstraps_user_namespace_and_owned_status() {
     let body: serde_json::Value = owned_status.into_json().unwrap();
     assert_eq!(body["exom"], "alice@co.com/main");
 
-    match auth_get_raw(
-        &daemon.base_url,
-        "/api/status?exom=main",
-        &alice_session,
-    ) {
+    match auth_get_raw(&daemon.base_url, "/api/status?exom=main", &alice_session) {
         Err(ureq::Error::Status(403, _)) => {}
         Ok(resp) => panic!("expected 403 for legacy bare main, got {}", resp.status()),
         Err(err) => panic!("unexpected transport error: {err}"),

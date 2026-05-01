@@ -537,10 +537,8 @@ async fn bootstrap_public_tree(state: &AppState, actor_email: &str) -> Result<()
     let mut changed = false;
     for (filename, contents) in BOOTSTRAP_SEED_FILES {
         let seed = parse_seed(filename, contents)?;
-        let project_path: crate::path::TreePath = seed
-            .path
-            .parse()
-            .map_err(|e: crate::path::PathError| {
+        let project_path: crate::path::TreePath =
+            seed.path.parse().map_err(|e: crate::path::PathError| {
                 ApiError::new(
                     "bad_path",
                     format!("bootstrap fixture {filename} declares invalid path: {e}"),
@@ -611,16 +609,14 @@ async fn login(
 
     if let Some(ref name) = body.provider {
         if name != provider.provider_name() {
-            return Err(
-                ApiError::new(
-                    "provider_mismatch",
-                    format!(
-                        "login body requested provider {name:?} but server is configured for {}",
-                        provider.provider_name()
-                    ),
-                )
-                .with_status(400),
-            );
+            return Err(ApiError::new(
+                "provider_mismatch",
+                format!(
+                    "login body requested provider {name:?} but server is configured for {}",
+                    provider.provider_name()
+                ),
+            )
+            .with_status(400));
         }
     }
 
@@ -737,24 +733,17 @@ async fn dev_login(
     Query(q): Query<DevLoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if state.dev_login_emails.is_empty() {
-        return Err(
-            ApiError::new("not_found", "dev-login is not enabled").with_status(404),
-        );
+        return Err(ApiError::new("not_found", "dev-login is not enabled").with_status(404));
     }
     if !addr.ip().is_loopback() {
-        return Err(
-            ApiError::new("forbidden", "dev-login is loopback-only").with_status(403),
-        );
+        return Err(ApiError::new("forbidden", "dev-login is loopback-only").with_status(403));
     }
     let email = match q.email.as_deref() {
         Some(requested) => {
             if !state.dev_login_emails.iter().any(|e| e == requested) {
                 return Err(ApiError::new(
                     "email_not_allowed",
-                    format!(
-                        "email '{}' is not in the dev-login allow-list",
-                        requested
-                    ),
+                    format!("email '{}' is not in the dev-login allow-list", requested),
                 )
                 .with_status(400));
             }

@@ -196,12 +196,17 @@ Optional fields on `assert_fact`:
 now — that's the bitemporal split. Backfilling `valid_from` to a historical
 date is supported and recommended when seeding from older sources.
 
-All write tools (`assert_fact`, `retract_fact`, `observe`, `believe`,
-`revoke_belief`, `create_branch`, `session_close`, `session_new`,
-`session_join`) accept an optional `branch` argument. The exom's current
-branch is restored after the write, so other callers see the cursor
-unchanged. Branch ownership is TOFU-enforced — writing to a branch claimed
-by a different user returns `branch_owned`.
+All branch-dependent write tools (`assert_fact`, `retract_fact`, `observe`,
+`believe`, `revoke_belief`) accept an optional `branch` argument and default
+to `main` when omitted. Branch ownership is TOFU-enforced — writing to a
+branch claimed by a different user returns `branch_owned`.
+
+### Branching
+
+There is no daemon-level "current branch" cursor. Reads and writes that depend
+on branch state take an explicit `branch` argument and default to `main` when
+omitted. Branch creation takes an explicit parent branch, and merge takes an
+explicit target branch.
 
 ### Attribution: three independent axes
 
@@ -310,7 +315,7 @@ target path).
 
 ### `exom_status` `{ exom }`
 
-Returns `{ exom, current_branch, facts, beliefs, transactions }`. Lazy-loads
+Returns `{ exom, facts, beliefs, transactions }`. Lazy-loads
 the exom into memory on first call.
 
 ### `schema` `{ exom }`
@@ -415,10 +420,9 @@ that is pinned in the body to a constant — e.g. `(find ?id ?p ?v) (where
 type` because `?p` never gets a binding. Either drop the unbound var from
 `find`, or use a fully-variable body atom and add a join.
 
-**Branch-scoped reads.** Pass `branch: "<name>"` to `query` or `eval` to
-evaluate against a specific branch's view of facts/tx/observations/beliefs
-without persistently changing the exom's cursor. Useful for inspecting
-sub-agent branches in a multi-agent session:
+**Branch-scoped reads.** Pass `branch: "<branch_id>"` to `query` or `eval` to
+evaluate against a specific branch's view of facts, transactions, and beliefs.
+Useful for inspecting sub-agent branches in a multi-agent session:
 
 ```jsonc
 {
@@ -428,9 +432,9 @@ sub-agent branches in a multi-agent session:
 }
 ```
 
-The brain's view is switched to `designer` for the duration of the query and
-restored on the way out, so concurrent callers see the cursor unchanged.
-Errors with `unknown_branch` if the branch doesn't exist or is archived.
+The engine datoms are rebound from `designer` for that request only; no
+daemon-wide branch state is mutated. Errors with `unknown_branch` if the branch
+doesn't exist or is archived.
 
 Useful relations to remember (full list via `schema.builtin_views`):
 
@@ -449,9 +453,9 @@ Runs raw Rayfall (any form, not just `(query ...)`). Power tool. Bypasses the
 canonical-query lowering, so it doesn't auto-inject rules — `query` is what
 you want for ordinary reads.
 
-When `branch` is supplied, the brain's view is temporarily switched to that
-branch for the duration of the eval, then restored — same semantics as
-`query`'s `branch` arg.
+When `branch` is supplied, eval binds that branch's datoms for the request
+without mutating daemon-wide branch state — same semantics as `query`'s
+`branch` arg.
 
 ### `assert_fact` `{ exom, predicate, value, fact_id?, confidence?, source?, valid_from?, valid_to?, agent?, model?, branch? }`
 
@@ -512,22 +516,21 @@ with a new `claim_text` instead when you do have a replacement — that emits a
 ### `list_branches` `{ exom }`
 
 Returns each branch with `branch_id`, `name`, `parent_branch_id`,
-`is_current`. Branches are light copy-on-write namespaces; most agent work
-stays on `main`.
+claim metadata, and fact counts. Branches are light copy-on-write namespaces;
+most agent work stays on `main`.
 
-### `create_branch` `{ exom, branch_name }`
+### `create_branch` `{ exom, branch_name, parent_branch_id? }`
 
-Creates a new branch off the current one. All write tools (`assert_fact`,
+Creates a new branch off `parent_branch_id` (default `main`). All write tools (`assert_fact`,
 `retract_fact`, `observe`, `believe`, `revoke_belief`) accept an optional
-`branch` argument that targets the write at a specific branch without
-disturbing the exom's current-branch cursor for other callers — the switch
-is held only for the duration of the write under an exclusive exom lock.
+`branch` argument that targets the write at a specific branch and defaults
+to `main`.
 Branch ownership is enforced by TOFU: writes to a branch claimed by a
 different user return `branch_owned`.
 
-### `merge_branch` `{ exom, branch, policy? }`
+### `merge_branch` `{ exom, branch, target_branch, policy? }`
 
-Merge `branch` into the exom's current branch. `policy` is one of
+Merge `branch` into `target_branch`. `policy` is one of
 `"last-writer-wins"` (default — overwrites conflicting target facts),
 `"keep-target"` (skips conflicts), or `"manual"` (returns the conflict
 list without writing). Returns `{ ok, added, conflicts, tx_id }` where
@@ -578,7 +581,7 @@ audits, not for incremental sync.
 ## 5. Discoverability flow for a fresh agent
 
 1. `list_exoms` → which exom am I working in?
-2. `exom_status { exom }` → does it have data already? what branch am I on?
+2. `exom_status { exom }` → does it have data already?
 3. `schema { exom }` → what predicates and views are modeled? what do I have to
    join against?
 4. Read with `query` (or `explain` for quick lookups).

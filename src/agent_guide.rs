@@ -136,9 +136,11 @@ export                GET /api/actions/export?exom=… — Rayfall text of facts
 
 log                   Recent events (GET /api/logs?exom=…).
 
-branch <subcommand>   List, create, switch, diff, merge, or archive branches. --exom, --addr,
+Branching:
+branch <subcommand>   List, create from an explicit parent, diff, merge into an explicit target,
+                      or archive branches. --exom, --addr,
                       and --json are accepted before or after the subcommand.
-                      eval/assert/retract/observe/import accept --branch to switch before the op.
+                      eval/assert/retract/observe/import accept --branch for per-operation views.
 
 version               Binary + rayforce2 version string plus build identity.
 
@@ -157,17 +159,16 @@ mounts at: `{base}/`. So `GET /api/status` below means
 Common query param: exom=<slash/path>. The daemon does not auto-create a
 default exom — every per-exom request must spell out which exom it targets.
 
-GET  /api/status         (stats.sym_entries, rules, current_branch, server.build.identity)
-GET  /api/schema?include_samples=true&sample_limit=…
+GET  /api/status         (stats.sym_entries, rules, server.build.identity)
+GET  /api/schema?branch=main&include_samples=true&sample_limit=…
 GET  /api/graph
 GET  /api/clusters
 GET  /api/logs
 GET  /api/tree
 GET  /api/branches
-POST /api/branches                 (JSON: branch_id, name)
-POST /api/branches/<id>/switch
+POST /api/branches                 (JSON: branch_id, name, parent_branch_id)
 GET  /api/branches/<id>/diff?base=…
-POST /api/branches/<id>/merge     (JSON: policy)
+POST /api/branches/<id>/merge     (JSON: policy, target_branch)
 DELETE /api/branches/<id>          (archive)
 GET  /api/provenance
 GET  /api/relation-graph

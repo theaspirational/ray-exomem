@@ -21,7 +21,7 @@
 | 0     | Init `<scratch_project>` + session_new                          | <pass/fail> | <ok responses>                                    |
 | 0     | Schema snapshot (attrs, view arities)                           | <pass/fail> | <attr count, view arities>                        |
 | 0     | Two Chrome contexts dev-login OK                                | <skip/p/f>  | <`/auth/me` per context>                          |
-| **1** | A: read-tool surface (guide, list_exoms, exom_status, list_branches) | <pass/fail> | <bytes, count, status, branch count>          |
+| **1** | A: read-tool surface (guide, list_exoms, exom_status, list_branches) | <pass/fail> | <bytes, count, status without current_branch, branch count without is_current> |
 | 1     | B: typed values (i64×2 + str×2 + sym×1 land in correct EDB)     | <pass/fail> | <fact_ids + EDB row counts>                       |
 | 1     | B: cmp filter `< 100` returns `84`                              | <pass/fail> | <result>                                          |
 | 1     | C: bitemporal — 4 transitions, 3 value-intervals, back-pointers | <pass/fail> | <T1..T4, history rows>                            |
@@ -29,16 +29,18 @@
 | 1     | D: belief lifecycle (believe + supersede + revoke + v2)         | <pass/fail> | <belief_ids, statuses>                            |
 | 1     | D: belief-row total = 2                                         | <pass/fail> | <row count>                                       |
 | 1     | E: 2 observations + 3-tag obs                                   | <pass/fail> | <obs_ids, tag count>                              |
-| 1     | F: builtin-view sweep (8 views, expected ≥ counts)              | <pass/fail> | <per-view row counts>                             |
+| 1     | F: builtin-view sweep (required views + optional advertised views) | <pass/fail> | <per-view row counts>                          |
 | 1     | G: attribution triple non-empty                                 | <pass/fail> | <tx-row tuple>                                    |
 | 1     | H: explain (predicate + fact_id) + export (canonical + jsonl)   | <pass/fail> | <bytes / line count>                              |
-| **2** | A: branch lifecycle (create / assert / isolation / list / merge / archive) | <pass/fail> | <T_fx, merge_tx, archived flag>           |
+| **2** | A: branch lifecycle (create parent / assert branch / isolation / list no-current / merge target / archive) | <pass/fail> | <T_fx, merge_tx, target, archived flag> |
 | 2     | B: session lifecycle (single / bad-label / unknown-agent / close / closed_at) | <pass/fail> | <error strings>                            |
 | 2     | C: scaffolding (init / exom_new / folder_new / rename / delete) | <pass/fail> | <`<scratch_bare>` path>                           |
 | 2     | D1: hyphen attr probe → 0 rows                                  | <pass/fail> | <count>                                           |
 | 2     | D2: default-fact-id supersede → 2 intervals                     | <pass/fail> | <fact_history>                                    |
 | 2     | D3: sym health (no domain error)                                | <pass/fail> | <ok / RAY_ERROR text>                             |
 | 2     | D4: cache staleness post-join (claim populated immediately)     | <pass/fail> | <list_branches probe-d row>                       |
+| 2     | D5: no branch cursor state (`current_branch` / `is_current` absent) | <pass/fail> | <status/list evidence>                         |
+| 2     | D6: branch-param API/UI smoke + exom-level observations/rules layout | <skip/p/f> | <URL, facts/beliefs/observations/schema/graph summaries> |
 | **3** | A: Model A 403 (auth-layer; NOT branch_owned)                   | <skip/p/f>  | <verbatim error>                                  |
 | 3     | A: created_by stamp + forked_from absent on non-fork            | <skip/p/f>  | <tree node fields>                                |
 | 3     | B: fork default-target shape (public → `{email}/forked/...`)    | <skip/p/f>  | <returned target verbatim>                        |

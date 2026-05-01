@@ -236,7 +236,7 @@ Daemon-backed commands:
 
 - `status`, `facts`, `query`, `expand-query`, `eval`
 - `assert`, `retract`, `history`, `why`, `why-not`
-- `branch <list|create|switch|diff|merge|delete>`
+- `branch <list|create|diff|merge|delete>`
 - `coord <claim|release|depend|agent-session|...>`
 - `session <new|join|rename|close|archive>`
 - `export`, `import`, `watch`, `lint-memory`, `doctor`
@@ -303,7 +303,7 @@ Canonical API routes:
 - `POST /api/actions/branch-create`
 - `POST /api/actions/rename`
 - `POST /api/actions/assert-fact`
-- `POST /api/query` (accepts `?branch=<name>` to evaluate against a specific branch's view; cursor restored after the read)
+- `POST /api/query` (accepts `?branch=<branch_id>` to evaluate against a specific branch view)
 - `POST /api/expand-query`
 - `POST /api/actions/eval`
 - `GET /api/facts`
@@ -312,9 +312,8 @@ Canonical API routes:
 - `GET /api/facts/{id}`
 - `GET|POST /api/branches`
 - `GET|DELETE /api/branches/{id}`
-- `POST /api/branches/{id}/switch`
 - `GET /api/branches/{id}/diff`
-- `POST /api/branches/{id}/merge`
+- `POST /api/branches/{id}/merge` (JSON: `target_branch`, `policy`)
 - `GET /api/explain`
 - `GET /api/schema`
 - `GET /api/graph`

@@ -149,11 +149,8 @@ where
     }
 }
 
-fn rewrite_expr_body_literals<F, G>(
-    expr: &mut Expr,
-    value_kind_for_attr: &F,
-    rule_param_attrs: &G,
-) where
+fn rewrite_expr_body_literals<F, G>(expr: &mut Expr, value_kind_for_attr: &F, rule_param_attrs: &G)
+where
     F: Fn(&str) -> Option<String>,
     G: Fn(&str) -> Option<Vec<Option<String>>>,
 {

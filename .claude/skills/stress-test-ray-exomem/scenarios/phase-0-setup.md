@@ -14,7 +14,7 @@ Verify preconditions, discover identities, open the two isolated browser context
 
 ## Steps
 
-1. **Discover `<user1_email>`** — the runner's authenticated identity from MCP. Prefer the bearer's auth context. Fallback: `mcp__ray-exomem__tree { path: "" }` and pick the top-level node that matches the orchestrator's email (every authenticated user has `<email>/main` seeded on first login).
+1. **Discover `<user1_email>`** — the runner's authenticated identity from MCP. Prefer the bearer's auth context. Fallback: `mcp__ray-exomem__tree { path: "" }` and pick the top-level node that matches the orchestrator's email if that namespace exists. Do not assume login auto-seeds `<email>/main`; private scratch is created explicitly in step 4.
 
 2. **Discover `<user2_email>`** — passed by the operator in the run prompt, or discovered by probe (preconditions step 4). Record both emails as evidence.
 
@@ -71,7 +71,7 @@ Verify preconditions, discover identities, open the two isolated browser context
 - All preconditions hold.
 - Both `init` and `session_new` return `ok: true`.
 - Both Chrome contexts return the expected `email` from `/auth/me`.
-- Schema snapshot has `tx/user_email`, `tx/agent`, `tx/model`, `branch/claimed_by_user_email`, and the seven builtin_views (fact-row arity 3; fact-meta 5; fact-with-tx 8; tx-row 8; observation-row 4; belief-row 4; branch-row 5).
+- Schema snapshot has `tx/user_email`, `tx/agent`, `tx/model`, `branch/claimed_by_user_email`, and at least these builtin_views with matching arity: fact-row 3; fact-meta 5; fact-with-tx 8; tx-row 8; observation-row 4; belief-row 4; branch-row 5.
 
 ## Evidence
 

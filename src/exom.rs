@@ -55,7 +55,6 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExomMeta {
     pub format_version: u32,
-    pub current_branch: String,
     pub kind: ExomKind,
     pub created_at: String,
     /// Email of the user who created this exom. Empty string means
@@ -91,7 +90,6 @@ impl ExomMeta {
     pub fn new_project_main(created_by: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            current_branch: "main".into(),
             kind: ExomKind::ProjectMain,
             created_at: now_iso8601_basic(),
             created_by: created_by.to_string(),
@@ -104,7 +102,6 @@ impl ExomMeta {
     pub fn new_bare(created_by: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            current_branch: "main".into(),
             kind: ExomKind::Bare,
             created_at: now_iso8601_basic(),
             created_by: created_by.to_string(),
@@ -117,7 +114,6 @@ impl ExomMeta {
     pub fn new_session(sess: SessionMeta, created_by: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            current_branch: "main".into(),
             kind: ExomKind::Session,
             created_at: now_iso8601_basic(),
             created_by: created_by.to_string(),

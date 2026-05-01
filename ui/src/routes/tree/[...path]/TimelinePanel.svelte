@@ -4,10 +4,14 @@
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
-	import { exportBackupText, parseFactsFromExport } from '$lib/exomem.svelte';
+	import { fetchFactsList, listedFactToFactEntry } from '$lib/exomem.svelte';
 	import type { FactEntry } from '$lib/types';
 
-	let { exomPath, notebookMode = false }: { exomPath: string; notebookMode?: boolean } = $props();
+	let {
+		exomPath,
+		branch = 'main',
+		notebookMode = false
+	}: { exomPath: string; branch?: string; notebookMode?: boolean } = $props();
 
 	const INITIAL_TIMELINE_LIMIT = 20;
 
@@ -64,8 +68,8 @@
 		loading = true;
 		showAllTimeline = false;
 		try {
-			const dlText = await exportBackupText(exomPath);
-			facts = parseFactsFromExport(dlText);
+			const rows = await fetchFactsList(exomPath, { branch });
+			facts = rows.map((row) => listedFactToFactEntry(row, branch));
 		} catch {
 			facts = [];
 		} finally {
@@ -76,6 +80,7 @@
 	$effect(() => {
 		if (!browser) return;
 		exomPath;
+		branch;
 		void loadTimeline();
 	});
 </script>

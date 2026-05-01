@@ -120,11 +120,7 @@ fn owner_can_create_and_query_exom() {
     );
 
     // Verify the exom shows up in tree with the asserted fact.
-    let resp = auth_get_raw(
-        &daemon.base_url,
-        "/api/tree?path=alice@co.com/proj",
-        &alice,
-    );
+    let resp = auth_get_raw(&daemon.base_url, "/api/tree?path=alice@co.com/proj", &alice);
     let status = status_of(&resp);
     assert_eq!(status, 200, "tree query should succeed for owner");
     let body: serde_json::Value = resp.unwrap().into_json().unwrap();

@@ -664,9 +664,14 @@ pub fn builtin_views(exom: &str) -> Vec<BuiltinView> {
         .collect()
 }
 
-pub fn build_exom_ontology(exom: &str, brain: &Brain, user_rules: &[ParsedRule]) -> ExomOntology {
+pub fn build_exom_ontology(
+    exom: &str,
+    brain: &Brain,
+    branch_id: &str,
+    user_rules: &[ParsedRule],
+) -> ExomOntology {
     let mut user_preds = BTreeSet::new();
-    for fact in brain.current_facts() {
+    for fact in brain.facts_on_branch(branch_id) {
         user_preds.insert(fact.predicate.clone());
     }
     for rule in user_rules {
@@ -694,4 +699,3 @@ pub fn load_exom_ontology(path: &Path) -> Result<ExomOntology> {
     let raw = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_slice(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
-

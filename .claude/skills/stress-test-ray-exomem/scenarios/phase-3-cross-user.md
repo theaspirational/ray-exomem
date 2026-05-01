@@ -91,7 +91,7 @@ C.8. **(Session refuses flip)** user1 attempts `POST /api/actions/exom-mode { ex
 
 ## D. Co-edit non-`main` TOFU preservation
 
-D.1. user1 creates a feature branch on the co-edit exom: `POST /api/branches { exom: <public_scratch>/wiki, branch_id: "feat-1", name: "feat-1" }`. user1 asserts on `feat-1`: `assert_fact { exom: <public_scratch>/wiki, branch: "feat-1", fact_id: "feat-1-mark", predicate: "feat/mark", value: "user1" }`. Pass: 200; the assert TOFU-claims `feat-1` for user1.
+D.1. user1 creates a feature branch on the co-edit exom: `POST /api/branches { exom: <public_scratch>/wiki, branch_id: "feat-1", name: "feat-1", parent_branch_id: "main" }`. user1 asserts on `feat-1`: `assert_fact { exom: <public_scratch>/wiki, branch: "feat-1", fact_id: "feat-1-mark", predicate: "feat/mark", value: "user1" }`. Pass: 200; the assert TOFU-claims `feat-1` for user1.
 
 D.2. user2 attempts a write on `feat-1`: `assert_fact { exom: <public_scratch>/wiki, branch: "feat-1", fact_id: "feat-1-intruder", predicate: "feat/intruder", value: "user2" }`. Pass: `400 branch_owned by <user1_email>`. Co-edit only short-circuits TOFU on `main`; non-`main` branches preserve ownership.
 

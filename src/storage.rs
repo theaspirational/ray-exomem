@@ -273,8 +273,12 @@ fn wrap_splay_result(ptr: *mut ffi::ray_t, dir: &Path) -> Result<RayObj> {
             dir.display()
         );
     }
-    RayObj::from_raw(ptr)
-        .with_context(|| format!("ray_read_splayed (mmap) wrapping failed for {}", dir.display()))
+    RayObj::from_raw(ptr).with_context(|| {
+        format!(
+            "ray_read_splayed (mmap) wrapping failed for {}",
+            dir.display()
+        )
+    })
 }
 
 pub fn table_exists(dir: &Path) -> bool {
@@ -673,14 +677,14 @@ fn push_datom_row_fact_value(
     )
 }
 
-pub fn build_datoms_table(brain: &Brain) -> Result<RayObj> {
-    let facts = brain.current_facts();
-    let txs = brain.current_transactions();
+pub fn build_datoms_table(brain: &Brain, branch_id: &str) -> Result<RayObj> {
+    let facts = brain.facts_on_branch(branch_id);
+    let txs = brain.transactions_on_branch(branch_id);
     let observations = brain.observations();
     // Latest version per belief_id (regardless of status) so revoked /
     // superseded beliefs still appear in `belief-row` with the right
     // `belief/status`. `current_beliefs` would silently drop them.
-    let beliefs = brain.latest_beliefs_per_id();
+    let beliefs = brain.latest_belief_per_id_on_branch(branch_id);
     let branches = brain.branches();
     let mut row_count = facts.len();
     for fact in &facts {
@@ -1333,14 +1337,13 @@ fn build_single_typed_fact_table(
     }
 }
 
-/// Build the three typed fact sub-tables for the current (active) facts in
-/// this brain. Call sites must re-invoke after every mutation and rebind
-/// the tables in the Rayforce2 env so rule-body `(facts_i64 ?e ?a ?v)`
-/// atoms see fresh data.
-pub fn build_typed_fact_tables(brain: &Brain) -> Result<TypedFactTables> {
+/// Build the three typed fact sub-tables for active facts on `branch_id`.
+/// Call sites must re-invoke after every mutation and rebind the tables in
+/// the Rayforce2 env so rule-body `(facts_i64 ?e ?a ?v)` atoms see fresh data.
+pub fn build_typed_fact_tables(brain: &Brain, branch_id: &str) -> Result<TypedFactTables> {
     use crate::fact_value::FactValue;
 
-    let facts = brain.current_facts();
+    let facts = brain.facts_on_branch(branch_id);
     let mut i64_rows: Vec<(i64, i64, i64)> = Vec::new();
     let mut str_rows: Vec<(i64, i64, i64)> = Vec::new();
     let mut sym_rows: Vec<(i64, i64, i64)> = Vec::new();
@@ -2011,14 +2014,9 @@ pub fn load_branches_from_disk(exom_disk: &Path, sym_path: &Path) -> Result<Vec<
 
 /// Write the branch splay table for `exom_disk` via the atomic swap protocol
 /// and persist any newly-interned symbols.
-pub fn save_branches_to_disk(
-    exom_disk: &Path,
-    sym_path: &Path,
-    branches: &[Branch],
-) -> Result<()> {
-    std::fs::create_dir_all(exom_disk).with_context(|| {
-        format!("failed to create exom dir {}", exom_disk.display())
-    })?;
+pub fn save_branches_to_disk(exom_disk: &Path, sym_path: &Path, branches: &[Branch]) -> Result<()> {
+    std::fs::create_dir_all(exom_disk)
+        .with_context(|| format!("failed to create exom dir {}", exom_disk.display()))?;
     recover_splay_dirs(exom_disk);
     let dir = exom_disk.join("branch");
     let tbl = build_branch_table(branches);

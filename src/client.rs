@@ -32,10 +32,7 @@ fn parse_endpoint(endpoint: &str) -> (String, String) {
 impl Client {
     pub fn new(endpoint: Option<&str>) -> Self {
         let (addr, base_path) = parse_endpoint(endpoint.unwrap_or(DEFAULT_ADDR));
-        Self {
-            addr,
-            base_path,
-        }
+        Self { addr, base_path }
     }
 
     fn url(&self, path: &str) -> String {

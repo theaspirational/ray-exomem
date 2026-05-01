@@ -17,7 +17,7 @@
 	} from '$lib/exomem.svelte';
 	import type { ExomemSchemaResponse, FactEntry } from '$lib/types';
 
-	let { exomPath }: { exomPath: string } = $props();
+	let { exomPath, branch = 'main' }: { exomPath: string; branch?: string } = $props();
 
 	const CHART_PALETTE_FALLBACK = [
 		'#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed',
@@ -113,7 +113,7 @@
 		factFilterPredicate = null;
 		highlightSelectedNode(entityId);
 		try {
-			selectedNodeFacts = await fetchEntityFacts(entityId, exomPath);
+			selectedNodeFacts = await fetchEntityFacts(entityId, exomPath, branch);
 		} catch {
 			selectedNodeFacts = [];
 		}
@@ -261,6 +261,7 @@
 	$effect(() => {
 		if (!browser) return;
 		exomPath;
+		branch;
 		void loadGraph();
 	});
 
@@ -269,8 +270,8 @@
 		error = null;
 		try {
 			const [graphRes, schemaRes] = await Promise.all([
-				fetchRelationGraph(exomPath),
-				fetchExomemSchema(exomPath)
+				fetchRelationGraph(exomPath, branch),
+				fetchExomemSchema(exomPath, undefined, branch)
 			]);
 			graph = graphRes;
 			schema = schemaRes;

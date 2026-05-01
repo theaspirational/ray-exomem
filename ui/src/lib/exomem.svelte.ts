@@ -255,17 +255,22 @@ export function fetchFactDetail(factId: string, exom = DEFAULT_EXOM): Promise<Fa
 
 export function fetchExomemSchema(
 	exom = DEFAULT_EXOM,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	branch = 'main'
 ): Promise<ExomemSchemaResponse> {
 	return readJson<ExomemSchemaResponse>(
-		`api/schema?include_samples=true&sample_limit=2&exom=${encodeURIComponent(exom)}`,
+		`api/schema?include_samples=true&sample_limit=2&exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`,
 		signal ? { signal } : undefined
 	);
 }
 
-export function fetchExomemGraph(limit = 500, exom = DEFAULT_EXOM): Promise<ExomemGraphResponse> {
+export function fetchExomemGraph(
+	limit = 500,
+	exom = DEFAULT_EXOM,
+	branch = 'main'
+): Promise<ExomemGraphResponse> {
 	return readJson<ExomemGraphResponse>(
-		`api/graph?limit=${limit}&cluster=true&exom=${encodeURIComponent(exom)}`
+		`api/graph?limit=${limit}&cluster=true&exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`
 	);
 }
 
@@ -281,9 +286,12 @@ export interface RelationGraphResponse {
 	summary: { node_count: number; edge_count: number };
 }
 
-export function fetchRelationGraph(exom = DEFAULT_EXOM): Promise<RelationGraphResponse> {
+export function fetchRelationGraph(
+	exom = DEFAULT_EXOM,
+	branch = 'main'
+): Promise<RelationGraphResponse> {
 	return readJson<RelationGraphResponse>(
-		`api/relation-graph?exom=${encodeURIComponent(exom)}`
+		`api/relation-graph?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`
 	);
 }
 
@@ -293,10 +301,11 @@ export function fetchRelationGraph(exom = DEFAULT_EXOM): Promise<RelationGraphRe
  */
 export async function fetchEntityFacts(
 	entity: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<FactEntry[]> {
 	const schema = await readJson<ExomemSchemaResponse>(
-		`api/schema?include_samples=true&sample_limit=10000&exom=${encodeURIComponent(exom)}`
+		`api/schema?include_samples=true&sample_limit=10000&exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`
 	);
 	const facts: FactEntry[] = [];
 	for (const rel of schema.relations) {
@@ -348,7 +357,6 @@ export type TreeNode =
 			path: string;
 			exom_kind: string;
 			fact_count: number;
-			current_branch: string;
 			last_tx: string | null;
 			branches: string[] | null;
 			archived: boolean;
@@ -436,6 +444,22 @@ export interface ListedFact {
 	branch_name?: string;
 	tx_time?: string;
 	created_by_tx?: number;
+}
+
+export function listedFactToFactEntry(row: ListedFact, viewBranch?: string): FactEntry {
+	const branchOrigin = row.branch_id ?? row.branch_name ?? null;
+	return {
+		factId: row.fact_id,
+		predicate: row.predicate,
+		terms: [String(row.value ?? '')],
+		kind: 'base',
+		confidence: null,
+		source: row.actor || null,
+		validFrom: row.valid_from ?? null,
+		validTo: row.valid_to ?? null,
+		branchRole: viewBranch && branchOrigin ? (branchOrigin === viewBranch ? 'local' : 'inherited') : null,
+		branchOrigin
+	};
 }
 
 export async function fetchFactsList(
@@ -569,9 +593,10 @@ export function factoryReset(): Promise<{ ok: boolean; removed_exoms: string[]; 
 
 export function retractFact(
 	factId: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<{ ok: boolean; output?: string }> {
-	return retractFactById(factId, exom);
+	return retractFactById(factId, exom, branch);
 }
 
 export function triggerEvaluate(exom = DEFAULT_EXOM): Promise<{
@@ -627,16 +652,24 @@ export async function exportBackupText(exom = DEFAULT_EXOM, signal?: AbortSignal
 
 export function importBackup(
 	source: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<EvalResponse> {
-	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, source);
+	return postText(
+		`api/actions/eval?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`,
+		source
+	);
 }
 
 export function runRayfall(
 	source: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<EvalResponse> {
-	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, source);
+	return postText(
+		`api/actions/eval?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`,
+		source
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -738,34 +771,22 @@ export function assertFact(
 		confidence?: number;
 		source?: string;
 	},
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<{ ok: boolean; fact_id?: string }> {
 	const fact_id = options?.factId?.trim() || (terms.length >= 2 ? terms[0]! : predicate);
 	const value = terms.length >= 2 ? terms.slice(1).join(', ') : (terms[0] ?? '');
-	if (options?.validFrom || options?.validTo) {
-		return postAction(`api/actions/assert-fact?exom=${encodeURIComponent(exom)}`, {
-			exom,
-			fact_id,
-			predicate,
-			value,
-			confidence: options?.confidence ?? 1.0,
-			source: options?.source ?? 'ui',
-			valid_from: options?.validFrom,
-			valid_to: options?.validTo
-		});
-	}
-	const line = formatAssertFactLine(
-		{
-			factId: fact_id,
-			predicate,
-			terms: [value],
-			kind: 'base',
-			confidence: options?.confidence ?? null,
-			source: options?.source ?? null
-		},
-		exom
-	);
-	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, line);
+	return postAction(`api/actions/assert-fact?exom=${encodeURIComponent(exom)}`, {
+		exom,
+		branch,
+		fact_id,
+		predicate,
+		value,
+		confidence: options?.confidence ?? 1.0,
+		source: options?.source ?? 'ui',
+		valid_from: options?.validFrom,
+		valid_to: options?.validTo
+	});
 }
 
 export async function updateFact(
@@ -776,12 +797,13 @@ export async function updateFact(
 		validFrom?: string;
 		validTo?: string;
 	},
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<{ ok: boolean; fact_id?: string }> {
 	if (!oldFact.factId) {
 		throw new Error('Cannot edit a fact without factId (reload facts from the server)');
 	}
-	await retractFact(oldFact.factId, exom);
+	await retractFact(oldFact.factId, exom, branch);
 	return assertFact(
 		newFact.predicate,
 		newFact.terms,
@@ -789,13 +811,15 @@ export async function updateFact(
 			validFrom: newFact.validFrom,
 			validTo: newFact.validTo
 		},
-		exom
+		exom,
+		branch
 	);
 }
 
 async function retractFactById(
 	factId: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<{ ok: boolean; output?: string }> {
 	const detail = await fetchFactDetail(factId, exom);
 	const tuple = detail.fact?.tuple;
@@ -805,7 +829,10 @@ async function retractFactById(
 	const predicate = String(tuple[1] ?? '');
 	const value = String(tuple[2] ?? '');
 	const ray = `(retract-fact ${exom} "${factId.replace(/"/g, '\\"')}" '${predicate.replace(/'/g, "\\'")} "${value.replace(/"/g, '\\"')}")`;
-	return postText(`api/actions/eval?exom=${encodeURIComponent(exom)}`, ray);
+	return postText(
+		`api/actions/eval?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`,
+		ray
+	);
 }
 
 /**
@@ -823,10 +850,11 @@ export function addRule(
  */
 export async function fetchRelationFacts(
 	relation: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	branch = 'main'
 ): Promise<ExomemSchemaResponse> {
 	return readJson<ExomemSchemaResponse>(
-		`api/schema?include_samples=true&sample_limit=1000&relation=${encodeURIComponent(relation)}&exom=${encodeURIComponent(exom)}`
+		`api/schema?include_samples=true&sample_limit=1000&relation=${encodeURIComponent(relation)}&exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`
 	);
 }
 
@@ -993,9 +1021,43 @@ export interface BranchRow {
 	parent_branch_id: string | null;
 	created_tx_id: number;
 	archived: boolean;
-	is_current: boolean;
 	fact_count: number;
-	claimed_by?: string | null;
+	claimed_by_user_email?: string | null;
+	claimed_by_agent?: string | null;
+	claimed_by_model?: string | null;
+}
+
+export interface BeliefRow {
+	belief_id: string;
+	claim_text: string;
+	status: string;
+	confidence: number;
+	supported_by: string[];
+	rationale: string;
+	valid_from: string;
+	valid_to: string | null;
+	created_by_tx: number;
+	tx_time: string;
+	actor: string;
+	branch_id: string;
+	branch_name: string;
+}
+
+export interface ObservationRow {
+	obs_id: string;
+	source_type: string;
+	source_ref: string;
+	content: string;
+	confidence: number;
+	tags: string[];
+	valid_from: string;
+	valid_to: string | null;
+	created_at: string;
+	tx_id: number;
+	tx_time: string;
+	actor: string;
+	branch_id: string;
+	branch_name: string;
 }
 
 export interface BranchDiffResult {
@@ -1144,19 +1206,31 @@ export async function fetchBranches(exom = DEFAULT_EXOM): Promise<BranchRow[]> {
 export async function createBranch(
 	branchId: string,
 	name: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	parentBranchId = 'main'
 ): Promise<{ branch_id: string; tx_id: number }> {
 	return postAction(`api/branches?exom=${encodeURIComponent(exom)}`, {
 		branch_id: branchId,
-		name
+		name,
+		parent_branch_id: parentBranchId
 	});
 }
 
-export async function switchBranch(branchId: string, exom = DEFAULT_EXOM): Promise<void> {
-	await postText(
-		`api/branches/${encodeURIComponent(branchId)}/switch?exom=${encodeURIComponent(exom)}`,
-		''
+export async function fetchBeliefs(
+	exom = DEFAULT_EXOM,
+	branch = 'main'
+): Promise<BeliefRow[]> {
+	const r = await readJson<{ beliefs: BeliefRow[] }>(
+		`api/beliefs?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`
 	);
+	return r.beliefs ?? [];
+}
+
+export async function fetchObservations(exom = DEFAULT_EXOM): Promise<ObservationRow[]> {
+	const r = await readJson<{ observations: ObservationRow[] }>(
+		`api/observations?exom=${encodeURIComponent(exom)}`
+	);
+	return r.observations ?? [];
 }
 
 export async function fetchBranchDiff(
@@ -1172,11 +1246,12 @@ export async function fetchBranchDiff(
 export async function mergeBranch(
 	source: string,
 	policy: string,
-	exom = DEFAULT_EXOM
+	exom = DEFAULT_EXOM,
+	targetBranch = 'main'
 ): Promise<MergeBranchResult> {
 	return postAction(
 		`api/branches/${encodeURIComponent(source)}/merge?exom=${encodeURIComponent(exom)}`,
-		{ policy }
+		{ policy, target_branch: targetBranch }
 	);
 }
 

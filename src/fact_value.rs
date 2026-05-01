@@ -207,10 +207,7 @@ mod tests {
     fn serde_untagged_sym() {
         let v: FactValue = serde_json::from_str(r#"{"$sym":"active"}"#).unwrap();
         assert_eq!(v, FactValue::sym("active"));
-        assert_eq!(
-            serde_json::to_string(&v).unwrap(),
-            r#"{"$sym":"active"}"#
-        );
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"$sym":"active"}"#);
     }
 
     #[test]

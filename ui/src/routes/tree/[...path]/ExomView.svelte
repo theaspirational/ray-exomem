@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { base } from '$app/paths';
+	import { page } from '$app/state';
 	import { GitFork, Loader2 } from '@lucide/svelte';
 	import { toast } from 'svelte-sonner';
 	import { actorPrompt } from '$lib/actorPrompt.svelte';
@@ -18,12 +19,11 @@
 	import { entityForFactId } from '$lib/predicateRendering.svelte';
 	import {
 		ApiActionError,
-		exportBackupText,
 		fetchBranches,
 		fetchFactsList,
 		fetchRelationGraph,
 		forkExom,
-		parseFactsFromExport,
+		listedFactToFactEntry,
 		setExomMode,
 		unarchiveSessionExom,
 		type AclMode,
@@ -31,7 +31,9 @@
 		type TreeExom
 	} from '$lib/exomem.svelte';
 	import type { FactEntry } from '$lib/types';
+	import BeliefsPanel from './BeliefsPanel.svelte';
 	import GraphPanel from './GraphPanel.svelte';
+	import ObservationsPanel from './ObservationsPanel.svelte';
 	import RulesPanel from './RulesPanel.svelte';
 	import SessionFactsPanel from './SessionFactsPanel.svelte';
 	import TimelinePanel from './TimelinePanel.svelte';
@@ -54,7 +56,9 @@
 		{ id: 'branches', label: 'Branches' },
 		{ id: 'connections', label: 'Connections' },
 		{ id: 'facts', label: 'Facts' },
+		{ id: 'beliefs', label: 'Beliefs' },
 		{ id: 'timeline', label: 'Timeline' },
+		{ id: 'observations', label: 'Observations' },
 		{ id: 'rules', label: 'Rules' }
 	];
 
@@ -111,6 +115,27 @@
 	let branchesErr = $state<string | null>(null);
 	let branchesRetry = $state(0);
 
+	const selectedBranch = $derived(page.url.searchParams.get('branch') || 'main');
+	const selectedBranchRow = $derived(
+		branches.find((b) => b.branch_id === selectedBranch || b.name === selectedBranch) ?? null
+	);
+
+	function branchUrl(branchId: string): string {
+		const qs = new URLSearchParams(page.url.searchParams);
+		if (branchId === 'main') qs.delete('branch');
+		else qs.set('branch', branchId);
+		const query = qs.toString();
+		return `${base}/tree/${node.path}${query ? `?${query}` : ''}`;
+	}
+
+	function selectBranch(branchId: string) {
+		void goto(branchUrl(branchId), { keepFocus: true, noScroll: true });
+	}
+
+	function branchViewLabel(): string {
+		return selectedBranchRow?.name ?? selectedBranch;
+	}
+
 	let unarchiveBusy = $state(false);
 
 	let graphEdges = $state(0);
@@ -120,14 +145,15 @@
 	$effect(() => {
 		if (!browser) return;
 		node.path;
+		selectedBranch;
 		factsRetry;
 		let c = false;
 		factsLoading = true;
 		factsErr = null;
-		exportBackupText(node.path)
-			.then((t) => {
+		fetchFactsList(node.path, { branch: selectedBranch })
+			.then((rows) => {
 				if (c) return;
-				flatFacts = parseFactsFromExport(t);
+				flatFacts = rows.map((row) => listedFactToFactEntry(row, selectedBranch));
 			})
 			.catch((e: unknown) => {
 				if (c) return;
@@ -167,9 +193,10 @@
 	$effect(() => {
 		if (!browser) return;
 		node.path;
+		selectedBranch;
 		let c = false;
 		graphLoaded = false;
-		fetchRelationGraph(node.path)
+		fetchRelationGraph(node.path, selectedBranch)
 			.then((g) => {
 				if (c) return;
 				graphEdges = g?.summary?.edge_count ?? 0;
@@ -188,8 +215,9 @@
 	$effect(() => {
 		if (!browser) return;
 		node.path;
+		selectedBranch;
 		let c = false;
-		fetchFactsList(node.path)
+		fetchFactsList(node.path, { branch: selectedBranch })
 			.then((rows) => {
 				if (c) return;
 				let best: { time: string; actor: string } | null = null;
@@ -211,6 +239,15 @@
 		};
 	});
 
+	$effect(() => {
+		if (!browser) return;
+		if (branchesLoading || branches.length === 0) return;
+		const found = branches.find((b) => b.branch_id === selectedBranch && !b.archived);
+		if (!found) {
+			void goto(branchUrl('main'), { replaceState: true, noScroll: true, keepFocus: true });
+		}
+	});
+
 	const statsTail = $derived.by(() => {
 		const t = listFactsMeta?.time ?? node.last_tx ?? null;
 		if (!t) return '';
@@ -221,12 +258,6 @@
 		}
 		return `last change ${rel}`;
 	});
-
-	function isBranchLoneMain(list: BranchRow[]): boolean {
-		if (list.length === 0) return true;
-		if (list.length > 1) return false;
-		return list[0].name === 'main' || list[0].is_current;
-	}
 
 	function onUnarchive() {
 		actorPrompt.run(async () => {
@@ -416,7 +447,7 @@
 			<p class="font-serif text-sm leading-relaxed text-muted-foreground">{headerBlurb}</p>
 		{/if}
 		<p class="font-mono text-[12px] text-muted-foreground">
-			{node.fact_count} facts · {node.current_branch}
+			{node.fact_count} facts · branch {branchViewLabel()}
 			{#if statsTail}· {statsTail}{/if}
 		</p>
 	</header>
@@ -436,25 +467,29 @@
 							branchesRetry++;
 						}}
 					/>
-				{:else if isBranchLoneMain(branches)}
-					<p class="font-serif text-sm text-muted-foreground">
-						Only <code class="font-mono text-foreground/90">main</code>. Branch from any fact id to
-						explore alternatives.
-					</p>
+				{:else if branches.length === 0}
+					<p class="font-serif text-sm text-muted-foreground">No branches yet.</p>
 				{:else}
 					<ul class="space-y-1.5 font-mono text-sm text-foreground/90">
 						{#each branches as b (b.branch_id)}
-							<li class="flex flex-wrap items-baseline gap-2 [overflow-wrap:anywhere]">
+							<li class="flex flex-wrap items-center gap-2 [overflow-wrap:anywhere]">
 								<span
-									class="inline-block w-2 shrink-0 text-center {b.is_current
+									class="inline-block w-2 shrink-0 text-center {b.branch_id === selectedBranch
 										? 'text-branch-active'
 										: 'text-transparent'}"
 									aria-hidden="true"
 									>●</span
 								>
-								<span>{b.name}</span>
+								<button
+									type="button"
+									class="text-left underline-offset-2 hover:text-foreground hover:underline disabled:cursor-default disabled:no-underline"
+									disabled={b.archived || b.branch_id === selectedBranch}
+									onclick={() => selectBranch(b.branch_id)}
+								>
+									{b.name}
+								</button>
 								<span class="text-muted-foreground">
-									{b.fact_count} facts{#if b.claimed_by} · {b.claimed_by}{/if}
+									{b.fact_count} facts{#if b.claimed_by_user_email} · {b.claimed_by_user_email}{/if}
 								</span>
 							</li>
 						{/each}
@@ -463,6 +498,10 @@
 			</NotebookSection>
 
 			<NotebookSection id="connections" title="Connections">
+				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
+					<span>{branchViewLabel()}</span>
+				</div>
 				{#if graphLoaded && graphEdges === 0}
 					<p class="mb-3 font-serif text-sm text-muted-foreground">
 						No outgoing relations yet — predicates like <code class="font-mono text-foreground/80"
@@ -471,10 +510,14 @@
 						another fact id will appear here.
 					</p>
 				{/if}
-				<GraphPanel exomPath={node.path} />
+				<GraphPanel exomPath={node.path} branch={selectedBranch} />
 			</NotebookSection>
 
 			<NotebookSection id="facts" title="Facts">
+				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
+					<span>{branchViewLabel()}</span>
+				</div>
 				{#if sessionModes}
 					<SessionFactsPanel exomPath={node.path} />
 				{:else if factsLoading}
@@ -498,13 +541,36 @@
 				{/if}
 			</NotebookSection>
 
-			<NotebookSection id="timeline" title="Timeline">
-				<TimelinePanel exomPath={node.path} notebookMode />
+			<NotebookSection id="beliefs" title="Beliefs">
+				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
+					<span>{branchViewLabel()}</span>
+				</div>
+				<BeliefsPanel exomPath={node.path} branch={selectedBranch} />
 			</NotebookSection>
 
-			<NotebookSection id="rules" title="Rules">
-				<RulesPanel exomPath={node.path} />
+			<NotebookSection id="timeline" title="Timeline">
+				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
+					<span>{branchViewLabel()}</span>
+				</div>
+				<TimelinePanel exomPath={node.path} branch={selectedBranch} notebookMode />
 			</NotebookSection>
+
+			<section class="mt-8 border-t border-border/70 pt-6">
+				<div class="mb-4 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
+					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Exom-level</Badge>
+					<span>unaffected by branch switching</span>
+				</div>
+				<div class="grid gap-6 lg:grid-cols-2">
+					<NotebookSection id="observations" title="Observations">
+						<ObservationsPanel exomPath={node.path} />
+					</NotebookSection>
+					<NotebookSection id="rules" title="Rules">
+						<RulesPanel exomPath={node.path} />
+					</NotebookSection>
+				</div>
+			</section>
 		</article>
 
 		<aside

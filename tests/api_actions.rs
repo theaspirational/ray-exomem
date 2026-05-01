@@ -13,31 +13,26 @@ fn init_then_session_new_then_tree_contains_session() {
         .unwrap();
     assert_eq!(r.status(), 200);
 
-    let resp: serde_json::Value = ureq::post(&format!(
-        "{}/api/actions/session-new",
-        d.base_url
-    ))
-    .send_json(json!({
-        "project_path": "work::ath",
-        "type": "multi",
-        "label": "landing",
-        "actor": "orchestrator",
-        "agents": ["agent_a", "agent_b"],
-    }))
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let resp: serde_json::Value = ureq::post(&format!("{}/api/actions/session-new", d.base_url))
+        .send_json(json!({
+            "project_path": "work::ath",
+            "type": "multi",
+            "label": "landing",
+            "actor": "orchestrator",
+            "agents": ["agent_a", "agent_b"],
+        }))
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(resp["ok"], true);
     let session_path = resp["session_path"].as_str().unwrap().to_string();
 
-    let tree: serde_json::Value = ureq::get(&format!(
-        "{}/api/tree?path=work/ath&depth=3",
-        d.base_url
-    ))
-    .call()
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let tree: serde_json::Value =
+        ureq::get(&format!("{}/api/tree?path=work/ath&depth=3", d.base_url))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
     let s = serde_json::to_string(&tree).unwrap();
     assert!(
         s.contains("_multi_agent_landing"),
@@ -54,20 +49,18 @@ fn init_then_session_new_then_tree_contains_session() {
 #[test]
 fn exom_new_creates_bare_exom() {
     let d = TestDaemon::start();
-    let r: serde_json::Value =
-        ureq::post(&format!("{}/api/actions/exom-new", d.base_url))
-            .send_json(json!({"path": "scratch::notes"}))
-            .unwrap()
-            .into_json()
-            .unwrap();
+    let r: serde_json::Value = ureq::post(&format!("{}/api/actions/exom-new", d.base_url))
+        .send_json(json!({"path": "scratch::notes"}))
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(r["ok"], true);
 
-    let tree: serde_json::Value =
-        ureq::get(&format!("{}/api/tree?path=scratch", d.base_url))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
+    let tree: serde_json::Value = ureq::get(&format!("{}/api/tree?path=scratch", d.base_url))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
     let s = serde_json::to_string(&tree).unwrap();
     assert!(s.contains("notes"), "tree should contain bare exom: {}", s);
 }
@@ -77,12 +70,9 @@ fn session_join_returns_400_for_bad_path() {
     let d = TestDaemon::start();
     // "x" is not a valid exom path (single-segment paths are project roots, not exoms),
     // so the response should be a 400-class error, not a 501.
-    let err = ureq::post(&format!(
-        "{}/api/actions/session-join",
-        d.base_url
-    ))
-    .send_json(json!({"session_path": "x", "actor": "y"}))
-    .unwrap_err();
+    let err = ureq::post(&format!("{}/api/actions/session-join", d.base_url))
+        .send_json(json!({"session_path": "x", "actor": "y"}))
+        .unwrap_err();
     if let ureq::Error::Status(s, _) = err {
         assert!(s >= 400 && s < 500, "expected 4xx, got {s}");
     } else {
@@ -93,12 +83,9 @@ fn session_join_returns_400_for_bad_path() {
 #[test]
 fn branch_create_returns_400_for_bad_path() {
     let d = TestDaemon::start();
-    let err = ureq::post(&format!(
-        "{}/api/actions/branch-create",
-        d.base_url
-    ))
-    .send_json(json!({"exom_path": "x", "branch_name": "y", "actor": "z"}))
-    .unwrap_err();
+    let err = ureq::post(&format!("{}/api/actions/branch-create", d.base_url))
+        .send_json(json!({"exom_path": "x", "branch_name": "y", "actor": "z"}))
+        .unwrap_err();
     if let ureq::Error::Status(s, _) = err {
         assert!(s >= 400 && s < 500, "expected 4xx, got {s}");
     } else {
@@ -116,16 +103,13 @@ fn assert_fact_requires_actor() {
     ureq::post(&format!("{}/api/actions/init", d.base_url))
         .send_json(json!({"path": "work"}))
         .unwrap();
-    let err = ureq::post(&format!(
-        "{}/api/actions/assert-fact",
-        d.base_url
-    ))
-    .send_json(json!({
-        "exom": "work::main",
-        "predicate": "note/body",
-        "value": "hello",
-    }))
-    .unwrap_err();
+    let err = ureq::post(&format!("{}/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom": "work::main",
+            "predicate": "note/body",
+            "value": "hello",
+        }))
+        .unwrap_err();
     if let ureq::Error::Status(status, r) = err {
         assert_eq!(status, 400);
         let body: serde_json::Value = r.into_json().unwrap();
@@ -141,18 +125,15 @@ fn assert_fact_with_actor_succeeds() {
     ureq::post(&format!("{}/api/actions/init", d.base_url))
         .send_json(json!({"path": "work"}))
         .unwrap();
-    let resp = ureq::post(&format!(
-        "{}/api/actions/assert-fact",
-        d.base_url
-    ))
-    .send_json(json!({
-        "exom": "work::main",
-        "branch": "main",
-        "actor": "me",
-        "predicate": "note/body",
-        "value": "hello",
-    }))
-    .unwrap();
+    let resp = ureq::post(&format!("{}/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom": "work::main",
+            "branch": "main",
+            "actor": "me",
+            "predicate": "note/body",
+            "value": "hello",
+        }))
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 
@@ -190,26 +171,20 @@ fn nested_exoms_do_not_collide() {
         .unwrap();
 
     // Write to work::main with one value.
-    ureq::post(&format!(
-        "{}/api/actions/assert-fact",
-        d.base_url
-    ))
-    .send_json(json!({
-        "exom":"work::main","branch":"main","actor":"alice",
-        "predicate":"note/body","value":"work-note",
-    }))
-    .unwrap();
+    ureq::post(&format!("{}/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom":"work::main","branch":"main","actor":"alice",
+            "predicate":"note/body","value":"work-note",
+        }))
+        .unwrap();
 
     // Write to lab::main with a different value.
-    ureq::post(&format!(
-        "{}/api/actions/assert-fact",
-        d.base_url
-    ))
-    .send_json(json!({
-        "exom":"lab::main","branch":"main","actor":"alice",
-        "predicate":"note/body","value":"lab-note",
-    }))
-    .unwrap();
+    ureq::post(&format!("{}/api/actions/assert-fact", d.base_url))
+        .send_json(json!({
+            "exom":"lab::main","branch":"main","actor":"alice",
+            "predicate":"note/body","value":"lab-note",
+        }))
+        .unwrap();
 
     // The on-disk splay tables must be in their respective tree paths.
     assert!(
@@ -222,25 +197,21 @@ fn nested_exoms_do_not_collide() {
     );
 
     // Read back via /api/tree?path=work/main and confirm fact_count is correct.
-    let work: serde_json::Value = ureq::get(&format!(
-        "{}/api/tree?path=work/main",
-        d.base_url
-    ))
-    .call()
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let work: serde_json::Value = ureq::get(&format!("{}/api/tree?path=work/main", d.base_url))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(
         work["fact_count"], 1,
         "work/main should have 1 fact, got: {}",
         work
     );
-    let lab: serde_json::Value =
-        ureq::get(&format!("{}/api/tree?path=lab/main", d.base_url))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
+    let lab: serde_json::Value = ureq::get(&format!("{}/api/tree?path=lab/main", d.base_url))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(
         lab["fact_count"], 1,
         "lab/main should have 1 fact, got: {}",
@@ -254,29 +225,23 @@ fn session_join_claims_branch() {
     let _ = ureq::post(&format!("{}/api/actions/init", d.base_url))
         .send_json(json!({"path": "work"}))
         .unwrap();
-    let s: serde_json::Value = ureq::post(&format!(
-        "{}/api/actions/session-new",
-        d.base_url
-    ))
-    .send_json(json!({
-        "project_path": "work",
-        "type": "multi",
-        "label": "test",
-        "actor": "orch",
-        "agents": ["agent_a"],
-    }))
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let s: serde_json::Value = ureq::post(&format!("{}/api/actions/session-new", d.base_url))
+        .send_json(json!({
+            "project_path": "work",
+            "type": "multi",
+            "label": "test",
+            "actor": "orch",
+            "agents": ["agent_a"],
+        }))
+        .unwrap()
+        .into_json()
+        .unwrap();
     let session_path = s["session_path"].as_str().unwrap().replace('/', "::");
-    let r: serde_json::Value = ureq::post(&format!(
-        "{}/api/actions/session-join",
-        d.base_url
-    ))
-    .send_json(json!({"session_path": session_path, "actor": "agent_a"}))
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let r: serde_json::Value = ureq::post(&format!("{}/api/actions/session-join", d.base_url))
+        .send_json(json!({"session_path": session_path, "actor": "agent_a"}))
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(r["ok"], true);
 }
 
@@ -288,28 +253,22 @@ fn branch_create_works() {
         .send_json(json!({"path": "work"}))
         .unwrap();
     // Create a session so orchestrator owns the exom.
-    let s: serde_json::Value = ureq::post(&format!(
-        "{}/api/actions/session-new",
-        d.base_url
-    ))
-    .send_json(json!({
-        "project_path": "work",
-        "type": "multi",
-        "label": "feat",
-        "actor": "orch",
-        "agents": [],
-    }))
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let s: serde_json::Value = ureq::post(&format!("{}/api/actions/session-new", d.base_url))
+        .send_json(json!({
+            "project_path": "work",
+            "type": "multi",
+            "label": "feat",
+            "actor": "orch",
+            "agents": [],
+        }))
+        .unwrap()
+        .into_json()
+        .unwrap();
     let session_path = s["session_path"].as_str().unwrap().replace('/', "::");
-    let r: serde_json::Value = ureq::post(&format!(
-        "{}/api/actions/branch-create",
-        d.base_url
-    ))
-    .send_json(json!({"exom_path": session_path, "branch_name": "feature-x", "actor": "orch"}))
-    .unwrap()
-    .into_json()
-    .unwrap();
+    let r: serde_json::Value = ureq::post(&format!("{}/api/actions/branch-create", d.base_url))
+        .send_json(json!({"exom_path": session_path, "branch_name": "feature-x", "actor": "orch"}))
+        .unwrap()
+        .into_json()
+        .unwrap();
     assert_eq!(r["ok"], true);
 }

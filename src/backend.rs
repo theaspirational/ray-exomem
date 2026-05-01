@@ -35,9 +35,8 @@ impl RayforceEngine {
         let c_sym = CString::new(sym_path.to_str().unwrap_or(""))
             .context("sym_path contains interior NUL")?;
         let mut sym_err: ffi::ray_err_t = ffi::RAY_OK;
-        let runtime = unsafe {
-            ffi::ray_runtime_create_with_sym_err(c_sym.as_ptr(), &mut sym_err as *mut _)
-        };
+        let runtime =
+            unsafe { ffi::ray_runtime_create_with_sym_err(c_sym.as_ptr(), &mut sym_err as *mut _) };
         if runtime.is_null() {
             return Err(anyhow!("rayforce2 runtime initialization failed"));
         }

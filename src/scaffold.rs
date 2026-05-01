@@ -171,7 +171,12 @@ mod tests {
     #[test]
     fn init_creates_main_and_sessions() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::team::project::repo"), "test@example.com").unwrap();
+        init_project(
+            d.path(),
+            &tp("work::team::project::repo"),
+            "test@example.com",
+        )
+        .unwrap();
         assert_eq!(
             classify(&d.path().join("work/team/project/repo/main")),
             NodeKind::Exom
@@ -192,7 +197,12 @@ mod tests {
     #[test]
     fn projects_nest_freely() {
         let d = tempdir().unwrap();
-        init_project(d.path(), &tp("work::team::project::repo"), "test@example.com").unwrap();
+        init_project(
+            d.path(),
+            &tp("work::team::project::repo"),
+            "test@example.com",
+        )
+        .unwrap();
         init_project(d.path(), &tp("work::team"), "test@example.com").unwrap();
         assert_eq!(classify(&d.path().join("work/team/main")), NodeKind::Exom);
         assert_eq!(

@@ -1,8 +1,6 @@
 export interface ExomemStatus {
 	ok: boolean;
 	exom: string;
-	/** Active branch id for this exom (from server brain). */
-	current_branch?: string;
 	server: {
 		name: string;
 		version: string;

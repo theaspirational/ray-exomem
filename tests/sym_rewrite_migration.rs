@@ -46,7 +46,11 @@ fn parse_sym_blob(bytes: &[u8]) -> Vec<String> {
     for _ in 0..count {
         let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        out.push(std::str::from_utf8(&bytes[pos..pos + len]).unwrap().to_string());
+        out.push(
+            std::str::from_utf8(&bytes[pos..pos + len])
+                .unwrap()
+                .to_string(),
+        );
         pos += len;
     }
     out
@@ -89,11 +93,19 @@ fn seed_exom(data_dir: &Path) -> (PathBuf, PathBuf, Vec<String>) {
     for (fact_id, predicate, value) in rows {
         brain
             .assert_fact(
-                fact_id, predicate, value, 1.0, "seed", None, None, &ctx,
+                ray_exomem::brain::MAIN_BRANCH,
+                fact_id,
+                predicate,
+                value,
+                1.0,
+                "seed",
+                None,
+                None,
+                &ctx,
             )
             .unwrap();
     }
-    let datoms = storage::build_datoms_table(&brain).unwrap();
+    let datoms = storage::build_datoms_table(&brain, ray_exomem::brain::MAIN_BRANCH).unwrap();
     storage::save_table(&datoms, &fact_dir, &sym_path).unwrap();
     storage::sym_save(&sym_path).unwrap();
 
@@ -224,9 +236,15 @@ fn sym_rewrite_remaps_when_layout_shifted() {
     let _engine = RayforceEngine::new().unwrap();
     let outcome = sym_rewrite::run_sym_rewrite(&sym_path, &tree_dir).unwrap();
     match outcome {
-        RewriteOutcome::Remapped { persisted, splays_rewritten } => {
+        RewriteOutcome::Remapped {
+            persisted,
+            splays_rewritten,
+        } => {
             assert_eq!(persisted, canonical_count);
-            assert!(splays_rewritten >= 1, "at least main/fact splay must be rewritten");
+            assert!(
+                splays_rewritten >= 1,
+                "at least main/fact splay must be rewritten"
+            );
         }
         other => panic!("expected Remapped, got {other:?}"),
     }
@@ -245,8 +263,11 @@ fn sym_rewrite_remaps_when_layout_shifted() {
     let (nrows, out_of_range) =
         check_splay_sym_ids_in_range(&fact_dir, &sym_path, new_strings.len());
     assert!(nrows > 0, "post-rewrite splay should still have rows");
-    assert_eq!(out_of_range, Vec::<i64>::new(),
-        "some splay sym IDs point outside the remapped sym range (nrows={nrows})");
+    assert_eq!(
+        out_of_range,
+        Vec::<i64>::new(),
+        "some splay sym IDs point outside the remapped sym range (nrows={nrows})"
+    );
 }
 
 #[test]
@@ -308,7 +329,9 @@ fn sym_rewrite_rejects_garbage_sym_file() {
     let err = sym_rewrite::run_sym_rewrite(&sym_path, &tree_dir).unwrap_err();
     let msg = format!("{:?}", err);
     assert!(
-        msg.contains("STRL") || msg.to_lowercase().contains("magic") || msg.to_lowercase().contains("too short"),
+        msg.contains("STRL")
+            || msg.to_lowercase().contains("magic")
+            || msg.to_lowercase().contains("too short"),
         "expected diagnostic about bad sym file, got: {msg}"
     );
 }

@@ -87,10 +87,9 @@ async fn purge_user_namespace(state: &AppState, email: &str) -> Result<usize, Ap
         removed
     };
 
-    let _ = state.sse_tx.send((
-        None,
-        r#"{"v":1,"kind":"tree","op":"changed"}"#.to_string(),
-    ));
+    let _ = state
+        .sse_tx
+        .send((None, r#"{"v":1,"kind":"tree","op":"changed"}"#.to_string()));
 
     Ok(removed)
 }
@@ -393,9 +392,7 @@ async fn add_email(
         return Err(ApiError::new("invalid_email", "email must not be empty").with_status(400));
     }
     if !email.contains('@') {
-        return Err(
-            ApiError::new("invalid_email", "email must contain '@'").with_status(400),
-        );
+        return Err(ApiError::new("invalid_email", "email must contain '@'").with_status(400));
     }
     let alias = body.alias.trim().to_string();
 

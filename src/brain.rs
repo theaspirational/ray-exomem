@@ -22,6 +22,7 @@ use crate::tree::{classify, NodeKind};
 
 pub type TxId = u64;
 pub type EntityId = String;
+pub const MAIN_BRANCH: &str = "main";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
@@ -192,7 +193,6 @@ pub struct Brain {
     transactions: Vec<Tx>,
     branches: Vec<Branch>,
     next_tx: TxId,
-    current_branch: String,
     /// Index: tx_id → branch_id (built at load time, updated on each alloc_tx).
     tx_branch_index: HashMap<TxId, String>,
     /// If set, the exom directory for splayed table persistence.
@@ -211,8 +211,8 @@ impl Brain {
     /// Create a new in-memory brain (no persistence).
     pub fn new() -> Self {
         let main_branch = Branch {
-            branch_id: "main".into(),
-            name: "main".into(),
+            branch_id: MAIN_BRANCH.into(),
+            name: MAIN_BRANCH.into(),
             parent_branch_id: None,
             created_tx_id: 0,
             archived: false,
@@ -227,7 +227,6 @@ impl Brain {
             transactions: Vec::new(),
             branches: vec![main_branch],
             next_tx: 1,
-            current_branch: "main".into(),
             tx_branch_index: HashMap::new(),
             data_dir: None,
             sym_path: None,
@@ -295,8 +294,8 @@ impl Brain {
                         created_tx_id: 0,
                         archived: false,
                         claimed_by_user_email: None,
-            claimed_by_agent: None,
-            claimed_by_model: None,
+                        claimed_by_agent: None,
+                        claimed_by_model: None,
                     },
                 );
             }
@@ -339,8 +338,8 @@ impl Brain {
                     created_tx_id: 0,
                     archived: false,
                     claimed_by_user_email: None,
-            claimed_by_agent: None,
-            claimed_by_model: None,
+                    claimed_by_agent: None,
+                    claimed_by_model: None,
                 },
             );
         }
@@ -406,11 +405,13 @@ impl Brain {
     /// the check so the close/reopen lifecycle remains writable.
     fn alloc_tx(
         &mut self,
+        branch_id: &str,
         action: TxAction,
         refs: Vec<EntityId>,
         note: &str,
         ctx: &MutationContext,
     ) -> Result<(TxId, String)> {
+        self.ensure_branch(branch_id)?;
         let touches_close_marker = refs.iter().any(|r| r == Self::SESSION_CLOSED_FACT_ID);
         if !touches_close_marker && self.is_session_closed() {
             bail!("session_closed: writes to a closed session are rejected");
@@ -428,14 +429,27 @@ impl Brain {
             refs,
             note: note.into(),
             parent_tx_id: self.transactions.last().map(|t| t.tx_id),
-            branch_id: self.current_branch.clone(),
+            branch_id: branch_id.to_string(),
             session: ctx.session.clone(),
         };
         self.transactions.push(tx);
-        self.tx_branch_index
-            .insert(tx_id, self.current_branch.clone());
+        self.tx_branch_index.insert(tx_id, branch_id.to_string());
         self.rebuild_splay(DirtyTable::Tx)?;
         Ok((tx_id, tx_time))
+    }
+
+    pub fn branch_exists(&self, branch_id: &str) -> bool {
+        self.branches
+            .iter()
+            .any(|b| b.branch_id == branch_id && !b.archived)
+    }
+
+    fn ensure_branch(&self, branch_id: &str) -> Result<()> {
+        if self.branch_exists(branch_id) {
+            Ok(())
+        } else {
+            bail!("unknown branch '{}'", branch_id)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -444,6 +458,7 @@ impl Brain {
 
     pub fn assert_observation(
         &mut self,
+        branch_id: &str,
         obs_id: &str,
         source_type: &str,
         source_ref: &str,
@@ -455,6 +470,7 @@ impl Brain {
         ctx: &MutationContext,
     ) -> Result<TxId> {
         let (tx_id, tx_time) = self.alloc_tx(
+            branch_id,
             TxAction::AssertObservation,
             vec![obs_id.into()],
             &format!("observe: {}", obs_id),
@@ -480,6 +496,7 @@ impl Brain {
     // FIXME(nested-exoms-task-4.4): callers must invoke crate::brain::precheck_write before this function.
     pub fn assert_fact(
         &mut self,
+        branch_id: &str,
         fact_id: &str,
         predicate: &str,
         value: impl Into<FactValue>,
@@ -492,6 +509,7 @@ impl Brain {
         validate_predicate_name(predicate)?;
         let value: FactValue = value.into();
         let (tx_id, tx_time) = self.alloc_tx(
+            branch_id,
             TxAction::AssertFact,
             vec![fact_id.into()],
             &format!("assert: {} = {}", predicate, value),
@@ -535,15 +553,21 @@ impl Brain {
         Ok(tx_id)
     }
 
-    pub fn retract_fact(&mut self, fact_id: &str, ctx: &MutationContext) -> Result<TxId> {
-        if !self.facts.iter().any(|f| {
-            f.fact_id == fact_id
-                && f.revoked_by_tx.is_none()
-                && f.superseded_by_tx.is_none()
-        }) {
+    pub fn retract_fact(
+        &mut self,
+        branch_id: &str,
+        fact_id: &str,
+        ctx: &MutationContext,
+    ) -> Result<TxId> {
+        if !self
+            .facts_on_branch(branch_id)
+            .iter()
+            .any(|f| f.fact_id == fact_id)
+        {
             bail!("no active fact with id '{}'", fact_id);
         }
         let (tx_id, tx_time) = self.alloc_tx(
+            branch_id,
             TxAction::RetractFact,
             vec![fact_id.into()],
             &format!("retract: {}", fact_id),
@@ -555,10 +579,7 @@ impl Brain {
         // terminates now. Prior superseded rows keep their already-closed
         // valid_to and are left untouched.
         for f in self.facts.iter_mut() {
-            if f.fact_id == fact_id
-                && f.revoked_by_tx.is_none()
-                && f.superseded_by_tx.is_none()
-            {
+            if f.fact_id == fact_id && f.revoked_by_tx.is_none() && f.superseded_by_tx.is_none() {
                 f.revoked_by_tx = Some(tx_id);
                 f.valid_to = Some(tx_time.clone());
             }
@@ -569,6 +590,7 @@ impl Brain {
 
     pub fn retract_fact_exact(
         &mut self,
+        branch_id: &str,
         fact_id: &str,
         predicate: &str,
         value: impl Into<FactValue>,
@@ -576,14 +598,9 @@ impl Brain {
     ) -> Result<TxId> {
         let value: FactValue = value.into();
         let matching_ids: Vec<String> = self
-            .facts
-            .iter()
-            .filter(|f| {
-                f.revoked_by_tx.is_none()
-                    && f.fact_id == fact_id
-                    && f.predicate == predicate
-                    && f.value == value
-            })
+            .facts_on_branch(branch_id)
+            .into_iter()
+            .filter(|f| f.fact_id == fact_id && f.predicate == predicate && f.value == value)
             .map(|f| f.fact_id.clone())
             .collect();
 
@@ -597,6 +614,7 @@ impl Brain {
         }
 
         let (tx_id, tx_time) = self.alloc_tx(
+            branch_id,
             TxAction::RetractFact,
             matching_ids.clone(),
             &format!("retract: {} {} {}", fact_id, predicate, value),
@@ -622,6 +640,7 @@ impl Brain {
 
     pub fn revise_belief(
         &mut self,
+        branch_id: &str,
         belief_id: &str,
         claim_text: &str,
         confidence: f64,
@@ -632,42 +651,24 @@ impl Brain {
         ctx: &MutationContext,
     ) -> Result<TxId> {
         // If supports was omitted (None), inherit from the most recent active
-        // belief with this belief_id so a partial revise doesn't wipe the
-        // prior linkage. An explicit empty vec is a deliberate clear.
+        // belief with this belief_id on this branch view so a partial revise
+        // doesn't wipe the prior linkage. An explicit empty vec is a deliberate clear.
         let inherited = match &supported_by {
             Some(_) => None,
             None => self
-                .beliefs
-                .iter()
-                .rev()
-                .find(|b| b.belief_id == belief_id && b.status == BeliefStatus::Active)
+                .beliefs_on_branch(branch_id)
+                .into_iter()
+                .find(|b| b.belief_id == belief_id)
                 .map(|b| b.supported_by.clone()),
         };
-        let final_supported_by = supported_by
-            .or(inherited)
-            .unwrap_or_default();
+        let final_supported_by = supported_by.or(inherited).unwrap_or_default();
         let (tx_id, tx_time) = self.alloc_tx(
+            branch_id,
             TxAction::ReviseBelief,
             vec![belief_id.into()],
             &format!("revise: {}", claim_text),
             ctx,
         )?;
-        // Supersede any active belief with the same belief_id (a re-believe
-        // for the same id replaces the prior version) or the same claim_text
-        // (different ids converging on the same claim).
-        for b in self.beliefs.iter_mut() {
-            if b.status != BeliefStatus::Active {
-                continue;
-            }
-            if b.belief_id == belief_id
-                || (b.claim_text == claim_text && b.belief_id != belief_id)
-            {
-                b.status = BeliefStatus::Superseded;
-                if b.valid_to.is_none() {
-                    b.valid_to = Some(tx_time.clone());
-                }
-            }
-        }
         let belief = Belief {
             belief_id: belief_id.into(),
             claim_text: claim_text.into(),
@@ -684,52 +685,56 @@ impl Brain {
         Ok(tx_id)
     }
 
-    /// Withdraw an active belief without supplying a replacement claim. Sets
-    /// status to `Revoked`, closes `valid_to` to the tx time, and emits a
-    /// `RevokeBelief` transaction. History is preserved — `belief_history`
-    /// still returns the revoked tuple, and `belief-row` exposes it with
-    /// `status = "revoked"`. `current_beliefs` (and thus `beliefs_on_branch`)
-    /// drops it.
+    /// Withdraw an active belief without supplying a replacement claim. Appends
+    /// a branch-local revoked row that hides earlier visible rows for the same
+    /// `belief_id` on that branch view. History is preserved — `belief-row`
+    /// exposes the revoke row with `status = "revoked"`.
     ///
-    /// Errors if there's no active belief with that id on the current branch.
+    /// Errors if there's no active belief with that id on the target branch.
     pub fn revoke_belief(
         &mut self,
+        branch_id: &str,
         belief_id: &str,
         ctx: &MutationContext,
     ) -> Result<TxId> {
-        if !self
-            .beliefs
-            .iter()
-            .any(|b| b.belief_id == belief_id && b.status == BeliefStatus::Active)
-        {
+        let Some(active) = self
+            .beliefs_on_branch(branch_id)
+            .into_iter()
+            .find(|b| b.belief_id == belief_id)
+            .cloned()
+        else {
             bail!("no active belief with id '{}'", belief_id);
-        }
+        };
         let (tx_id, tx_time) = self.alloc_tx(
+            branch_id,
             TxAction::RevokeBelief,
             vec![belief_id.into()],
             &format!("revoke: {}", belief_id),
             ctx,
         )?;
-        // Revoke EVERY active row for this belief_id. revise_belief should
-        // have already collapsed prior rows to Superseded, but iterate
-        // defensively so older data with multiple Active rows still ends
-        // up consistently revoked.
-        for b in self.beliefs.iter_mut() {
-            if b.belief_id == belief_id && b.status == BeliefStatus::Active {
-                b.status = BeliefStatus::Revoked;
-                b.valid_to = Some(tx_time.clone());
-            }
-        }
+        self.beliefs.push(Belief {
+            belief_id: belief_id.into(),
+            claim_text: active.claim_text,
+            status: BeliefStatus::Revoked,
+            confidence: active.confidence,
+            supported_by: active.supported_by,
+            created_by_tx: tx_id,
+            valid_from: active.valid_from,
+            valid_to: Some(tx_time.clone()),
+            rationale: active.rationale,
+        });
         self.rebuild_splay(DirtyTable::Belief)?;
         Ok(tx_id)
     }
 
     pub fn create_branch(
         &mut self,
+        parent_branch_id: &str,
         branch_id: &str,
         name: &str,
         ctx: &MutationContext,
     ) -> Result<TxId> {
+        self.ensure_branch(parent_branch_id)?;
         if self
             .branches
             .iter()
@@ -738,6 +743,7 @@ impl Brain {
             bail!("branch '{}' already exists", branch_id);
         }
         let (tx_id, _tx_time) = self.alloc_tx(
+            parent_branch_id,
             TxAction::CreateBranch,
             vec![branch_id.into()],
             &format!("branch: {}", name),
@@ -746,7 +752,7 @@ impl Brain {
         let branch = Branch {
             branch_id: branch_id.into(),
             name: name.into(),
-            parent_branch_id: Some(self.current_branch.clone()),
+            parent_branch_id: Some(parent_branch_id.into()),
             created_tx_id: tx_id,
             archived: false,
             claimed_by_user_email: None,
@@ -758,29 +764,15 @@ impl Brain {
         Ok(tx_id)
     }
 
-    pub fn switch_branch(&mut self, branch_id: &str) -> Result<()> {
-        let Some(b) = self.branches.iter().find(|b| b.branch_id == branch_id) else {
-            bail!("unknown branch '{}'", branch_id);
-        };
-        if b.archived {
-            bail!("branch '{}' is archived", branch_id);
-        }
-        self.current_branch = branch_id.into();
-        Ok(())
-    }
-
     /// Mark a branch as archived (soft-delete). Cannot archive `main`.
     pub fn archive_branch(&mut self, branch_id: &str) -> Result<()> {
-        if branch_id == "main" {
+        if branch_id == MAIN_BRANCH {
             bail!("cannot archive branch 'main'");
         }
         let Some(branch) = self.branches.iter_mut().find(|b| b.branch_id == branch_id) else {
             bail!("unknown branch '{}'", branch_id);
         };
         branch.archived = true;
-        if self.current_branch == branch_id {
-            self.current_branch = "main".into();
-        }
         self.rebuild_splay(DirtyTable::Branch)?;
         Ok(())
     }
@@ -868,7 +860,7 @@ impl Brain {
         visible
     }
 
-    /// `"local"` | `"inherited"` | `"override"` for UI badges on the current branch view.
+    /// `"local"` | `"inherited"` | `"override"` for UI badges on the selected branch view.
     pub fn fact_branch_role(&self, f: &Fact, view_branch: &str) -> &'static str {
         let ancestors = self.branch_ancestors(view_branch);
         let d = self.branch_depth_of_tx(f.created_by_tx, &ancestors);
@@ -892,10 +884,6 @@ impl Brain {
 
     pub fn branches(&self) -> &[Branch] {
         &self.branches
-    }
-
-    pub fn current_branch_id(&self) -> &str {
-        &self.current_branch
     }
 
     /// Merge `source` into `target` using `policy`. Assertions run on `target`.
@@ -935,9 +923,6 @@ impl Brain {
         let mut added = Vec::new();
         let mut conflicts = Vec::new();
 
-        let saved_branch = self.current_branch.clone();
-        self.current_branch = target.to_string();
-
         for fact in &source_facts {
             if self.tx_on_branches(fact.created_by_tx, &target_ancestors_ref) {
                 continue;
@@ -946,6 +931,7 @@ impl Brain {
             match target_map.get(fact.fact_id.as_str()) {
                 None => {
                     self.assert_fact(
+                        target,
                         &fact.fact_id,
                         &fact.predicate,
                         fact.value.clone(),
@@ -959,8 +945,9 @@ impl Brain {
                 }
                 Some(target_fact) if target_fact.value != fact.value => match policy {
                     MergePolicy::LastWriterWins => {
-                        self.retract_fact(&fact.fact_id, ctx)?;
+                        self.retract_fact(target, &fact.fact_id, ctx)?;
                         self.assert_fact(
+                            target,
                             &fact.fact_id,
                             &fact.predicate,
                             fact.value.clone(),
@@ -987,12 +974,12 @@ impl Brain {
         }
 
         let (tx_id, _) = self.alloc_tx(
+            target,
             TxAction::Merge,
             vec![source.into(), target.into()],
             &format!("merge {} → {}", source, target),
             ctx,
         )?;
-        self.current_branch = saved_branch;
 
         Ok(MergeResult {
             added,
@@ -1021,14 +1008,14 @@ impl Brain {
         self.facts.len()
     }
 
-    /// Return all currently-active facts (not revoked) on the current branch.
+    /// Return all currently-active facts (not revoked) on main.
     pub fn current_facts(&self) -> Vec<&Fact> {
-        self.facts_on_branch(&self.current_branch)
+        self.facts_on_branch(MAIN_BRANCH)
     }
 
-    /// Return transactions visible on the current branch (including inherited ancestor-branch txs).
+    /// Return transactions visible on main (including inherited ancestor-branch txs).
     pub fn current_transactions(&self) -> Vec<&Tx> {
-        self.transactions_on_branch(&self.current_branch)
+        self.transactions_on_branch(MAIN_BRANCH)
     }
 
     /// Return transactions visible on a specific branch.
@@ -1041,9 +1028,9 @@ impl Brain {
             .collect()
     }
 
-    /// Return active beliefs on the current branch (closest version wins per `claim_text`).
+    /// Return active beliefs on main (closest version wins per `claim_text`).
     pub fn current_beliefs(&self) -> Vec<&Belief> {
-        self.beliefs_on_branch(&self.current_branch)
+        self.beliefs_on_branch(MAIN_BRANCH)
     }
 
     /// Latest belief per `belief_id` on the given branch, regardless of
@@ -1068,9 +1055,9 @@ impl Brain {
         visible
     }
 
-    /// Latest belief per `belief_id` on the current branch.
+    /// Latest belief per `belief_id` on main.
     pub fn latest_beliefs_per_id(&self) -> Vec<&Belief> {
-        self.latest_belief_per_id_on_branch(&self.current_branch)
+        self.latest_belief_per_id_on_branch(MAIN_BRANCH)
     }
 
     fn fact_active_as_of_on_branch(&self, f: &Fact, tx_id: TxId, branch_id: &str) -> bool {
@@ -1109,17 +1096,14 @@ impl Brain {
         visible
     }
 
-    /// Active beliefs on a branch (closest branch wins per `claim_text`).
+    /// Active beliefs on a branch (closest branch wins per `belief_id`, then `claim_text`).
     pub fn beliefs_on_branch(&self, branch_id: &str) -> Vec<&Belief> {
         let ancestors = self.branch_ancestors(branch_id);
         let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
         let mut visible: Vec<&Belief> = self
             .beliefs
             .iter()
-            .filter(|b| {
-                b.status == BeliefStatus::Active
-                    && self.tx_on_branches(b.created_by_tx, &branch_set)
-            })
+            .filter(|b| self.tx_on_branches(b.created_by_tx, &branch_set))
             .collect();
         visible.sort_by_key(|b| {
             (
@@ -1127,6 +1111,8 @@ impl Brain {
                 Reverse(b.created_by_tx),
             )
         });
+        visible.dedup_by(|a, b| a.belief_id == b.belief_id);
+        visible.retain(|b| b.status == BeliefStatus::Active);
         visible.dedup_by(|a, b| a.claim_text == b.claim_text);
         visible
     }
@@ -1174,8 +1160,12 @@ impl Brain {
 
     /// Return facts that were valid at a given real-world timestamp (current knowledge).
     pub fn facts_valid_at(&self, timestamp: &str) -> Vec<&Fact> {
-        let view = self.current_branch.as_str();
-        self.facts_on_branch(view)
+        self.facts_valid_at_on_branch(MAIN_BRANCH, timestamp)
+    }
+
+    /// Return facts that were valid at a given real-world timestamp on a branch.
+    pub fn facts_valid_at_on_branch(&self, branch_id: &str, timestamp: &str) -> Vec<&Fact> {
+        self.facts_on_branch(branch_id)
             .into_iter()
             .filter(|f| is_valid_at(&f.valid_from, f.valid_to.as_deref(), timestamp))
             .collect()
@@ -1205,7 +1195,12 @@ impl Brain {
 
     /// Return beliefs that were valid at a given real-world timestamp (current knowledge).
     pub fn beliefs_valid_at(&self, timestamp: &str) -> Vec<&Belief> {
-        self.beliefs_on_branch(&self.current_branch)
+        self.beliefs_valid_at_on_branch(MAIN_BRANCH, timestamp)
+    }
+
+    /// Return beliefs that were valid at a given real-world timestamp on a branch.
+    pub fn beliefs_valid_at_on_branch(&self, branch_id: &str, timestamp: &str) -> Vec<&Belief> {
+        self.beliefs_on_branch(branch_id)
             .into_iter()
             .filter(|b| is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp))
             .collect()
@@ -1311,6 +1306,7 @@ impl Brain {
         out.push_str("-- Step 1: Assert two facts --\n");
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "sky-color",
                 "blue",
@@ -1323,6 +1319,7 @@ impl Brain {
             .unwrap();
         let tx2 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f2",
                 "grass-color",
                 "green",
@@ -1344,6 +1341,7 @@ impl Brain {
         out.push_str("-- Step 2: Assert a belief --\n");
         let tx3 = brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b1",
                 "the sky is blue",
                 0.9,
@@ -1366,7 +1364,7 @@ impl Brain {
         // Step 3: Retract a fact (does NOT erase history)
         out.push_str("-- Step 3: Retract f2 (grass-color) --\n");
         let tx4 = brain
-            .retract_fact("f2", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f2", &MutationContext::default())
             .unwrap();
         out.push_str(&format!("  tx{}: retract f2\n", tx4));
         out.push_str(&format!(
@@ -1390,6 +1388,7 @@ impl Brain {
         out.push_str("-- Step 5: Revise belief — the sky is actually grey today --\n");
         let tx5 = brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b2",
                 "the sky is blue",
                 0.3,
@@ -1607,7 +1606,9 @@ pub fn read_exom_stats(exom_disk: &Path, sym_path: &Path) -> std::io::Result<Exo
         Some(tbl) => {
             let txs: Vec<Tx> = storage::load_txs(&tbl)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            txs.iter().max_by_key(|t| t.tx_id).map(|t| t.tx_time.clone())
+            txs.iter()
+                .max_by_key(|t| t.tx_id)
+                .map(|t| t.tx_time.clone())
         }
         None => None,
     };
@@ -1696,6 +1697,7 @@ pub fn create_branch(
 /// - If the branch doesn't exist → `Err(WriteError::BranchMissing(name))`.
 ///
 /// "main" is considered to always exist even when the branch table is absent.
+/// `branch_name` may be either the stable branch id or the display name.
 pub fn claim_branch(
     tree_root: &Path,
     sym_path: &Path,
@@ -1725,15 +1727,13 @@ pub fn claim_branch(
 
     let Some(b) = branches
         .iter_mut()
-        .find(|b| b.name == branch_name && !b.archived)
+        .find(|b| !b.archived && (b.branch_id == branch_name || b.name == branch_name))
     else {
         return Err(WriteError::BranchMissing(branch_name.to_string()));
     };
 
     match &b.claimed_by_user_email {
-        Some(owner) if owner != user_email => {
-            return Err(WriteError::BranchOwned(owner.clone()))
-        }
+        Some(owner) if owner != user_email => return Err(WriteError::BranchOwned(owner.clone())),
         Some(_) => {}
         None => {
             b.claimed_by_user_email = Some(user_email.to_string());
@@ -1801,8 +1801,10 @@ pub fn precheck_write(
         .map_err(|e| WriteError::Io(io_err(e)))?;
 
     // "main" is always implicitly present even when the branch table is absent.
-    let branch_exists =
-        branch == "main" || branches.iter().any(|b| b.name == branch && !b.archived);
+    let branch_exists = branch == "main"
+        || branches
+            .iter()
+            .any(|b| !b.archived && (b.branch_id == branch || b.name == branch));
 
     if !branch_exists {
         return Err(WriteError::BranchMissing(branch.to_string()));
@@ -1816,7 +1818,9 @@ pub fn precheck_write(
         return Ok(());
     }
 
-    claim_branch(tree_root, sym_path, exom_path, branch, user_email, agent, model)
+    claim_branch(
+        tree_root, sym_path, exom_path, branch, user_email, agent, model,
+    )
 }
 
 /// Mirror writes to `session/label`, `session/closed_at`, or
@@ -1875,10 +1879,7 @@ pub fn session_new(
     }
     if user_email.is_empty() {
         return Err(crate::scaffold::ScaffoldError::Path(
-            crate::path::PathError::InvalidSegment(
-                user_email.to_string(),
-                "user_email required",
-            ),
+            crate::path::PathError::InvalidSegment(user_email.to_string(), "user_email required"),
         ));
     }
     // Project must exist and have sessions/ folder.
@@ -2030,7 +2031,8 @@ mod session_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap(), "test@example.com").unwrap();
+        crate::scaffold::init_project(d.path(), &"work::ath".parse().unwrap(), "test@example.com")
+            .unwrap();
         let project: TreePath = "work::ath".parse().unwrap();
         let session = session_new(
             d.path(),
@@ -2062,7 +2064,8 @@ mod session_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &"work".parse().unwrap(), "test@example.com").unwrap();
+        crate::scaffold::init_project(d.path(), &"work".parse().unwrap(), "test@example.com")
+            .unwrap();
         let session = session_new(
             d.path(),
             &sym,
@@ -2103,12 +2106,21 @@ mod session_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        crate::scaffold::init_project(d.path(), &"work".parse().unwrap(), "test@example.com").unwrap();
+        crate::scaffold::init_project(d.path(), &"work".parse().unwrap(), "test@example.com")
+            .unwrap();
         let p: TreePath = "work".parse().unwrap();
-        assert!(
-            session_new(d.path(), &sym, &p, SessionType::Single, "", "me", None, None, &[])
-                .is_err()
-        );
+        assert!(session_new(
+            d.path(),
+            &sym,
+            &p,
+            SessionType::Single,
+            "",
+            "me",
+            None,
+            None,
+            &[]
+        )
+        .is_err());
         assert!(session_new(
             d.path(),
             &sym,
@@ -2146,10 +2158,18 @@ mod session_tests {
         )
         .is_err());
         // empty user_email
-        assert!(
-            session_new(d.path(), &sym, &p, SessionType::Single, "ok", "", None, None, &[])
-                .is_err()
-        );
+        assert!(session_new(
+            d.path(),
+            &sym,
+            &p,
+            SessionType::Single,
+            "ok",
+            "",
+            None,
+            None,
+            &[]
+        )
+        .is_err());
     }
 }
 
@@ -2172,9 +2192,8 @@ mod tofu_tests {
         let _engine = crate::RayforceEngine::new().unwrap();
         let d = tempdir().unwrap();
         let sym = test_sym(&d);
-        let err =
-            precheck_write(d.path(), &sym, &tp("work::nope"), "main", "me", None, None)
-                .unwrap_err();
+        let err = precheck_write(d.path(), &sym, &tp("work::nope"), "main", "me", None, None)
+            .unwrap_err();
         assert!(matches!(err, WriteError::NoSuchExom(_)));
     }
 
@@ -2186,8 +2205,7 @@ mod tofu_tests {
         let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         let err =
-            precheck_write(d.path(), &sym, &tp("work::main"), "main", "", None, None)
-                .unwrap_err();
+            precheck_write(d.path(), &sym, &tp("work::main"), "main", "", None, None).unwrap_err();
         assert!(matches!(err, WriteError::ActorRequired));
     }
 
@@ -2265,6 +2283,42 @@ mod tofu_tests {
     }
 
     #[test]
+    fn precheck_claims_branch_by_id_when_display_name_differs() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+        let d = tempdir().unwrap();
+        let sym = test_sym(&d);
+        crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
+
+        let disk = tp("work::main").to_disk_path(d.path());
+        let mut brain = Brain::open_exom(&disk, &sym).unwrap();
+        brain
+            .create_branch(
+                MAIN_BRANCH,
+                "feature",
+                "Feature branch",
+                &MutationContext::default(),
+            )
+            .unwrap();
+
+        assert!(precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "feature",
+            "alice",
+            Some("codex"),
+            None,
+        )
+        .is_ok());
+
+        let branches = crate::storage::load_branches_from_disk(&disk, &sym).unwrap();
+        let feature = branches.iter().find(|b| b.branch_id == "feature").unwrap();
+        assert_eq!(feature.claimed_by_user_email.as_deref(), Some("alice"));
+        assert_eq!(feature.claimed_by_agent.as_deref(), Some("codex"));
+    }
+
+    #[test]
     fn precheck_rejects_nonexistent_branch() {
         let _guard = crate::global_test_lock().lock().unwrap();
         let _engine = crate::RayforceEngine::new().unwrap();
@@ -2292,9 +2346,16 @@ mod tofu_tests {
         let sym = test_sym(&d);
         crate::scaffold::init_project(d.path(), &tp("work"), "test@example.com").unwrap();
         // "main" branch should exist implicitly for any exom.
-        assert!(
-            precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice", None, None).is_ok()
-        );
+        assert!(precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "main",
+            "alice",
+            None,
+            None
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2381,6 +2442,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/temp",
                 "temp_c",
                 FactValue::I64(21),
@@ -2393,6 +2455,7 @@ mod tests {
             .unwrap();
         let tx2 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/temp",
                 "temp_c",
                 FactValue::I64(22),
@@ -2430,6 +2493,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/projection",
                 "projection",
                 FactValue::I64(1),
@@ -2441,7 +2505,7 @@ mod tests {
             )
             .unwrap();
         let tx2 = brain
-            .retract_fact("bt/projection", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "bt/projection", &MutationContext::default())
             .unwrap();
 
         let history = brain.fact_history("bt/projection");
@@ -2466,6 +2530,7 @@ mod tests {
         // Force two open rows by pushing directly (simulating legacy state).
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "legacy/x",
                 "x",
                 "a",
@@ -2493,7 +2558,7 @@ mod tests {
         brain.facts.push(extra);
 
         let tx2 = brain
-            .retract_fact("legacy/x", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "legacy/x", &MutationContext::default())
             .unwrap();
 
         let history = brain.fact_history("legacy/x");
@@ -2518,6 +2583,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/age",
                 "age",
                 FactValue::I64(40),
@@ -2530,6 +2596,7 @@ mod tests {
             .unwrap();
         let tx2 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/age",
                 "age",
                 FactValue::I64(41),
@@ -2542,6 +2609,7 @@ mod tests {
             .unwrap();
         let tx3 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/age",
                 "age",
                 FactValue::I64(42),
@@ -2553,7 +2621,7 @@ mod tests {
             )
             .unwrap();
         let tx4 = brain
-            .retract_fact("bt/age", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "bt/age", &MutationContext::default())
             .unwrap();
 
         let history = brain.fact_history("bt/age");
@@ -2591,12 +2659,13 @@ mod tests {
     #[test]
     fn current_facts_empty_after_supersede_chain_then_retract() {
         // Three asserts on the same fact_id followed by a retract leaves zero
-        // visible rows on the current branch: predecessors are superseded
+        // visible rows on main: predecessors are superseded
         // (filtered out) and the head is revoked. History still returns the
         // full chain.
         let mut brain = Brain::new();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/age",
                 "age",
                 FactValue::I64(21),
@@ -2609,6 +2678,7 @@ mod tests {
             .unwrap();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/age",
                 "age",
                 FactValue::I64(22),
@@ -2621,6 +2691,7 @@ mod tests {
             .unwrap();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "bt/age",
                 "age",
                 FactValue::I64(23),
@@ -2632,7 +2703,7 @@ mod tests {
             )
             .unwrap();
         brain
-            .retract_fact("bt/age", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "bt/age", &MutationContext::default())
             .unwrap();
 
         let current: Vec<&Fact> = brain
@@ -2659,6 +2730,7 @@ mod tests {
         let ctx = MutationContext::default();
         brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b1",
                 "v1",
                 0.9,
@@ -2671,7 +2743,17 @@ mod tests {
             .unwrap();
         // Revise with supports OMITTED — should inherit ["test/i64-num"].
         brain
-            .revise_belief("b1", "v2", 0.8, None, "second", None, None, &ctx)
+            .revise_belief(
+                MAIN_BRANCH,
+                "b1",
+                "v2",
+                0.8,
+                None,
+                "second",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap();
 
         let head = brain
@@ -2688,6 +2770,7 @@ mod tests {
         let ctx = MutationContext::default();
         brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b1",
                 "v1",
                 0.9,
@@ -2700,14 +2783,20 @@ mod tests {
             .unwrap();
         // Explicit empty array — caller deliberately clears the linkage.
         brain
-            .revise_belief("b1", "v2", 0.8, Some(vec![]), "second", None, None, &ctx)
+            .revise_belief(
+                MAIN_BRANCH,
+                "b1",
+                "v2",
+                0.8,
+                Some(vec![]),
+                "second",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap();
 
-        let head = brain
-            .beliefs
-            .iter()
-            .find(|b| b.belief_id == "b1" && b.status == BeliefStatus::Active)
-            .unwrap();
+        let head = brain.beliefs_on_branch(MAIN_BRANCH)[0];
         assert!(head.supported_by.is_empty());
     }
 
@@ -2728,6 +2817,7 @@ mod tests {
         let mut brain = Brain::new();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "color",
                 "red",
@@ -2740,6 +2830,7 @@ mod tests {
             .unwrap();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f2",
                 "color",
                 "blue",
@@ -2751,7 +2842,7 @@ mod tests {
             )
             .unwrap();
         brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap();
 
         // f1 still exists in the history even though it was retracted
@@ -2768,6 +2859,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "temp",
                 "hot",
@@ -2780,6 +2872,7 @@ mod tests {
             .unwrap();
         let tx2 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f2",
                 "temp",
                 "cold",
@@ -2791,7 +2884,7 @@ mod tests {
             )
             .unwrap();
         let tx3 = brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap();
 
         // Current: only f2
@@ -2819,6 +2912,7 @@ mod tests {
         let mut brain = Brain::new();
         brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b1",
                 "sky is blue",
                 0.9,
@@ -2831,6 +2925,7 @@ mod tests {
             .unwrap();
         brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b2",
                 "sky is blue",
                 0.3,
@@ -2844,10 +2939,13 @@ mod tests {
 
         let history = brain.belief_history("sky is blue");
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].status, BeliefStatus::Superseded);
+        assert_eq!(history[0].status, BeliefStatus::Active);
         assert_eq!(history[1].status, BeliefStatus::Active);
         assert!((history[0].confidence - 0.9).abs() < f64::EPSILON);
         assert!((history[1].confidence - 0.3).abs() < f64::EPSILON);
+        let current = brain.beliefs_on_branch(MAIN_BRANCH);
+        assert_eq!(current.len(), 1);
+        assert!((current[0].confidence - 0.3).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -2855,6 +2953,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b1",
                 "it is warm",
                 0.8,
@@ -2867,6 +2966,7 @@ mod tests {
             .unwrap();
         let tx2 = brain
             .revise_belief(
+                MAIN_BRANCH,
                 "b2",
                 "it is warm",
                 0.2,
@@ -2894,6 +2994,7 @@ mod tests {
         let mut brain = Brain::new();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "mood",
                 "happy",
@@ -2905,7 +3006,7 @@ mod tests {
             )
             .unwrap();
         brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap();
 
         let txs = brain.explain("f1");
@@ -2918,7 +3019,7 @@ mod tests {
     fn retract_nonexistent_fact_errors() {
         let mut brain = Brain::new();
         let err = brain
-            .retract_fact("nope", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "nope", &MutationContext::default())
             .unwrap_err();
         assert!(err.to_string().contains("no active fact"));
     }
@@ -2928,6 +3029,7 @@ mod tests {
         let mut brain = Brain::new();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "x",
                 "y",
@@ -2939,10 +3041,10 @@ mod tests {
             )
             .unwrap();
         brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap();
         let err = brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap_err();
         assert!(err.to_string().contains("no active fact"));
     }
@@ -2951,12 +3053,19 @@ mod tests {
     fn branch_lifecycle() {
         let mut brain = Brain::new();
         brain
-            .create_branch("exp", "experiment", &MutationContext::default())
+            .create_branch(
+                MAIN_BRANCH,
+                "exp",
+                "experiment",
+                &MutationContext::default(),
+            )
             .unwrap();
-        brain.switch_branch("exp").unwrap();
-        assert_eq!(brain.current_branch, "exp");
+        assert!(brain.branch_exists("exp"));
+        assert!(!brain.branch_exists("nonexistent"));
 
-        let err = brain.switch_branch("nonexistent").unwrap_err();
+        let err = brain
+            .create_branch("nonexistent", "child", "child", &MutationContext::default())
+            .unwrap_err();
         assert!(err.to_string().contains("unknown branch"));
     }
 
@@ -2965,6 +3074,7 @@ mod tests {
         let mut brain = Brain::new();
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "sky-color",
                 "blue",
@@ -2976,11 +3086,11 @@ mod tests {
             )
             .unwrap();
         brain
-            .create_branch("exp", "e", &MutationContext::default())
+            .create_branch(MAIN_BRANCH, "exp", "e", &MutationContext::default())
             .unwrap();
-        brain.switch_branch("exp").unwrap();
         brain
             .assert_fact(
+                "exp",
                 "f1",
                 "sky-color",
                 "red",
@@ -3006,23 +3116,33 @@ mod tests {
         let mut brain = Brain::new();
         let ctx = MutationContext::default();
         brain
-            .revise_belief("b1", "claim", 0.9, Some(vec![]), "rationale", None, None, &ctx)
+            .revise_belief(
+                MAIN_BRANCH,
+                "b1",
+                "claim",
+                0.9,
+                Some(vec![]),
+                "rationale",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap();
         assert_eq!(brain.current_beliefs().len(), 1);
 
-        let tx = brain.revoke_belief("b1", &ctx).unwrap();
+        let tx = brain.revoke_belief(MAIN_BRANCH, "b1", &ctx).unwrap();
         assert!(tx > 0);
         // Dropped from current view
         assert_eq!(brain.current_beliefs().len(), 0);
         // History preserved with revoked status and closed valid_to
-        let stored = &brain.beliefs[0];
+        let stored = brain.beliefs.last().unwrap();
         assert_eq!(stored.status, BeliefStatus::Revoked);
         assert!(stored.valid_to.is_some());
 
         // Re-revoking the same id errors (no longer active)
-        assert!(brain.revoke_belief("b1", &ctx).is_err());
+        assert!(brain.revoke_belief(MAIN_BRANCH, "b1", &ctx).is_err());
         // Revoking a nonexistent id errors
-        assert!(brain.revoke_belief("ghost", &ctx).is_err());
+        assert!(brain.revoke_belief(MAIN_BRANCH, "ghost", &ctx).is_err());
     }
 
     #[test]
@@ -3030,6 +3150,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx = brain
             .assert_observation(
+                MAIN_BRANCH,
                 "obs1",
                 "sensor",
                 "thermometer-1",
@@ -3062,6 +3183,7 @@ mod tests {
             let mut brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
             brain
                 .assert_fact(
+                    MAIN_BRANCH,
                     "f1",
                     "color",
                     "red",
@@ -3074,6 +3196,7 @@ mod tests {
                 .unwrap();
             brain
                 .assert_fact(
+                    MAIN_BRANCH,
                     "f2",
                     "color",
                     "blue",
@@ -3085,7 +3208,7 @@ mod tests {
                 )
                 .unwrap();
             brain
-                .retract_fact("f1", &MutationContext::default())
+                .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
                 .unwrap();
         }
 
@@ -3130,8 +3253,9 @@ mod tests {
         // as_of queries show different states
         assert!(output.contains("as_of tx"), "missing as_of queries");
 
-        // Belief revision
-        assert!(output.contains("superseded"), "missing superseded belief");
+        // Belief revision history keeps the old row while the branch-visible
+        // belief resolves to the latest active row.
+        assert!(output.contains("belief history"), "missing belief history");
         assert!(
             output.contains("confidence=0.3"),
             "missing revised confidence"
@@ -3158,6 +3282,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "a",
                 "b",
@@ -3170,6 +3295,7 @@ mod tests {
             .unwrap();
         let tx2 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f2",
                 "c",
                 "d",
@@ -3181,7 +3307,7 @@ mod tests {
             )
             .unwrap();
         let tx3 = brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap();
         assert!(tx1 < tx2);
         assert!(tx2 < tx3);
@@ -3193,6 +3319,7 @@ mod tests {
         // Fact happened on Jan 1st, ended March 1st
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "location",
                 "paris",
@@ -3206,6 +3333,7 @@ mod tests {
         // Fact happened on March 1st, still valid
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f2",
                 "location",
                 "london",
@@ -3238,6 +3366,7 @@ mod tests {
         let mut brain = Brain::new();
         let tx1 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f1",
                 "status",
                 "ok",
@@ -3249,10 +3378,11 @@ mod tests {
             )
             .unwrap();
         let _tx2 = brain
-            .retract_fact("f1", &MutationContext::default())
+            .retract_fact(MAIN_BRANCH, "f1", &MutationContext::default())
             .unwrap();
         let _tx3 = brain
             .assert_fact(
+                MAIN_BRANCH,
                 "f2",
                 "status",
                 "degraded",
@@ -3294,6 +3424,7 @@ mod tests {
             let mut brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
             brain
                 .assert_fact(
+                    MAIN_BRANCH,
                     "profile/weight_kg",
                     "profile/weight_kg",
                     FactValue::I64(55),
@@ -3306,6 +3437,7 @@ mod tests {
                 .unwrap();
             brain
                 .assert_fact(
+                    MAIN_BRANCH,
                     "profile/units",
                     "profile/units",
                     FactValue::Str("metric".into()),
@@ -3318,6 +3450,7 @@ mod tests {
                 .unwrap();
             brain
                 .assert_fact(
+                    MAIN_BRANCH,
                     "status/current",
                     "status",
                     FactValue::sym("active"),
@@ -3475,8 +3608,7 @@ mod tests {
         )
         .unwrap();
 
-        let query_source =
-            format!("(query {exom_name} (find ?id) (where (small-weight ?id)))");
+        let query_source = format!("(query {exom_name} (find ?id) (where (small-weight ?id)))");
         let expanded = crate::rayfall_parser::rewrite_query_with_rules(
             &query_source,
             &[parsed.inline_body.clone()],
@@ -3484,12 +3616,8 @@ mod tests {
         .unwrap();
 
         let raw = engine.eval_raw(&expanded).unwrap();
-        let decoded =
-            crate::storage::decode_query_table(&raw, &query_source).unwrap();
-        let rows = decoded["rows"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let decoded = crate::storage::decode_query_table(&raw, &query_source).unwrap();
+        let rows = decoded["rows"].as_array().cloned().unwrap_or_default();
         assert!(
             !rows.is_empty(),
             "expected small-weight to match FactValue::I64(55) via cmp; got rows={:?} expanded={}",
@@ -3516,9 +3644,37 @@ mod tests {
         let mut brain = Brain::new();
         let ctx = MutationContext::default();
 
+        brain
+            .assert_fact(
+                MAIN_BRANCH,
+                "leftover",
+                "stale",
+                "v",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+        brain
+            .revise_belief(
+                MAIN_BRANCH,
+                "b-active",
+                "x",
+                0.7,
+                Some(vec![]),
+                "rationale",
+                None,
+                None,
+                &ctx,
+            )
+            .unwrap();
+
         // Assert the close marker — itself bypasses the gate.
         brain
             .assert_fact(
+                MAIN_BRANCH,
                 "session/closed_at",
                 "session/closed_at",
                 "2026-04-28T17:54:46Z",
@@ -3533,7 +3689,17 @@ mod tests {
 
         // Every other mutation kind must be rejected.
         let assert_err = brain
-            .assert_fact("f1", "color", "red", 1.0, "test", None, None, &ctx)
+            .assert_fact(
+                MAIN_BRANCH,
+                "f1",
+                "color",
+                "red",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap_err();
         assert!(
             assert_err.to_string().contains("session_closed"),
@@ -3542,24 +3708,14 @@ mod tests {
 
         // retract_fact's pre-flight passes (the fact existed before close);
         // alloc_tx must still reject.
-        brain.facts.push(Fact {
-            fact_id: "leftover".into(),
-            predicate: "stale".into(),
-            value: FactValue::Str("v".into()),
-            created_at: now_iso(),
-            created_by_tx: 0,
-            superseded_by_tx: None,
-            revoked_by_tx: None,
-            confidence: 1.0,
-            provenance: "test".into(),
-            valid_from: now_iso(),
-            valid_to: None,
-        });
-        let retract_err = brain.retract_fact("leftover", &ctx).unwrap_err();
+        let retract_err = brain
+            .retract_fact(MAIN_BRANCH, "leftover", &ctx)
+            .unwrap_err();
         assert!(retract_err.to_string().contains("session_closed"));
 
         let observe_err = brain
             .assert_observation(
+                MAIN_BRANCH,
                 "obs/x",
                 "manual",
                 "ref",
@@ -3574,36 +3730,51 @@ mod tests {
         assert!(observe_err.to_string().contains("session_closed"));
 
         let revise_err = brain
-            .revise_belief("b1", "claim", 0.7, Some(vec![]), "rationale", None, None, &ctx)
+            .revise_belief(
+                MAIN_BRANCH,
+                "b1",
+                "claim",
+                0.7,
+                Some(vec![]),
+                "rationale",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap_err();
         assert!(revise_err.to_string().contains("session_closed"));
 
-        // revoke_belief's pre-flight needs an active belief; bypass by injecting one.
-        brain.beliefs.push(Belief {
-            belief_id: "b-active".into(),
-            claim_text: "x".into(),
-            status: BeliefStatus::Active,
-            confidence: 0.7,
-            supported_by: vec![],
-            created_by_tx: 0,
-            valid_from: now_iso(),
-            valid_to: None,
-            rationale: String::new(),
-        });
-        let revoke_err = brain.revoke_belief("b-active", &ctx).unwrap_err();
+        // revoke_belief's pre-flight needs an active belief.
+        let revoke_err = brain
+            .revoke_belief(MAIN_BRANCH, "b-active", &ctx)
+            .unwrap_err();
         assert!(revoke_err.to_string().contains("session_closed"));
 
-        let branch_err = brain.create_branch("feature-x", "feature-x", &ctx).unwrap_err();
+        let branch_err = brain
+            .create_branch(MAIN_BRANCH, "feature-x", "feature-x", &ctx)
+            .unwrap_err();
         assert!(branch_err.to_string().contains("session_closed"));
 
         // Reopen by retracting the close marker — works because `retract_fact`
         // touches `session/closed_at` and bypasses the gate.
-        brain.retract_fact("session/closed_at", &ctx).unwrap();
+        brain
+            .retract_fact(MAIN_BRANCH, "session/closed_at", &ctx)
+            .unwrap();
         assert!(!brain.is_session_closed());
 
         // Subsequent mutations succeed again.
         brain
-            .assert_fact("f1", "color", "red", 1.0, "test", None, None, &ctx)
+            .assert_fact(
+                MAIN_BRANCH,
+                "f1",
+                "color",
+                "red",
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap();
     }
 }

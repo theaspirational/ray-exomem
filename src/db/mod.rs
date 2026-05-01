@@ -150,4 +150,3 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<sqlx::PgPool> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
 }
-

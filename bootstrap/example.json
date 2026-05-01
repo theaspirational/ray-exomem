@@ -3,7 +3,7 @@
   "branches": [
     {
       "branch_id": "alt-naming",
-      "name": "alternative naming candidate",
+      "name": "alt branch",
       "parent_branch_id": "main",
       "archived": false,
       "claimed_by": "design-team",

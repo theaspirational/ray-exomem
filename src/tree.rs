@@ -56,7 +56,6 @@ pub enum TreeNode {
         path: String,
         exom_kind: ExomKind,
         fact_count: u64,
-        current_branch: String,
         last_tx: Option<String>,
         branches: Option<Vec<String>>, // only when requested
         archived: bool,
@@ -127,19 +126,17 @@ fn walk_inner(
                     children: vec![],
                 });
             }
-            let stats = crate::brain::read_exom_stats(disk, sym_path).unwrap_or(
-                crate::brain::ExomStats {
+            let stats =
+                crate::brain::read_exom_stats(disk, sym_path).unwrap_or(crate::brain::ExomStats {
                     fact_count: 0,
                     last_tx: None,
                     branches: vec![],
-                },
-            );
+                });
             Ok(TreeNode::Exom {
                 name,
                 path: slash,
                 exom_kind: meta.kind,
                 fact_count: stats.fact_count,
-                current_branch: meta.current_branch,
                 last_tx: stats.last_tx,
                 branches: if opts.include_branches {
                     Some(stats.branches)
@@ -167,13 +164,7 @@ fn walk_inner(
                     })?;
                     let sub_disk = entry.path();
                     if sub_disk.is_dir() {
-                        children.push(walk_inner(
-                            &sub_disk,
-                            sym_path,
-                            &sub_path,
-                            depth + 1,
-                            opts,
-                        )?);
+                        children.push(walk_inner(&sub_disk, sym_path, &sub_path, depth + 1, opts)?);
                     }
                 }
             }
@@ -435,7 +426,12 @@ mod tests {
     fn walks_a_scaffolded_project() {
         let d = tempdir().unwrap();
         let sym = d.path().join("sym");
-        crate::scaffold::init_project(d.path(), &"work::team::project::repo".parse().unwrap(), "test@example.com").unwrap();
+        crate::scaffold::init_project(
+            d.path(),
+            &"work::team::project::repo".parse().unwrap(),
+            "test@example.com",
+        )
+        .unwrap();
         let root: crate::path::TreePath = "work".parse().unwrap();
         let node = walk(
             d.path(),

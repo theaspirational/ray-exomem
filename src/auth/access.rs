@@ -42,10 +42,7 @@ pub enum PublicOwner {
     /// Exom exists with a stamped creator and a known write-policy mode.
     /// `acl_mode == CoEdit` elevates non-creators to `ReadWrite` in
     /// `public/*`; `SoloEdit` keeps them at `ReadOnly`.
-    Owner {
-        email: String,
-        acl_mode: AclMode,
-    },
+    Owner { email: String, acl_mode: AclMode },
 }
 
 /// Resolve the effective access level for `user` at `path`.
@@ -76,9 +73,7 @@ pub async fn resolve_access(
 ) -> AccessLevel {
     if path == "public" || path.starts_with("public/") {
         return match public_owner {
-            PublicOwner::Owner { ref email, .. } if email == &user.email => {
-                AccessLevel::FullAccess
-            }
+            PublicOwner::Owner { ref email, .. } if email == &user.email => AccessLevel::FullAccess,
             PublicOwner::Owner {
                 acl_mode: AclMode::CoEdit,
                 ..

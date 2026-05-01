@@ -31,23 +31,13 @@ enum BranchCommands {
         #[command(flatten)]
         scope: CommandScopeArgs,
     },
-    /// Create a new branch from the current branch.
+    /// Create a new branch from an explicit parent branch.
     Create {
         branch_id: String,
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value = "cli")]
-        actor: String,
-        #[arg(long)]
-        session: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
-        #[command(flatten)]
-        scope: CommandScopeArgs,
-    },
-    /// Switch the active branch.
-    Switch {
-        branch_id: String,
+        #[arg(long, default_value = "main")]
+        parent_branch_id: String,
         #[arg(long, default_value = "cli")]
         actor: String,
         #[arg(long)]
@@ -65,9 +55,11 @@ enum BranchCommands {
         #[command(flatten)]
         scope: CommandScopeArgs,
     },
-    /// Merge a branch into the current branch.
+    /// Merge a branch into an explicit target branch.
     Merge {
         source: String,
+        #[arg(long, default_value = "main")]
+        target: String,
         #[arg(long, default_value = "last-writer-wins")]
         policy: String,
         #[arg(long, default_value = "cli")]
@@ -414,7 +406,11 @@ enum Commands {
         /// loopback address and `--auth-provider` is set. Use solely for
         /// local UI dev where Google's GSI flow is blocked (e.g. automated
         /// browsers).
-        #[arg(long = "dev-login-email", env = "RAY_EXOMEM_DEV_LOGIN_EMAIL", value_delimiter = ',')]
+        #[arg(
+            long = "dev-login-email",
+            env = "RAY_EXOMEM_DEV_LOGIN_EMAIL",
+            value_delimiter = ','
+        )]
         dev_login_emails: Vec<String>,
     },
 
@@ -752,10 +748,7 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn default_daemon_url() -> String {
-    format!(
-        "http://127.0.0.1:9780{}",
-        ray_exomem::server::BASE_PATH
-    )
+    format!("http://127.0.0.1:9780{}", ray_exomem::server::BASE_PATH)
 }
 
 fn pid_path(data_dir: &std::path::Path) -> PathBuf {
@@ -989,31 +982,23 @@ fn apply_expand_query_exom(source: &str, exom: Option<&str>) -> Result<String> {
     }
 }
 
-fn switch_branch_cli(
-    c: &ray_exomem::client::Client,
-    branch: &Option<String>,
-    exom: &str,
-    headers: &[(&str, &str)],
-) -> Result<()> {
-    if let Some(b) = branch {
-        c.post_text_with_headers(
-            &format!("/api/branches/{}/switch?exom={}", b, exom),
-            "",
-            headers,
-        )?;
-    }
-    Ok(())
+fn branch_param(branch: Option<&str>) -> &str {
+    branch
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ray_exomem::brain::MAIN_BRANCH)
 }
 
 fn active_fact_tuple(
     c: &ray_exomem::client::Client,
     exom: &str,
     fact_id: &str,
+    branch: Option<&str>,
 ) -> Result<(String, String)> {
     let body = c.get(&format!(
-        "/api/facts/{}?exom={}",
+        "/api/facts/{}?exom={}&branch={}",
         encode_url_part(fact_id),
-        encode_url_part(exom)
+        encode_url_part(exom),
+        encode_url_part(branch_param(branch))
     ))?;
     let v: serde_json::Value = serde_json::from_str(&body).context("parse fact detail JSON")?;
     if v["fact"]["status"].as_str() != Some("active") {
@@ -1043,6 +1028,7 @@ fn assert_fact_json(
     provenance: &str,
     valid_from: Option<&str>,
     valid_to: Option<&str>,
+    branch: Option<&str>,
 ) -> Result<String> {
     let mut payload = serde_json::json!({
         "fact_id": fact_id,
@@ -1050,7 +1036,8 @@ fn assert_fact_json(
         "value": value,
         "confidence": confidence,
         "provenance": provenance,
-        "exom": exom
+        "exom": exom,
+        "branch": branch_param(branch)
     });
     if let Some(vf) = valid_from {
         payload["valid_from"] = serde_json::json!(vf);
@@ -1070,8 +1057,9 @@ fn retract_fact_id(
     exom: &str,
     headers: &[(&str, &str)],
     fact_id: &str,
+    branch: Option<&str>,
 ) -> Result<String> {
-    let (predicate, value) = active_fact_tuple(c, exom, fact_id)?;
+    let (predicate, value) = active_fact_tuple(c, exom, fact_id, branch)?;
     let ray = format!(
         "(retract-fact {} \"{}\" '{} \"{}\")",
         exom,
@@ -1079,7 +1067,14 @@ fn retract_fact_id(
         predicate.replace('"', "\\\""),
         value.replace('"', "\\\""),
     );
-    c.post_text_with_headers("/api/actions/eval", &ray, headers)
+    c.post_text_with_headers(
+        &format!(
+            "/api/actions/eval?branch={}",
+            encode_url_part(branch_param(branch))
+        ),
+        &ray,
+        headers,
+    )
 }
 
 fn replace_fact_json(
@@ -1092,8 +1087,9 @@ fn replace_fact_json(
     provenance: &str,
     valid_from: Option<&str>,
     valid_to: Option<&str>,
+    branch: Option<&str>,
 ) -> Result<String> {
-    if let Err(e) = retract_fact_id(c, exom, headers, fact_id) {
+    if let Err(e) = retract_fact_id(c, exom, headers, fact_id, branch) {
         let msg = e.to_string();
         if !(msg.contains("is not active")
             || msg.contains("HTTP 404")
@@ -1114,6 +1110,7 @@ fn replace_fact_json(
         provenance,
         valid_from,
         valid_to,
+        branch,
     )
 }
 
@@ -1125,8 +1122,16 @@ fn eval_json(
     c: &ray_exomem::client::Client,
     headers: &[(&str, &str)],
     source: &str,
+    branch: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let body = c.post_text_with_headers("/api/actions/eval", source, headers)?;
+    let body = c.post_text_with_headers(
+        &format!(
+            "/api/actions/eval?branch={}",
+            encode_url_part(branch_param(branch))
+        ),
+        source,
+        headers,
+    )?;
     serde_json::from_str(&body).context("parse eval JSON response")
 }
 
@@ -1135,9 +1140,10 @@ fn query_rows_json(
     exom: &str,
     headers: &[(&str, &str)],
     source: &str,
+    branch: Option<&str>,
 ) -> Result<Vec<Vec<serde_json::Value>>> {
     let rendered = source.replace("<exom>", exom);
-    let v = eval_json(c, headers, &rendered)?;
+    let v = eval_json(c, headers, &rendered, branch)?;
     let rows = v["rows"].as_array().cloned().unwrap_or_default();
     Ok(rows
         .into_iter()
@@ -1150,8 +1156,9 @@ fn query_two_string_cols(
     exom: &str,
     headers: &[(&str, &str)],
     source: &str,
+    branch: Option<&str>,
 ) -> Result<Vec<(String, String)>> {
-    let rows = query_rows_json(c, exom, headers, source)?;
+    let rows = query_rows_json(c, exom, headers, source, branch)?;
     let mut out = Vec::new();
     for row in rows {
         let left = row
@@ -1175,11 +1182,13 @@ fn optional_fact_detail(
     c: &ray_exomem::client::Client,
     exom: &str,
     fact_id: &str,
+    branch: Option<&str>,
 ) -> Result<Option<serde_json::Value>> {
     let path = format!(
-        "/api/facts/{}?exom={}",
+        "/api/facts/{}?exom={}&branch={}",
         encode_url_part(fact_id),
-        encode_url_part(exom)
+        encode_url_part(exom),
+        encode_url_part(branch_param(branch))
     );
     match c.get(&path) {
         Ok(body) => Ok(Some(
@@ -1358,7 +1367,6 @@ fn render_tree(
             name,
             exom_kind,
             fact_count,
-            current_branch,
             branches,
             ..
         } => {
@@ -1368,8 +1376,8 @@ fn render_tree(
                 ExomKind::Bare => "bare",
             };
             out.push_str(&format!(
-                "{}{}{}  ({}, {} facts, branch: {})\n",
-                indent, connector, name, kind_label, fact_count, current_branch
+                "{}{}{}  ({}, {} facts)\n",
+                indent, connector, name, kind_label, fact_count
             ));
             if include_branches {
                 if let Some(bs) = branches {
@@ -1432,10 +1440,6 @@ fn main() {
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
             let h = ctx_headers(&actor, &session, &model);
-            if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
             let source = match (source, file) {
                 (Some(s), _) => s,
                 (None, Some(f)) if f == "-" => {
@@ -1453,7 +1457,21 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            match c.post_text_with_headers("/api/actions/eval", &source, &h) {
+            let source = match apply_expand_query_exom(&source, Some(&exom)) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            match c.post_text_with_headers(
+                &format!(
+                    "/api/actions/eval?branch={}",
+                    encode_url_part(branch_param(branch.as_deref()))
+                ),
+                &source,
+                &h,
+            ) {
                 Ok(body) => {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                         if let Some(err) = v["error"].as_str() {
@@ -1757,10 +1775,6 @@ fn main() {
             let fact_id = fact_id.unwrap_or_else(|| predicate.clone());
             let confidence_value = confidence.unwrap_or(1.0);
             let provenance = source.clone().unwrap_or_else(|| "cli".to_string());
-            if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
             if !as_i64 && !as_sym && !as_str {
                 eprintln!("error: assert requires exactly one of --as-str, --as-sym, or --as-i64");
                 std::process::exit(1);
@@ -1779,9 +1793,8 @@ fn main() {
             } else {
                 ray_exomem::fact_value::FactValue::Str(value.clone())
             };
-            let value_json = serde_json::to_value(&fv).unwrap_or_else(|_| {
-                serde_json::Value::String(fv.display())
-            });
+            let value_json = serde_json::to_value(&fv)
+                .unwrap_or_else(|_| serde_json::Value::String(fv.display()));
             match assert_fact_json(
                 &c,
                 &exom,
@@ -1793,6 +1806,7 @@ fn main() {
                 &provenance,
                 valid_from.as_deref(),
                 valid_to.as_deref(),
+                branch.as_deref(),
             ) {
                 Ok(body) => println!("{}", body),
                 Err(e) => {
@@ -1812,11 +1826,8 @@ fn main() {
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
             let h = ctx_headers(&actor, &session, &model);
-            if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
-            let (predicate, value) = match active_fact_tuple(&c, &exom, &fact_id) {
+            let (predicate, value) = match active_fact_tuple(&c, &exom, &fact_id, branch.as_deref())
+            {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -1830,7 +1841,14 @@ fn main() {
                 predicate.replace('"', "\\\""),
                 value.replace('"', "\\\""),
             );
-            match c.post_text_with_headers("/api/actions/eval", &ray, &h) {
+            match c.post_text_with_headers(
+                &format!(
+                    "/api/actions/eval?branch={}",
+                    encode_url_part(branch_param(branch.as_deref()))
+                ),
+                &ray,
+                &h,
+            ) {
                 Ok(body) => println!("{}", body),
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -2028,14 +2046,14 @@ fn main() {
                     Ok(b) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&b) {
                             if let Some(arr) = v["branches"].as_array() {
-                                let n = arr
+                                let main_count = arr
                                     .iter()
-                                    .filter(|br| br["is_current"].as_bool() == Some(true))
+                                    .filter(|br| br["branch_id"].as_str() == Some("main"))
                                     .count();
-                                if n != 1 {
+                                if main_count != 1 {
                                     issues.push(format!(
-                                        "expected exactly one current branch in /api/branches, found {}",
-                                        n
+                                        "expected exactly one main branch in /api/branches, found {}",
+                                        main_count
                                     ));
                                 }
                             }
@@ -2111,16 +2129,19 @@ fn main() {
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
             let h = ctx_headers(&actor, &session, &model);
-            if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
             let ray = format!(
                 "(assert-fact {} \"observation\" 'content \"{}\")",
                 exom,
                 content.replace('"', "\\\""),
             );
-            match c.post_text_with_headers("/api/actions/eval", &ray, &h) {
+            match c.post_text_with_headers(
+                &format!(
+                    "/api/actions/eval?branch={}",
+                    encode_url_part(branch_param(branch.as_deref()))
+                ),
+                &ray,
+                &h,
+            ) {
                 Ok(body) => println!("{}", body),
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -2224,6 +2245,7 @@ fn main() {
             BranchCommands::Create {
                 branch_id,
                 name,
+                parent_branch_id,
                 actor,
                 session,
                 model,
@@ -2236,6 +2258,7 @@ fn main() {
                 let payload = serde_json::json!({
                     "branch_id": branch_id,
                     "name": name.unwrap_or_else(|| branch_id.clone()),
+                    "parent_branch_id": parent_branch_id,
                 });
                 match c.post_json_with_headers(
                     &format!("/api/branches?exom={}", exom),
@@ -2243,43 +2266,6 @@ fn main() {
                     &h,
                 ) {
                     Ok(body) => print_json_or_raw(&body, compact),
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            BranchCommands::Switch {
-                branch_id,
-                actor,
-                session,
-                model,
-                scope,
-            } => {
-                let (compact, exom, addr) = branch_scope_values(global_json, &exom, &addr, &scope);
-                let c = ray_exomem::client::Client::new(Some(&addr));
-                let actor_opt = Some(actor.clone());
-                let h = ctx_headers(&actor_opt, &session, &model);
-                match c.post_text_with_headers(
-                    &format!("/api/branches/{}/switch?exom={}", branch_id, exom),
-                    "",
-                    &h,
-                ) {
-                    Ok(_) => {
-                        if compact {
-                            print_json_value(
-                                &serde_json::json!({
-                                    "ok": true,
-                                    "command": "switch",
-                                    "exom": exom,
-                                    "branch_id": branch_id
-                                }),
-                                true,
-                            );
-                        } else {
-                            println!("Switched to branch '{}'", branch_id);
-                        }
-                    }
                     Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
@@ -2306,6 +2292,7 @@ fn main() {
             }
             BranchCommands::Merge {
                 source,
+                target,
                 policy,
                 actor,
                 session,
@@ -2316,7 +2303,7 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some(actor.clone());
                 let h = ctx_headers(&actor_opt, &session, &model);
-                let payload = serde_json::json!({ "policy": policy });
+                let payload = serde_json::json!({ "policy": policy, "target_branch": target });
                 match c.post_json_with_headers(
                     &format!("/api/branches/{}/merge?exom={}", source, exom),
                     &payload.to_string(),
@@ -2386,10 +2373,6 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some(actor.clone());
                 let h = ctx_headers(&actor_opt, &session, &model);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
                 let status_fact_id = coord_fact_id("claim", &claim_id, "status");
                 let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
@@ -2404,6 +2387,7 @@ fn main() {
                     "coord-cli",
                     None,
                     None,
+                    branch.as_deref(),
                 ) {
                     Ok(body) => results.push(
                         serde_json::from_str::<serde_json::Value>(&body)
@@ -2424,6 +2408,7 @@ fn main() {
                     "coord-cli",
                     None,
                     None,
+                    branch.as_deref(),
                 ) {
                     Ok(body) => results.push(
                         serde_json::from_str::<serde_json::Value>(&body)
@@ -2445,6 +2430,7 @@ fn main() {
                         "coord-cli",
                         None,
                         None,
+                        branch.as_deref(),
                     ) {
                         Ok(body) => results.push(
                             serde_json::from_str::<serde_json::Value>(&body)
@@ -2456,7 +2442,7 @@ fn main() {
                         }
                     }
                 } else {
-                    match retract_fact_id(&c, &exom, &h, &expires_fact_id) {
+                    match retract_fact_id(&c, &exom, &h, &expires_fact_id, branch.as_deref()) {
                         Ok(body) => results.push(
                             serde_json::from_str::<serde_json::Value>(&body)
                                 .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
@@ -2505,16 +2491,12 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some(actor.clone());
                 let h = ctx_headers(&actor_opt, &session, &model);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
                 let status_fact_id = coord_fact_id("claim", &claim_id, "status");
                 let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
                 let mut results = Vec::new();
                 for retract_id in [&owner_fact_id, &expires_fact_id] {
-                    match retract_fact_id(&c, &exom, &h, retract_id) {
+                    match retract_fact_id(&c, &exom, &h, retract_id, branch.as_deref()) {
                         Ok(body) => results.push(
                             serde_json::from_str::<serde_json::Value>(&body)
                                 .unwrap_or_else(|_| serde_json::json!({ "raw": body })),
@@ -2547,6 +2529,7 @@ fn main() {
                     "coord-cli",
                     None,
                     None,
+                    branch.as_deref(),
                 ) {
                     Ok(body) => results.push(
                         serde_json::from_str::<serde_json::Value>(&body)
@@ -2580,10 +2563,6 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some(actor.clone());
                 let h = ctx_headers(&actor_opt, &session, &model);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let fact_id = format!("task/{}/depends/{}", task_id, depends_on);
                 match replace_fact_json(
                     &c,
@@ -2595,6 +2574,7 @@ fn main() {
                     "coord-cli",
                     None,
                     None,
+                    branch.as_deref(),
                 ) {
                     Ok(body) => {
                         let out = serde_json::json!({
@@ -2627,10 +2607,6 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some(actor.clone());
                 let h = ctx_headers(&actor_opt, &session, &model);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let fact_id = coord_fact_id("agent", &agent_id, "session");
                 match replace_fact_json(
                     &c,
@@ -2642,6 +2618,7 @@ fn main() {
                     "coord-cli",
                     None,
                     None,
+                    branch.as_deref(),
                 ) {
                     Ok(body) => {
                         let out = serde_json::json!({
@@ -2671,15 +2648,12 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some("cli-query".to_string());
                 let h = ctx_headers(&actor_opt, &None, &None);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let owner_rows = match query_two_string_cols(
                     &c,
                     &exom,
                     &h,
                     "(query <exom> (find ?fact ?owner) (where (claim-owner-row ?fact ?owner)))",
+                    branch.as_deref(),
                 ) {
                     Ok(rows) => rows,
                     Err(e) => {
@@ -2692,6 +2666,7 @@ fn main() {
                     &exom,
                     &h,
                     "(query <exom> (find ?fact ?status) (where (claim-status-row ?fact ?status)))",
+                    branch.as_deref(),
                 ) {
                     Ok(rows) => rows,
                     Err(e) => {
@@ -2704,6 +2679,7 @@ fn main() {
                         &exom,
                         &h,
                         "(query <exom> (find ?fact ?expires) (where (?fact 'claim/expires_at ?expires)))",
+                        branch.as_deref(),
                     ) {
                         Ok(rows) => rows,
                         Err(e) => {
@@ -2770,36 +2746,33 @@ fn main() {
                 let (compact, exom, addr, branch) =
                     coord_scope_values(global_json, &exom, &addr, &branch, &scope);
                 let c = ray_exomem::client::Client::new(Some(&addr));
-                let actor_opt = Some("cli-query".to_string());
-                let h = ctx_headers(&actor_opt, &None, &None);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let owner_fact_id = coord_fact_id("claim", &claim_id, "owner");
                 let status_fact_id = coord_fact_id("claim", &claim_id, "status");
                 let expires_fact_id = coord_fact_id("claim", &claim_id, "expires_at");
-                let owner = match optional_fact_detail(&c, &exom, &owner_fact_id) {
+                let owner = match optional_fact_detail(&c, &exom, &owner_fact_id, branch.as_deref())
+                {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("error: {}", e);
                         std::process::exit(1);
                     }
                 };
-                let status_detail = match optional_fact_detail(&c, &exom, &status_fact_id) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                };
-                let expires = match optional_fact_detail(&c, &exom, &expires_fact_id) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }
-                };
+                let status_detail =
+                    match optional_fact_detail(&c, &exom, &status_fact_id, branch.as_deref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+                let expires =
+                    match optional_fact_detail(&c, &exom, &expires_fact_id, branch.as_deref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
                 let current = serde_json::json!({
                     "owner": current_fact_value(owner.as_ref()),
                     "status": current_fact_value(status_detail.as_ref()),
@@ -2825,15 +2798,12 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some("cli-query".to_string());
                 let h = ctx_headers(&actor_opt, &None, &None);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let mut rows: Vec<serde_json::Value> = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
                         "(query <exom> (find ?fact ?depends_on) (where (task-dependency-row ?fact ?depends_on)))",
+                        branch.as_deref(),
                     ) {
                         Ok(rows) => rows
                             .into_iter()
@@ -2878,15 +2848,12 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some("cli-query".to_string());
                 let h = ctx_headers(&actor_opt, &None, &None);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let deps = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
                         "(query <exom> (find ?fact ?depends_on) (where (task-dependency-row ?fact ?depends_on)))",
+                        branch.as_deref(),
                     ) {
                         Ok(rows) => rows,
                         Err(e) => {
@@ -2906,7 +2873,7 @@ fn main() {
                         "fact_id": fact_id,
                         "depends_on": depends_on
                     }));
-                    match optional_fact_detail(&c, &exom, &fact_id) {
+                    match optional_fact_detail(&c, &exom, &fact_id, branch.as_deref()) {
                         Ok(detail) => facts.push(serde_json::json!({
                             "fact_id": fact_id,
                             "detail": detail
@@ -2947,15 +2914,12 @@ fn main() {
                 let c = ray_exomem::client::Client::new(Some(&addr));
                 let actor_opt = Some("cli-query".to_string());
                 let h = ctx_headers(&actor_opt, &None, &None);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let mut rows: Vec<serde_json::Value> = match query_two_string_cols(
                         &c,
                         &exom,
                         &h,
                         "(query <exom> (find ?fact ?session) (where (agent-session-row ?fact ?session)))",
+                        branch.as_deref(),
                     ) {
                         Ok(rows) => rows
                             .into_iter()
@@ -2998,14 +2962,8 @@ fn main() {
                 let (compact, exom, addr, branch) =
                     coord_scope_values(global_json, &exom, &addr, &branch, &scope);
                 let c = ray_exomem::client::Client::new(Some(&addr));
-                let actor_opt = Some("cli-query".to_string());
-                let h = ctx_headers(&actor_opt, &None, &None);
-                if let Err(e) = switch_branch_cli(&c, &branch, &exom, &h) {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
                 let fact_id = coord_fact_id("agent", &agent_id, "session");
-                let detail = match optional_fact_detail(&c, &exom, &fact_id) {
+                let detail = match optional_fact_detail(&c, &exom, &fact_id, branch.as_deref()) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("error: {}", e);

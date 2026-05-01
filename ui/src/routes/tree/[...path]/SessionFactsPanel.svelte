@@ -310,7 +310,7 @@
 						<div class="border-b border-border px-2 py-2">
 							<p class="font-mono text-xs text-foreground">{b.name}</p>
 							<p class="text-[10px] text-muted-foreground">
-								{b.claimed_by ? `owner ${b.claimed_by}` : 'unclaimed'}
+								{b.claimed_by_user_email ? `owner ${b.claimed_by_user_email}` : 'unclaimed'}
 							</p>
 						</div>
 						<ScrollArea class="h-[min(50vh,420px)] p-2">

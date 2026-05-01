@@ -1,6 +1,6 @@
 # Phase 1 — Single-user core (discovery + typed values + bitemporal + beliefs + observations + reads)
 
-One MCP-driven phase against `<session>`. Touches every read tool, every typed-value path, every bitemporal transition, beliefs, observations, the seven builtin views, attribution, explain, and export. Run as a tight sequence — fact_ids and tx_ids from earlier steps are referenced by later steps.
+One MCP-driven phase against `<session>`. Touches every read tool, every typed-value path, every bitemporal transition, beliefs, observations, the required builtin views, attribution, explain, and export. Run as a tight sequence — fact_ids and tx_ids from earlier steps are referenced by later steps.
 
 All calls go to `<session>` with the orchestrator's bearer (transport: MCP). No `branch:` arg → defaults to `main`.
 
@@ -8,8 +8,8 @@ All calls go to `<session>` with the orchestrator's bearer (transport: MCP). No 
 
 1. `mcp__ray-exomem__guide` — capture byte length. Pass: ≥ 2 KB.
 2. `mcp__ray-exomem__list_exoms` — pass: ≥ 1 entry; one entry's path equals `<session>`.
-3. `mcp__ray-exomem__exom_status { exom: <session> }` — pass: `current_branch == "main"`, `facts == 0`, `beliefs == 0`, `transactions == 0`. (The genesis tx `tx/0` isn't counted.)
-4. `mcp__ray-exomem__list_branches { exom: <session> }` — pass: 4 branches (`main` claimed by orchestrator; `agent-a`, `agent-b`, `probe-d` unclaimed). `main.is_current == true`.
+3. `mcp__ray-exomem__exom_status { exom: <session> }` — pass: no `current_branch` field, `facts == 0`, `beliefs == 0`, `transactions == 0`. (The genesis tx `tx/0` isn't counted.)
+4. `mcp__ray-exomem__list_branches { exom: <session> }` — pass: 4 branches (`main` claimed by orchestrator; `agent-a`, `agent-b`, `probe-d` unclaimed). No branch row has `is_current`.
 
 ## B. Typed values (Ch02 surface)
 
@@ -54,7 +54,7 @@ Then `mcp__ray-exomem__fact_history { exom: <session>, fact_id: "bitemp/sky-colo
 3. **Revoke** — `mcp__ray-exomem__revoke_belief { exom: <session>, belief_id: <belief_id_1> }`.
 4. **Believe v2 (fresh id)** — `mcp__ray-exomem__believe { exom: <session>, claim_text: "rain is wet", supports: ["test/n_str"] }`. Capture `belief_id_2`.
 
-Then verify:
+Then verify on `main`:
 - `(query <session> (find ?b ?c ?s ?tx) (where (belief-row ?b ?c ?s ?tx)))` → exactly **2** rows. `belief_id_1` has `status=revoked`, `claim_text="the sky is blue at noon"`. `belief_id_2` has `status=active`, `claim_text="rain is wet"`.
 - `belief/supports` link to the Ch02-B fact_ids: `(query <session> (find ?belief ?fact) (where (?belief 'belief/supports ?fact)))` → 2 rows linking each belief to its support fact.
 
@@ -67,10 +67,11 @@ Then:
 - `(query <session> (find ?obs ?s ?c ?tx) (where (observation-row ?obs ?s ?c ?tx)))` → exactly **2** rows.
 - `(query <session> (find ?obs ?tag) (where (?obs 'obs/tag ?tag)))` filtered to `obs_id_1` → exactly **3** tag rows.
 - Both observations' `obs/tx` are recoverable via `(?obs 'obs/tx ?tx)`.
+- If an HTTP/cookie context is available, `GET /api/observations?exom=<session>` returns both observations regardless of selected UI branch; the rows include source fields, tags, confidence/valid interval, and origin branch metadata from their tx.
 
 ## F. Builtin-view sweep (Ch10 surface)
 
-For each builtin_view, run a `(find …)` over its full arity and assert a non-zero row count. The exact counts come from the writes done in B–E.
+For each required builtin_view below, run a `(find …)` over its full arity and assert the expected row count. If the schema advertises additional builtin views (`merge-row`, `claim-status-row`, `task-dependency-row`, etc.), run their full-arity query too and record the row count, but do not fail only because an optional view is empty.
 
 | view              | arity | expected row count |
 |-------------------|-------|--------------------|

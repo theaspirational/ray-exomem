@@ -132,13 +132,14 @@ pub fn run_sym_rewrite(sym_path: &Path, tree_root: &Path) -> Result<RewriteOutco
     fs::write(&marker_path, b"")
         .with_context(|| format!("write rewrite marker {}", marker_path.display()))?;
 
-    let splays_rewritten = rewrite_all_splays(tree_root, &old_strings, &remap).with_context(|| {
-        format!(
-            "rewrite splays under {} (marker {} left in place)",
-            tree_root.display(),
-            marker_path.display()
-        )
-    })?;
+    let splays_rewritten =
+        rewrite_all_splays(tree_root, &old_strings, &remap).with_context(|| {
+            format!(
+                "rewrite splays under {} (marker {} left in place)",
+                tree_root.display(),
+                marker_path.display()
+            )
+        })?;
 
     // Commit the new sym file. We delete the old file first because
     // `ray_sym_save` would otherwise merge-check against its stale
@@ -220,11 +221,7 @@ fn parse_sym_file(path: &Path) -> Result<Vec<String>> {
 /// `ray_sym_save` is not called during this phase — the on-disk sym
 /// file is still stale relative to the in-memory layout and the
 /// merge-check in `ray_sym_save` would otherwise reject the save.
-fn rewrite_all_splays(
-    tree_root: &Path,
-    old_strings: &[String],
-    remap: &[i64],
-) -> Result<usize> {
+fn rewrite_all_splays(tree_root: &Path, old_strings: &[String], remap: &[i64]) -> Result<usize> {
     let mut splay_dirs: Vec<PathBuf> = Vec::new();
     collect_splay_dirs(tree_root, &mut splay_dirs);
 
@@ -303,12 +300,9 @@ fn rewrite_splay(dir: &Path, old_strings: &[String], remap: &[i64]) -> Result<()
     // what the splay was written against (usually from a prior sym
     // wipe). Fall back to the directory listing in that case — the
     // filesystem is the source of truth for which columns exist.
-    let schema_ok = schema_resolved.iter().all(|n| {
-        !n.is_empty()
-            && !n.starts_with('.')
-            && !n.contains('/')
-            && dir.join(n).is_file()
-    });
+    let schema_ok = schema_resolved
+        .iter()
+        .all(|n| !n.is_empty() && !n.starts_with('.') && !n.contains('/') && dir.join(n).is_file());
     let col_names: Vec<String> = if schema_ok {
         schema_resolved
     } else {
@@ -357,10 +351,7 @@ fn rewrite_splay(dir: &Path, old_strings: &[String], remap: &[i64]) -> Result<()
             .with_context(|| format!("col path {} has NUL byte", col_path.display()))?;
         let col_raw = unsafe { ffi::ray_col_load(c_col_path.as_ptr()) };
         if col_raw.is_null() {
-            bail!(
-                "ray_col_load returned null for {}",
-                col_path.display()
-            );
+            bail!("ray_col_load returned null for {}", col_path.display());
         }
         let col_type = unsafe { ffi::ray_obj_type(col_raw) };
         // For vectors, `len` lives at bytes 24-31 of the ray_t header
@@ -421,7 +412,11 @@ fn parse_d_schema(path: &Path) -> Result<Vec<i64>> {
     // 24-31 = len (u64 / i64 / same field depending on interpretation).
     let type_byte = bytes[18] as i8;
     if type_byte != ffi::RAY_I64 {
-        bail!(".d has unexpected type {} (expected RAY_I64={})", type_byte, ffi::RAY_I64);
+        bail!(
+            ".d has unexpected type {} (expected RAY_I64={})",
+            type_byte,
+            ffi::RAY_I64
+        );
     }
     let len = i64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
     let data_off = 32;
@@ -449,7 +444,6 @@ unsafe fn vector_len(v: *mut ffi::ray_t) -> i64 {
     let ptr = v.cast::<u8>().add(24).cast::<i64>();
     *ptr
 }
-
 
 /// Build a fresh RAY_SYM column with every slot's sym ID remapped.
 /// Width (W8/W16/W32/i64) is re-chosen by rayforce2 internally as
@@ -493,11 +487,7 @@ fn rebuild_sym_column(
 /// datom-aware remap: plain i64 values (kind I64) are copied as-is;
 /// SYM/STR-tagged values have their payload sym ID remapped and the tag
 /// preserved.
-fn rebuild_i64_column(
-    old: *mut ffi::ray_t,
-    nrows: i64,
-    remap: &[i64],
-) -> Result<*mut ffi::ray_t> {
+fn rebuild_i64_column(old: *mut ffi::ray_t, nrows: i64, remap: &[i64]) -> Result<*mut ffi::ray_t> {
     unsafe {
         let new_col_raw = ffi::ray_vec_new(ffi::RAY_I64, nrows.max(1));
         if new_col_raw.is_null() {
@@ -506,8 +496,8 @@ fn rebuild_i64_column(
         let mut col = new_col_raw;
         for row in 0..nrows {
             let old_v = ffi::ray_vec_get_i64(old, row);
-            let new_v = remap_datom_i64(old_v, remap)
-                .with_context(|| format!("row {row} datom remap"))?;
+            let new_v =
+                remap_datom_i64(old_v, remap).with_context(|| format!("row {row} datom remap"))?;
             let val_ptr: *const i64 = &new_v;
             col = ffi::ray_vec_append(col, val_ptr.cast());
             if col.is_null() {
@@ -530,8 +520,12 @@ fn remap_datom_i64(encoded: i64, remap: &[i64]) -> Result<i64> {
         return Ok(encoded);
     }
     let old_sym = datom::payload(encoded);
-    let new_sym = remap_one(old_sym, remap)
-        .with_context(|| format!("datom-tagged i64 ({:#x}) references out-of-range sym id", encoded))?;
+    let new_sym = remap_one(old_sym, remap).with_context(|| {
+        format!(
+            "datom-tagged i64 ({:#x}) references out-of-range sym id",
+            encoded
+        )
+    })?;
     Ok(match kind {
         datom::KIND_SYM => datom::encode_sym(new_sym),
         datom::KIND_STR => datom::encode_str(new_sym),

@@ -20,7 +20,6 @@
 	import {
 		fetchExomemSchema,
 		fetchExplain,
-		fetchExomemStatus,
 		fetchTxRows,
 		type ProofTreeNode,
 		type ExplainResponse,
@@ -133,13 +132,12 @@
 		explainError = null;
 		expandedNodes = new Set();
 		try {
-			const [schemaRes, status, tx] = await Promise.all([
+			const [schemaRes, tx] = await Promise.all([
 				fetchExomemSchema(exomPath),
-				fetchExomemStatus(exomPath),
 				fetchTxRows(exomPath)
 			]);
 			schema = schemaRes;
-			currentBranch = status.current_branch ?? 'main';
+			currentBranch = 'main';
 			txRows = tx;
 			builtinViews = schemaRes.ontology?.builtin_views ?? [];
 			derivedRelations = schemaRes.relations.filter((r) => r.kind === 'derived');

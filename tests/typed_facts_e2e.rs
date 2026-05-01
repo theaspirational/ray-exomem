@@ -20,11 +20,8 @@
 //! EDB row, so it is a variable (not a constant).
 
 use ray_exomem::{
-    brain::Brain,
-    context::MutationContext,
-    fact_value::FactValue,
-    rules::parse_rule_line,
-    storage, RayforceEngine,
+    brain::Brain, context::MutationContext, fact_value::FactValue, rules::parse_rule_line, storage,
+    RayforceEngine,
 };
 
 fn test_lock() -> &'static std::sync::Mutex<()> {
@@ -111,25 +108,44 @@ fn query_first_col(
     let ctx = MutationContext::default();
     for (fact_id, predicate, value) in profile {
         brain
-            .assert_fact(fact_id, predicate, value.clone(), 1.0, "test", None, None, &ctx)
+            .assert_fact(
+                ray_exomem::brain::MAIN_BRANCH,
+                fact_id,
+                predicate,
+                value.clone(),
+                1.0,
+                "test",
+                None,
+                None,
+                &ctx,
+            )
             .unwrap();
     }
 
-    let datoms = storage::build_datoms_table(&brain).unwrap();
-    let typed = storage::build_typed_fact_tables(&brain).unwrap();
+    let datoms = storage::build_datoms_table(&brain, ray_exomem::brain::MAIN_BRANCH).unwrap();
+    let typed = storage::build_typed_fact_tables(&brain, ray_exomem::brain::MAIN_BRANCH).unwrap();
     let band_codes = build_water_band_codes_table();
 
     engine
         .bind_named_db(storage::sym_intern(exom), &datoms)
         .unwrap();
     engine
-        .bind_named_db(storage::sym_intern(storage::FACTS_I64_ENV), &typed.facts_i64)
+        .bind_named_db(
+            storage::sym_intern(storage::FACTS_I64_ENV),
+            &typed.facts_i64,
+        )
         .unwrap();
     engine
-        .bind_named_db(storage::sym_intern(storage::FACTS_STR_ENV), &typed.facts_str)
+        .bind_named_db(
+            storage::sym_intern(storage::FACTS_STR_ENV),
+            &typed.facts_str,
+        )
         .unwrap();
     engine
-        .bind_named_db(storage::sym_intern(storage::FACTS_SYM_ENV), &typed.facts_sym)
+        .bind_named_db(
+            storage::sym_intern(storage::FACTS_SYM_ENV),
+            &typed.facts_sym,
+        )
         .unwrap();
     engine
         .bind_named_db(storage::sym_intern("water_band_codes"), &band_codes)
@@ -198,9 +214,7 @@ fn facts_i64_scanned_as_edb_by_rule_body() {
     // through to the bound variable ?v for downstream cmp. Variable-head
     // rule sidesteps the rayforce2 constant-head issue.
     let exom = "dbg/main";
-    let profile = &[
-        ("w1", "profile/weight_kg", FactValue::I64(55)),
-    ];
+    let profile = &[("w1", "profile/weight_kg", FactValue::I64(55))];
     let rules = vec![format!(
         r#"(rule {exom} (low-weight-id ?id) (facts_i64 ?id 'profile/weight_kg ?w) (< ?w 60))"#
     )];
@@ -217,8 +231,16 @@ fn facts_i64_scanned_as_edb_by_rule_body() {
 fn water_band_medium_for_default_profile() {
     let exom = "testexom/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
     let got = query_first_col(exom, profile, &q, &water_band_rules(exom));
@@ -232,8 +254,16 @@ fn water_band_medium_for_default_profile() {
 fn water_band_small_for_slight_profile() {
     let exom = "testexom/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(55)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(160)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(55),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(160),
+        ),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
     let got = query_first_col(exom, profile, &q, &water_band_rules(exom));
@@ -247,8 +277,16 @@ fn water_band_small_for_slight_profile() {
 fn water_band_large_for_heavy_profile() {
     let exom = "testexom/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(90)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(90),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
     let got = query_first_col(exom, profile, &q, &water_band_rules(exom));
@@ -305,7 +343,6 @@ fn plan_verbatim_health_rules(exom: &str) -> Vec<String> {
         format!(
             r#"(rule {exom} (health/water-band "medium") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?h 170) (< ?w 85) (< ?h 185))"#
         ),
-
         format!(
             r#"(rule {exom} (health/step-band "high") (facts_i64 ?id 'profile/age ?a) (< ?a 30))"#
         ),
@@ -315,16 +352,27 @@ fn plan_verbatim_health_rules(exom: &str) -> Vec<String> {
         format!(
             r#"(rule {exom} (health/step-band "gentle") (facts_i64 ?id 'profile/age ?a) (>= ?a 50))"#
         ),
-
         // Composable recommended-* rules must come AFTER band derivation
         // rules (see note above). These are trivial joins onto the
         // derived band IDBs.
-        format!(r#"(rule {exom} (health/recommended-water-ml "2000") (health/water-band "small"))"#),
-        format!(r#"(rule {exom} (health/recommended-water-ml "2500") (health/water-band "medium"))"#),
-        format!(r#"(rule {exom} (health/recommended-water-ml "3000") (health/water-band "large"))"#),
-        format!(r#"(rule {exom} (health/recommended-steps-per-day "10000") (health/step-band "high"))"#),
-        format!(r#"(rule {exom} (health/recommended-steps-per-day "9000") (health/step-band "medium"))"#),
-        format!(r#"(rule {exom} (health/recommended-steps-per-day "7500") (health/step-band "gentle"))"#),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "2000") (health/water-band "small"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "2500") (health/water-band "medium"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-water-ml "3000") (health/water-band "large"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "10000") (health/step-band "high"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "9000") (health/step-band "medium"))"#
+        ),
+        format!(
+            r#"(rule {exom} (health/recommended-steps-per-day "7500") (health/step-band "gentle"))"#
+        ),
     ]
 }
 
@@ -332,8 +380,16 @@ fn plan_verbatim_health_rules(exom: &str) -> Vec<String> {
 fn plan_verbatim_water_band_medium_for_default_profile() {
     let exom = "plan/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
         ("health/profile/age", "profile/age", FactValue::I64(30)),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
@@ -349,8 +405,16 @@ fn plan_verbatim_water_band_medium_for_default_profile() {
 fn plan_verbatim_water_band_small_for_slight_profile() {
     let exom = "plan/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(55)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(160)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(55),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(160),
+        ),
         ("health/profile/age", "profile/age", FactValue::I64(25)),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
@@ -366,8 +430,16 @@ fn plan_verbatim_water_band_small_for_slight_profile() {
 fn plan_verbatim_water_band_large_for_heavy_profile() {
     let exom = "plan/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(90)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(90),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
         ("health/profile/age", "profile/age", FactValue::I64(30)),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/water-band ?b)))");
@@ -384,8 +456,16 @@ fn plan_verbatim_step_band_high_young() {
     let exom = "plan/health/main";
     let profile = &[
         ("health/profile/age", "profile/age", FactValue::I64(25)),
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/step-band ?b)))");
     let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
@@ -401,8 +481,16 @@ fn plan_verbatim_step_band_medium_default() {
     let exom = "plan/health/main";
     let profile = &[
         ("health/profile/age", "profile/age", FactValue::I64(30)),
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/step-band ?b)))");
     let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
@@ -418,8 +506,16 @@ fn plan_verbatim_step_band_gentle_older() {
     let exom = "plan/health/main";
     let profile = &[
         ("health/profile/age", "profile/age", FactValue::I64(55)),
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
     ];
     let q = format!("(query {exom} (find ?b) (where (health/step-band ?b)))");
     let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
@@ -434,8 +530,16 @@ fn plan_verbatim_step_band_gentle_older() {
 fn plan_verbatim_recommended_water_ml_default() {
     let exom = "plan/health/main";
     let profile = &[
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
         ("health/profile/age", "profile/age", FactValue::I64(30)),
     ];
     let q = format!("(query {exom} (find ?ml) (where (health/recommended-water-ml ?ml)))");
@@ -452,8 +556,16 @@ fn plan_verbatim_recommended_steps_default() {
     let exom = "plan/health/main";
     let profile = &[
         ("health/profile/age", "profile/age", FactValue::I64(30)),
-        ("health/profile/weight_kg", "profile/weight_kg", FactValue::I64(75)),
-        ("health/profile/height_cm", "profile/height_cm", FactValue::I64(175)),
+        (
+            "health/profile/weight_kg",
+            "profile/weight_kg",
+            FactValue::I64(75),
+        ),
+        (
+            "health/profile/height_cm",
+            "profile/height_cm",
+            FactValue::I64(175),
+        ),
     ];
     let q = format!("(query {exom} (find ?sp) (where (health/recommended-steps-per-day ?sp)))");
     let got = query_first_col(exom, profile, &q, &plan_verbatim_health_rules(exom));
@@ -483,9 +595,7 @@ fn body_string_literal_pins_datom_encoded_value_column() {
         ("f1", "color", FactValue::Str("red".into())),
         ("f2", "color", FactValue::Str("blue".into())),
     ];
-    let q = format!(
-        r#"(query {exom} (find ?id) (where ({exom} ?id 'color "red")))"#
-    );
+    let q = format!(r#"(query {exom} (find ?id) (where ({exom} ?id 'color "red")))"#);
     let got = query_first_col(exom, profile, &q, &[]);
     assert_eq!(
         got,
@@ -503,9 +613,7 @@ fn body_string_literal_pins_datom_encoded_via_facts_str_edb() {
         ("f1", "color", FactValue::Str("red".into())),
         ("f2", "color", FactValue::Str("blue".into())),
     ];
-    let q = format!(
-        r#"(query {exom} (find ?id) (where (facts_str ?id 'color "red")))"#
-    );
+    let q = format!(r#"(query {exom} (find ?id) (where (facts_str ?id 'color "red")))"#);
     let got = query_first_col(exom, profile, &q, &[]);
     assert_eq!(
         got,
@@ -553,9 +661,7 @@ fn body_string_literal_pins_predicate_position_sym_column() {
     // so the rewrite must convert "test/n" → 'test/n before the engine sees it.
     let exom = "n2/main";
     let profile = &[("f1", "test/n", FactValue::Str("payload".into()))];
-    let raw_q = format!(
-        r#"(query {exom} (find ?id) (where (?id 'fact/predicate "test/n")))"#
-    );
+    let raw_q = format!(r#"(query {exom} (find ?id) (where (?id 'fact/predicate "test/n")))"#);
     let q = rewrite_query_with_schema(&raw_q);
     assert!(
         q.contains("'test/n"),

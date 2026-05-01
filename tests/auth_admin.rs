@@ -328,13 +328,10 @@ fn top_admin_can_delete_user_and_namespace() {
     let admin_session = daemon.mock_login("admin@co.com", "Admin");
     let bob_session = daemon.mock_login("bob@co.com", "Bob");
 
-    let create = ureq::post(&format!(
-        "{}/api/actions/exom-new",
-        daemon.base_url
-    ))
-    .set("Cookie", &format!("ray_exomem_session={bob_session}"))
-    .send_json(json!({"path": "bob@co.com/projects/main"}))
-    .expect("user exom creation should succeed");
+    let create = ureq::post(&format!("{}/api/actions/exom-new", daemon.base_url))
+        .set("Cookie", &format!("ray_exomem_session={bob_session}"))
+        .send_json(json!({"path": "bob@co.com/projects/main"}))
+        .expect("user exom creation should succeed");
     assert_eq!(create.status(), 200);
     assert!(
         daemon.tree_root().join("bob@co.com/projects/main").exists(),
