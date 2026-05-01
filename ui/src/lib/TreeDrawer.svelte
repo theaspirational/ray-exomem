@@ -28,6 +28,7 @@
 		toggleGraphFolderVisibility
 	} from '$lib/graphExomVisibility.svelte';
 	import type { TreeExom, TreeNode } from '$lib/exomem.svelte';
+	import { isProjectMainExomKind, treeExomDisplayName } from '$lib/path.svelte';
 	import { treeModals } from '$lib/treeModals.svelte';
 
 	let {
@@ -118,7 +119,7 @@
 	}
 
 	function exomDotClass(kind: string): string {
-		if (kind === 'project_main' || kind === 'project-main') return 'fill-branch-active text-branch-active';
+		if (isProjectMainExomKind(kind)) return 'fill-branch-active text-branch-active';
 		if (kind === 'session') return 'fill-fact-base text-fact-base';
 		return 'fill-muted-foreground text-muted-foreground';
 	}
@@ -134,6 +135,11 @@
 	function labelForSession(node: TreeExom): string {
 		const s = node.session as { label?: string } | null | undefined;
 		return s?.label?.trim() || node.name;
+	}
+
+	function labelForExom(node: TreeExom): string {
+		if (node.exom_kind === 'session') return labelForSession(node);
+		return treeExomDisplayName(node);
 	}
 </script>
 
@@ -237,6 +243,7 @@
 									</ContextMenuContent>
 								</ContextMenu>
 							{:else}
+								{@const label = labelForExom(node)}
 								<ContextMenu>
 									<ContextMenuTrigger class="block w-full text-left">
 										<div
@@ -257,7 +264,7 @@
 													aria-hidden="true"
 												/>
 												<span class="min-w-0 flex-1 truncate text-[11px] text-foreground"
-													>{node.name}</span
+													>{label}</span
 												>
 												{#if node.acl_mode === 'co-edit'}
 													<Badge
@@ -281,7 +288,7 @@
 												<button
 													type="button"
 													class="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-card hover:text-foreground"
-													aria-label="Toggle visibility for {node.name}"
+													aria-label="Toggle visibility for {label}"
 													onclick={(e) => {
 														e.stopPropagation();
 														toggleGraphExom(node.path);

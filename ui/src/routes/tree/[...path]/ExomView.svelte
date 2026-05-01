@@ -14,6 +14,7 @@
 	import NotebookEntity from '$lib/Notebook/NotebookEntity.svelte';
 	import NotebookSection from '$lib/Notebook/NotebookSection.svelte';
 	import RightRailAnchors from '$lib/Notebook/RightRailAnchors.svelte';
+	import { treeExomDisplayName } from '$lib/path.svelte';
 	import { entityForFactId } from '$lib/predicateRendering.svelte';
 	import {
 		ApiActionError,
@@ -63,8 +64,7 @@
 	}
 
 	const lastSegment = $derived.by(() => {
-		const s = node.path.split('/').filter(Boolean);
-		return s[s.length - 1] ?? node.name;
+		return treeExomDisplayName(node);
 	});
 
 	const titleText = $derived(
