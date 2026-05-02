@@ -13,9 +13,18 @@
 		fetchExomemSchema,
 		fetchRelationGraph,
 		fetchEntityFacts,
+		fetchGraphLayout,
+		saveGraphLayout,
 		type RelationGraphResponse
 	} from '$lib/exomem.svelte';
 	import type { ExomemSchemaResponse, FactEntry } from '$lib/types';
+	import {
+		GRAPH_LAYOUT_VERSION,
+		applyPositions,
+		normalizePositions,
+		seededRng,
+		type LayoutPayload
+	} from '$lib/graphLayout';
 
 	let { exomPath, branch = 'main' }: { exomPath: string; branch?: string } = $props();
 
@@ -48,7 +57,7 @@
 	let activePredFilters = $state<Set<string>>(new Set());
 	let filtersInitialized = $state(false);
 	let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
-	let showControls = $state(true);
+	let showControls = $state(false);
 
 	const systemPredicateSet = $derived(new Set(schema?.ontology?.system_attributes.map((attr) => attr.name) ?? []));
 	const coordinationPredicateSet = $derived(new Set(schema?.ontology?.coordination_attributes.map((attr) => attr.name) ?? []));
@@ -164,6 +173,15 @@
 	let svgEdgeLabelSelection: d3.Selection<SVGTextElement, GEdge, SVGGElement, unknown> | null = null;
 	let svgLinkSelection: d3.Selection<SVGLineElement, GEdge, SVGGElement, unknown> | null = null;
 
+	// Layout persistence: scope = exom path; positions stored normalized to bbox.
+	const layoutScope = $derived(`exom:${exomPath}`);
+	let savedLayout: LayoutPayload | null = null;
+	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	let activeNodes: GNode[] = [];
+	let viewportState: { x: number; y: number; k: number } | null = null;
+	// Suppresses persistence while we apply a saved layout to state vars.
+	let applyingSaved = false;
+
 	type GNode = d3.SimulationNodeDatum & { id: string; label: string; degree: number };
 	type GEdge = d3.SimulationLinkDatum<GNode> & { label: string; predicate: string; kind: string };
 
@@ -269,12 +287,16 @@
 		loading = true;
 		error = null;
 		try {
-			const [graphRes, schemaRes] = await Promise.all([
+			const [graphRes, schemaRes, layoutRes] = await Promise.all([
 				fetchRelationGraph(exomPath, branch),
-				fetchExomemSchema(exomPath, undefined, branch)
+				fetchExomemSchema(exomPath, undefined, branch),
+				fetchGraphLayout(layoutScope).catch(() => null)
 			]);
 			graph = graphRes;
 			schema = schemaRes;
+			savedLayout = layoutRes;
+			viewportState = layoutRes?.viewport ?? null;
+			applySavedControls(layoutRes?.controls);
 			selectedNode = null;
 			selectedNodeFacts = [];
 			factFilterPredicate = null;
@@ -289,6 +311,70 @@
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load graph';
 			loading = false;
+		}
+	}
+
+	function applySavedControls(c: LayoutPayload['controls'] | undefined) {
+		if (!c) return;
+		applyingSaved = true;
+		try {
+			if (typeof c.linkDistance === 'number') linkDistance = c.linkDistance;
+			if (typeof c.chargeStrength === 'number') chargeStrength = c.chargeStrength;
+			if (typeof c.collisionRadius === 'number') collisionRadius = c.collisionRadius;
+			if (typeof c.nodeScale === 'number') nodeScale = c.nodeScale;
+			if (typeof c.labelSize === 'number') labelSize = c.labelSize;
+			if (typeof c.edgeLabelSize === 'number') edgeLabelSize = c.edgeLabelSize;
+			if (typeof c.linkWidth === 'number') linkWidth = c.linkWidth;
+			if (typeof c.showNodeLabels === 'boolean') showNodeLabels = c.showNodeLabels;
+			if (typeof c.showEdgeLabels === 'boolean') showEdgeLabels = c.showEdgeLabels;
+			if (typeof c.showControls === 'boolean') showControls = c.showControls;
+		} finally {
+			applyingSaved = false;
+		}
+	}
+
+	function currentControls(): NonNullable<LayoutPayload['controls']> {
+		return {
+			linkDistance,
+			chargeStrength,
+			collisionRadius,
+			nodeScale,
+			labelSize,
+			edgeLabelSize,
+			linkWidth,
+			showNodeLabels,
+			showEdgeLabels,
+			showControls
+		};
+	}
+
+	function schedulePersist() {
+		if (applyingSaved) return;
+		if (saveTimer) clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => {
+			saveTimer = null;
+			void persistLayout();
+		}, 750);
+	}
+
+	async function persistLayout() {
+		// Build positions only if the simulation has run; otherwise reuse the
+		// last known node positions to avoid clobbering them with empties.
+		const positions =
+			activeNodes.length > 0
+				? normalizePositions(activeNodes.map((n) => ({ id: n.id, x: n.x, y: n.y })))
+				: savedLayout?.nodes ?? {};
+		const payload: LayoutPayload = {
+			version: GRAPH_LAYOUT_VERSION,
+			nodes: positions,
+			controls: currentControls()
+		};
+		if (viewportState) payload.viewport = viewportState;
+		try {
+			await saveGraphLayout(layoutScope, payload);
+			savedLayout = payload;
+		} catch {
+			// Persistence failures are non-fatal — the layout still works for this session.
 		}
 	}
 
@@ -323,6 +409,7 @@
 		const collisionForce = simulation.force('collision') as d3.ForceCollide<GNode> | undefined;
 		if (collisionForce) collisionForce.radius(collisionRadius * nodeScale);
 		simulation.alpha(0.5).restart();
+		schedulePersist();
 	}
 
 	function applyVisuals() {
@@ -348,6 +435,7 @@
 			const collisionForce = simulation.force('collision') as d3.ForceCollide<GNode> | undefined;
 			if (collisionForce) collisionForce.radius(collisionRadius * nodeScale);
 		}
+		schedulePersist();
 	}
 
 	function renderGraph(data: RelationGraphResponse) {
@@ -363,8 +451,22 @@
 		const g = svg.append('g');
 		const zoom = d3.zoom<SVGSVGElement, unknown>()
 			.scaleExtent([0.1, 8])
-			.on('zoom', (event) => g.attr('transform', event.transform));
+			.on('zoom', (event) => {
+				g.attr('transform', event.transform);
+				const t = event.transform;
+				viewportState = { x: t.x, y: t.y, k: t.k };
+				schedulePersist();
+			});
 		svg.call(zoom);
+		if (viewportState) {
+			applyingSaved = true;
+			try {
+				const t = d3.zoomIdentity.translate(viewportState.x, viewportState.y).scale(viewportState.k);
+				svg.call(zoom.transform, t);
+			} finally {
+				applyingSaved = false;
+			}
+		}
 
 		// Arrow markers per predicate
 		const preds = new Set(data.edges.map((e) => e.predicate));
@@ -385,11 +487,26 @@
 				.attr('fill', color);
 		}
 
-		const nodes: GNode[] = data.nodes.map((n) => ({ ...n }));
+		// Sort by id so d3-force's index-based phyllotaxis seeding produces a
+		// stable initial layout for a given input set.
+		const nodes: GNode[] = data.nodes
+			.map((n) => ({ ...n }))
+			.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 		const edges: GEdge[] = data.edges.map((e) => ({ ...e }));
+
+		// If we have a saved layout, restore positions before the simulation
+		// starts. Nodes missing from the layout are left for the simulation
+		// to place via the seeded RNG path below.
+		applyPositions(
+			nodes as { id: string; x?: number; y?: number }[],
+			savedLayout,
+			{ width, height }
+		);
+		activeNodes = nodes;
 
 		simulation = d3
 			.forceSimulation<GNode>(nodes)
+			.randomSource(seededRng(layoutScope))
 			.force(
 				'link',
 				d3.forceLink<GNode, GEdge>(edges).id((d) => d.id).distance(linkDistance)
@@ -452,6 +569,7 @@
 						if (!event.active) simulation!.alphaTarget(0);
 						d.fx = null;
 						d.fy = null;
+						schedulePersist();
 					})
 			);
 
@@ -520,7 +638,7 @@
 			{/if}
 		</div>
 		<div class="flex items-center gap-0.5">
-			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={() => showControls = !showControls} title="Toggle controls">
+			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={() => { showControls = !showControls; schedulePersist(); }} title="Toggle controls">
 				<Settings2 class="size-3.5" />
 			</button>
 			<button type="button" class="flex size-7 items-center justify-center rounded text-foreground/60 hover:bg-secondary hover:text-foreground" onclick={zoomIn} title="Zoom in">
@@ -538,9 +656,9 @@
 		</div>
 	</div>
 
-	<div class="relative flex min-h-0 flex-1 overflow-hidden">
+	<div class="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
 		<!-- Graph canvas -->
-		<div class="flex min-h-0 flex-1 flex-col">
+		<div class="flex min-h-0 min-w-0 flex-1 flex-col">
 			{#if error}
 				<div class="flex h-full min-h-[200px] items-center justify-center">
 					<Card class="max-w-md border-destructive/30 bg-destructive/10">

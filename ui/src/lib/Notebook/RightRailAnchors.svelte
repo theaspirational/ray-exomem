@@ -5,30 +5,51 @@
 	let { sections }: { sections: { id: string; label: string }[] } = $props();
 
 	let active = $state('');
+	let scrollRoot: Element | Window | null = null;
 
 	function scrollToId(id: string) {
 		if (!browser) return;
+		active = id;
 		document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+
+	function findScrollRoot(): Element | Window {
+		const firstSection = document.getElementById(sections[0]?.id ?? '');
+		let el = firstSection?.parentElement ?? null;
+		while (el && el !== document.documentElement) {
+			const overflowY = window.getComputedStyle(el).overflowY;
+			if (
+				/(auto|scroll|overlay)/.test(overflowY) &&
+				el.scrollHeight > el.clientHeight
+			) {
+				return el;
+			}
+			el = el.parentElement;
+		}
+		return window;
 	}
 
 	function updateActive() {
 		if (!browser || sections.length === 0) return;
-		const y = window.scrollY + 96;
+		const root = scrollRoot ?? findScrollRoot();
+		const top = root === window ? 0 : (root as Element).getBoundingClientRect().top;
+		const y = top + 96;
 		let current = sections[0].id;
 		for (const s of sections) {
 			const el = document.getElementById(s.id);
-			if (el && el.offsetTop <= y) current = s.id;
+			if (el && el.getBoundingClientRect().top <= y) current = s.id;
 		}
 		active = current;
 	}
 
 	onMount(() => {
 		active = sections[0]?.id ?? '';
+		scrollRoot = findScrollRoot();
 		updateActive();
-		window.addEventListener('scroll', updateActive, { passive: true });
+		scrollRoot.addEventListener('scroll', updateActive, { passive: true });
 		window.addEventListener('resize', updateActive, { passive: true });
 		return () => {
-			window.removeEventListener('scroll', updateActive);
+			scrollRoot?.removeEventListener('scroll', updateActive);
 			window.removeEventListener('resize', updateActive);
 		};
 	});

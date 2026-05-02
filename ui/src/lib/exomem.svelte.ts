@@ -1258,3 +1258,60 @@ export async function mergeBranch(
 export async function deleteBranch(branchId: string, exom = DEFAULT_EXOM): Promise<void> {
 	await deleteRequest(`api/branches/${encodeURIComponent(branchId)}?exom=${encodeURIComponent(exom)}`);
 }
+
+// ---------------------------------------------------------------------------
+// UI graph layout (per-user, per-scope)
+// ---------------------------------------------------------------------------
+
+import type { LayoutPayload as GraphLayoutPayload } from './graphLayout';
+export type { GraphLayoutPayload };
+
+/** Returns the saved layout for `scope`, or `null` if none exists yet. */
+export async function fetchGraphLayout(scope: string): Promise<GraphLayoutPayload | null> {
+	const url = `api/ui/graph-layout?scope=${encodeURIComponent(scope)}`;
+	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
+	let res: Response;
+	try {
+		res = await fetch(endpoint(url), { signal, credentials: 'include' });
+		clear();
+	} catch (e) {
+		clear();
+		if (signal.aborted) throw new Error(fetchTimedOutMessage());
+		throw e instanceof Error ? e : new Error(String(e));
+	}
+	await handle401(res);
+	if (res.status === 404) return null;
+	if (!res.ok) {
+		throw new Error(`Request failed: ${res.status} ${res.statusText}`);
+	}
+	const body = (await res.json()) as { layout: GraphLayoutPayload | null };
+	return body.layout ?? null;
+}
+
+/** Persists `layout` against `scope` for the authenticated user. */
+export async function saveGraphLayout(
+	scope: string,
+	layout: GraphLayoutPayload
+): Promise<void> {
+	const url = `api/ui/graph-layout?scope=${encodeURIComponent(scope)}`;
+	const { signal, clear } = signalWithTimeout(DEFAULT_FETCH_TIMEOUT_MS);
+	let res: Response;
+	try {
+		res = await fetch(endpoint(url), {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(layout),
+			signal,
+			credentials: 'include'
+		});
+		clear();
+	} catch (e) {
+		clear();
+		if (signal.aborted) throw new Error(fetchTimedOutMessage());
+		throw e instanceof Error ? e : new Error(String(e));
+	}
+	await handle401(res);
+	if (!res.ok) {
+		throw new Error(`Request failed: ${res.status} ${res.statusText}`);
+	}
+}

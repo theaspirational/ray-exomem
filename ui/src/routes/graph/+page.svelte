@@ -10,7 +10,20 @@
 		hideAllGraphExoms,
 		showAllGraphExoms
 	} from '$lib/graphExomVisibility.svelte';
-	import { fetchRelationGraph, type RelationGraphResponse } from '$lib/exomem.svelte';
+	import {
+		fetchRelationGraph,
+		fetchGraphLayout,
+		saveGraphLayout,
+		type RelationGraphResponse
+	} from '$lib/exomem.svelte';
+	import {
+		GLOBAL_GRAPH_SCOPE,
+		GRAPH_LAYOUT_VERSION,
+		applyPositions,
+		normalizePositions,
+		seededRng,
+		type LayoutPayload
+	} from '$lib/graphLayout';
 
 	let graphCache = $state<Record<string, RelationGraphResponse>>({});
 
@@ -193,6 +206,51 @@
 	let svgEdgeLabelSelection: d3.Selection<SVGTextElement, GEdge, SVGGElement, unknown> | null = null;
 	let svgLinkSelection: d3.Selection<SVGLineElement, GEdge, SVGGElement, unknown> | null = null;
 
+	let savedLayout: LayoutPayload | null = null;
+	let layoutLoaded = false;
+	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	let activeNodes: GNode[] = [];
+	let viewportState: { x: number; y: number; k: number } | null = null;
+	let applyingSaved = false;
+
+	async function ensureLayoutLoaded() {
+		if (layoutLoaded) return;
+		layoutLoaded = true;
+		try {
+			savedLayout = await fetchGraphLayout(GLOBAL_GRAPH_SCOPE);
+			viewportState = savedLayout?.viewport ?? null;
+		} catch {
+			savedLayout = null;
+		}
+	}
+
+	function schedulePersist() {
+		if (applyingSaved) return;
+		if (saveTimer) clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => {
+			saveTimer = null;
+			void persistLayout();
+		}, 750);
+	}
+
+	async function persistLayout() {
+		const positions =
+			activeNodes.length > 0
+				? normalizePositions(activeNodes.map((n) => ({ id: n.id, x: n.x, y: n.y })))
+				: savedLayout?.nodes ?? {};
+		const payload: LayoutPayload = {
+			version: GRAPH_LAYOUT_VERSION,
+			nodes: positions
+		};
+		if (viewportState) payload.viewport = viewportState;
+		try {
+			await saveGraphLayout(GLOBAL_GRAPH_SCOPE, payload);
+			savedLayout = payload;
+		} catch {
+			/* non-fatal */
+		}
+	}
+
 	function nodeRadius(d: GNode): number {
 		return Math.max(6, Math.min(18, 4 + d.degree * 1.5)) * DEFAULTS.nodeScale;
 	}
@@ -215,8 +273,22 @@
 		const zoom = d3
 			.zoom<SVGSVGElement, unknown>()
 			.scaleExtent([0.1, 8])
-			.on('zoom', (event) => g.attr('transform', event.transform));
+			.on('zoom', (event) => {
+				g.attr('transform', event.transform);
+				const t = event.transform;
+				viewportState = { x: t.x, y: t.y, k: t.k };
+				schedulePersist();
+			});
 		svg.call(zoom);
+		if (viewportState) {
+			applyingSaved = true;
+			try {
+				const t = d3.zoomIdentity.translate(viewportState.x, viewportState.y).scale(viewportState.k);
+				svg.call(zoom.transform, t);
+			} finally {
+				applyingSaved = false;
+			}
+		}
 		const defs = svg.append('defs');
 		const markerKeys = new Set<string>();
 		for (const e of data.edges) {
@@ -238,11 +310,21 @@
 				.attr('fill', fill);
 		}
 
-		const nodes: GNode[] = data.nodes.map((n) => ({ ...n }));
+		const nodes: GNode[] = data.nodes
+			.map((n) => ({ ...n }))
+			.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 		const edges: GEdge[] = data.edges.map((e) => ({ ...e }));
+
+		applyPositions(
+			nodes as { id: string; x?: number; y?: number }[],
+			savedLayout,
+			{ width, height }
+		);
+		activeNodes = nodes;
 
 		simulation = d3
 			.forceSimulation<GNode>(nodes)
+			.randomSource(seededRng(GLOBAL_GRAPH_SCOPE))
 			.force(
 				'link',
 				d3.forceLink<GNode, GEdge>(edges).id((d) => d.id).distance(DEFAULTS.linkDistance)
@@ -302,6 +384,7 @@
 						if (!event.active) simulation!.alphaTarget(0);
 						d.fx = null;
 						d.fy = null;
+						schedulePersist();
 					})
 			);
 
@@ -344,7 +427,9 @@
 		if (!browser || !svgEl) return;
 		const data = mergedGraph;
 		const colors = exomColorMap;
-		void tick().then(() => {
+		void (async () => {
+			await ensureLayoutLoaded();
+			await tick();
 			if (data.nodes.length === 0) {
 				simulation?.stop();
 				simulation = null;
@@ -352,7 +437,7 @@
 				return;
 			}
 			renderGraph(data, colors);
-		});
+		})();
 	});
 
 	function zoomIn() {

@@ -9,6 +9,9 @@ pub mod jsonl_auth;
 #[cfg(feature = "postgres")]
 pub mod pg_auth;
 
+#[cfg(feature = "postgres")]
+pub mod pg_ui_state;
+
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -139,6 +142,25 @@ pub trait AuthDb: Send + Sync {
     /// `allowed_domains` and `allowed_emails` are preserved so login policy
     /// survives the reset.
     async fn factory_reset(&self) -> anyhow::Result<()>;
+}
+
+/// Per-user UI state — currently graph layouts, keyed by `(user_email, scope)`.
+/// Layout payloads are opaque JSON blobs to keep this surface stable as the
+/// frontend evolves; see `migrations/003_ui_graph_layouts.sql`.
+#[async_trait]
+pub trait UiStateDb: Send + Sync {
+    async fn get_graph_layout(
+        &self,
+        user_email: &str,
+        scope: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>>;
+
+    async fn upsert_graph_layout(
+        &self,
+        user_email: &str,
+        scope: &str,
+        layout: &serde_json::Value,
+    ) -> anyhow::Result<()>;
 }
 
 #[cfg(feature = "postgres")]

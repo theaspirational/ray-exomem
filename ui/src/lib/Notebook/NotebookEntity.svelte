@@ -96,7 +96,7 @@
 			<span class="font-mono text-[11px] text-muted-foreground">docs</span>
 			<a
 				href={f.terms[0]}
-				class="text-primary hover:underline"
+				class="text-primary hover:underline [overflow-wrap:anywhere]"
 				target="_blank"
 				rel="noreferrer">{f.terms[0]}</a
 			>
@@ -122,7 +122,7 @@
 					<span class="font-mono text-[12px] text-foreground/80">{f.predicate}</span>
 					<a
 						href={treeHrefForValue(f.terms[0] ?? '')}
-						class="font-mono text-[12px] text-primary hover:underline"
+						class="font-mono text-[12px] text-primary hover:underline [overflow-wrap:anywhere]"
 					>
 						{f.terms[0] ?? '—'}
 					</a>

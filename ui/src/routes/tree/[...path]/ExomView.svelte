@@ -350,11 +350,11 @@
 </script>
 
 <div
-	class="flex flex-col gap-4"
+	class="flex flex-col gap-3"
 	class:opacity-60={contentDimmed}
 	data-read-only={readOnly ? 'true' : undefined}
 >
-	<header class="relative space-y-3">
+	<header class="relative space-y-1.5">
 		{#if hasStatusBadges}
 			<div class="flex flex-wrap items-center gap-2 pr-32 text-xs">
 				{#if aclMode === 'co-edit'}
@@ -431,7 +431,7 @@
 		>
 			{node.path.split('/').filter(Boolean).join('/')}
 		</div>
-		<h1 class="font-serif text-3xl text-foreground">{titleText}</h1>
+		<h1 class="font-serif text-2xl leading-tight text-foreground">{titleText}</h1>
 		{#if node.forked_from}
 			<p class="font-mono text-[11px] text-muted-foreground">
 				forked from
@@ -453,7 +453,7 @@
 	</header>
 
 	<main
-		class="flex flex-col gap-6 md:grid md:grid-cols-[1fr_minmax(140px,160px)] md:items-start"
+		class="flex flex-col gap-4 md:grid md:grid-cols-[minmax(0,1fr)_minmax(140px,160px)] md:items-start"
 	>
 		<article class="order-2 min-w-0 space-y-0 md:order-1 md:col-start-1 md:row-start-1">
 			<NotebookSection id="branches" title="Branches">
@@ -470,15 +470,31 @@
 				{:else if branches.length === 0}
 					<p class="font-serif text-sm text-muted-foreground">No branches yet.</p>
 				{:else}
-					<ul class="space-y-1.5 font-mono text-sm text-foreground/90">
-						{#each branches as b (b.branch_id)}
-							<li class="flex flex-wrap items-center gap-2 [overflow-wrap:anywhere]">
+					{@const trunkIdx = branches.findIndex((br) => br.name === 'main')}
+					{@const trunk = trunkIdx >= 0 ? branches[trunkIdx] : branches[0]}
+					{@const others = branches.filter((br) => br.branch_id !== trunk.branch_id)}
+					<ul class="font-mono text-sm leading-6 text-foreground/90">
+						{#each [trunk, ...others] as b, i (b.branch_id)}
+							{@const isTrunk = i === 0}
+							{@const isLast = i === branches.length - 1}
+							<li class="flex items-center gap-2 [overflow-wrap:anywhere]">
+								{#if !isTrunk}
+									<span class="relative w-4 shrink-0 self-stretch" aria-hidden="true">
+										<span
+											class="absolute left-[7px] top-0 w-px bg-muted-foreground/30"
+											style:height={isLast ? '50%' : '100%'}
+										></span>
+										<span
+											class="absolute left-[7px] top-1/2 h-px w-[9px] bg-muted-foreground/30"
+										></span>
+									</span>
+								{/if}
 								<span
-									class="inline-block w-2 shrink-0 text-center {b.branch_id === selectedBranch
+									class="inline-block w-2 shrink-0 text-center {b.branch_id ===
+									selectedBranch
 										? 'text-branch-active'
 										: 'text-transparent'}"
-									aria-hidden="true"
-									>●</span
+									aria-hidden="true">●</span
 								>
 								<button
 									type="button"
@@ -488,8 +504,9 @@
 								>
 									{b.name}
 								</button>
-								<span class="text-muted-foreground">
-									{b.fact_count} facts{#if b.claimed_by_user_email} · {b.claimed_by_user_email}{/if}
+								<span class="text-[12px] text-muted-foreground">
+									{b.fact_count} facts{#if b.claimed_by_user_email} ·
+										{b.claimed_by_user_email}{/if}
 								</span>
 							</li>
 						{/each}
@@ -498,10 +515,6 @@
 			</NotebookSection>
 
 			<NotebookSection id="connections" title="Connections">
-				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
-					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
-					<span>{branchViewLabel()}</span>
-				</div>
 				{#if graphLoaded && graphEdges === 0}
 					<p class="mb-3 font-serif text-sm text-muted-foreground">
 						No outgoing relations yet — predicates like <code class="font-mono text-foreground/80"
@@ -514,10 +527,6 @@
 			</NotebookSection>
 
 			<NotebookSection id="facts" title="Facts">
-				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
-					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
-					<span>{branchViewLabel()}</span>
-				</div>
 				{#if sessionModes}
 					<SessionFactsPanel exomPath={node.path} />
 				{:else if factsLoading}
@@ -542,35 +551,29 @@
 			</NotebookSection>
 
 			<NotebookSection id="beliefs" title="Beliefs">
-				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
-					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
-					<span>{branchViewLabel()}</span>
-				</div>
 				<BeliefsPanel exomPath={node.path} branch={selectedBranch} />
 			</NotebookSection>
 
 			<NotebookSection id="timeline" title="Timeline">
-				<div class="mb-3 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
-					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Branch view</Badge>
-					<span>{branchViewLabel()}</span>
-				</div>
 				<TimelinePanel exomPath={node.path} branch={selectedBranch} notebookMode />
 			</NotebookSection>
 
-			<section class="mt-8 border-t border-border/70 pt-6">
-				<div class="mb-4 flex flex-wrap items-center gap-2 font-mono text-[11px] text-muted-foreground">
-					<Badge variant="outline" class="h-5 px-1.5 text-[10px] uppercase">Exom-level</Badge>
-					<span>unaffected by branch switching</span>
-				</div>
-				<div class="grid gap-6 lg:grid-cols-2">
-					<NotebookSection id="observations" title="Observations">
-						<ObservationsPanel exomPath={node.path} />
-					</NotebookSection>
-					<NotebookSection id="rules" title="Rules">
-						<RulesPanel exomPath={node.path} />
-					</NotebookSection>
-				</div>
-			</section>
+			<div class="mt-6 grid gap-4 border-t border-border/70 pt-4 lg:grid-cols-2">
+				<NotebookSection
+					id="observations"
+					title="Observations"
+					tooltip="Exom-wide — not affected by branch switching."
+				>
+					<ObservationsPanel exomPath={node.path} />
+				</NotebookSection>
+				<NotebookSection
+					id="rules"
+					title="Rules"
+					tooltip="Exom-wide — not affected by branch switching."
+				>
+					<RulesPanel exomPath={node.path} />
+				</NotebookSection>
+			</div>
 		</article>
 
 		<aside

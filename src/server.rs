@@ -96,6 +96,7 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<(Option<String>, String)>,
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
+    pub ui_state: Option<Arc<dyn crate::db::UiStateDb>>,
     pub bind_addr: Option<String>,
     /// When non-empty, exposes a loopback-only `GET /auth/dev-login` route that
     /// mints a session for one of these emails without OAuth. Set via repeated
@@ -122,6 +123,7 @@ impl AppState {
             sse_tx,
             auth_store: None,
             auth_provider: None,
+            ui_state: None,
             bind_addr: None,
             dev_login_emails: Vec::new(),
         }
@@ -413,6 +415,11 @@ fn api_router() -> Router<Arc<AppState>> {
         // Derived / beliefs
         .route("/derived/{pred}", get(api_derived_handler))
         .route("/beliefs/{id}/support", get(api_belief_support_handler))
+        // UI state
+        .route(
+            "/ui/graph-layout",
+            get(api_get_graph_layout).put(api_put_graph_layout),
+        )
         .fallback(api_not_found)
 }
 
@@ -5582,6 +5589,63 @@ async fn api_belief_support_handler(
         "supported_by_unresolved": unresolved,
     }))
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET / PUT /ui/graph-layout
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GraphLayoutQuery {
+    scope: String,
+}
+
+async fn api_get_graph_layout(
+    State(state): State<Arc<AppState>>,
+    user: User,
+    Query(q): Query<GraphLayoutQuery>,
+) -> Response {
+    let scope = q.scope.trim();
+    if scope.is_empty() {
+        return ApiError::new("missing_scope", "scope is required").into_response();
+    }
+    let Some(ui_state) = state.ui_state.as_ref() else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"layout": null})))
+            .into_response();
+    };
+    match ui_state.get_graph_layout(&user.email, scope).await {
+        Ok(Some(layout)) => Json(serde_json::json!({"layout": layout})).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"layout": null})),
+        )
+            .into_response(),
+        Err(e) => ApiError::new("db_error", e.to_string()).into_response(),
+    }
+}
+
+async fn api_put_graph_layout(
+    State(state): State<Arc<AppState>>,
+    user: User,
+    Query(q): Query<GraphLayoutQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let scope = q.scope.trim();
+    if scope.is_empty() {
+        return ApiError::new("missing_scope", "scope is required").into_response();
+    }
+    let Some(ui_state) = state.ui_state.as_ref() else {
+        return ApiError::new("not_configured", "ui state persistence is not configured")
+            .into_response();
+    };
+    if !body.is_object() {
+        return ApiError::new("bad_payload", "layout body must be a JSON object")
+            .into_response();
+    }
+    match ui_state.upsert_graph_layout(&user.email, scope, &body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => ApiError::new("db_error", e.to_string()).into_response(),
+    }
 }
 
 #[cfg(test)]

@@ -1636,6 +1636,12 @@ fn main() {
                     .expect("state Arc refcount should be 1 at init");
                 s.auth_store = Some(store);
                 s.auth_provider = Some(provider);
+                #[cfg(feature = "postgres")]
+                if let Some(ref pool) = postgres_pool {
+                    s.ui_state = Some(std::sync::Arc::new(
+                        ray_exomem::db::pg_ui_state::PgUiStateDb::new(pool.clone()),
+                    ));
+                }
                 s.bind_addr = Some(bind.to_string());
                 s.dev_login_emails = dev_login_emails.clone();
             }
