@@ -87,8 +87,8 @@ branch the write targets). Failures at either layer surface different errors
 | Anything else                      | Admin-only. |
 
 `acl_mode` is `solo-edit` (default) or `co-edit`, set per-exom on creation
-via `init` / `exom_new` (see §4) and flippable later by the creator via the
-HTTP route `POST /api/actions/exom-mode` (no MCP tool yet — see §7).
+via `init` / `exom_new` and flipped later (creator-only) via `exom_mode`.
+All three are MCP tools — see §4.
 
 #### Branch layer — TOFU on `claimed_by_user_email`
 
@@ -273,8 +273,7 @@ the same way `assert_fact` is.
 project's `main` only — sessions are always solo-edit. Co-edit lets any
 authenticated user write to `main` directly without forking; solo-edit
 restricts writes to the creator (Model A in `public/*`, owner in
-`{email}/*`). The mode can be flipped later via
-`POST /api/actions/exom-mode` (no MCP tool yet).
+`{email}/*`). Use `exom_mode` to flip the mode later.
 
 ### `exom_new` `{ path, acl_mode? }`
 
@@ -284,6 +283,57 @@ of a project. For project setup use `init` instead. Idempotent.
 
 `acl_mode` is `"solo-edit"` (default) or `"co-edit"`; same semantics as
 `init`.
+
+### `folder_new` `{ path }`
+
+Create an empty folder at `<path>`. Folders are pure grouping — they hold
+child folders and child exoms but never facts of their own. Idempotent on
+an existing folder; rejected with `already exists as Exom` if the path is
+already an exom. Permission-gated like `assert_fact`.
+
+### `rename` `{ path, new_segment }`
+
+Rename the last segment of an existing path to `new_segment`. Works on
+**both folders and exoms**. Side effects: any share grants whose path
+prefix matches the old path are rewritten to the new path; cached
+`ExomState` entries that lived under the old prefix are evicted and the
+engine reconciles. Returns `{ ok, old_path, new_path, evicted_exoms }`.
+
+Rejects:
+
+- Top-level namespace roots (`namespace_root_immutable`).
+- Session exom ids (`session_id_immutable`) — session paths encode timestamp +
+  label and need to stay stable. Use the `session/label` predicate to change
+  the display label; the path stays put.
+
+### `delete` `{ path }`
+
+Recursively delete the subtree at `path` from disk and unbind every exom
+underneath from the engine. Works on folders and exoms — deleting a folder
+removes every exom under it. Drops any share grants under the deleted path.
+Returns `{ ok, deleted, removed_exoms }` where `removed_exoms` lists the
+slash-form paths of every exom that was unbound. **Irreversible.**
+
+Rejects:
+
+- Top-level namespace roots (`namespace_root_immutable`).
+- A `not found` error if the path doesn't exist.
+
+### `exom_mode` `{ exom, mode, agent?, model? }`
+
+Flip an exom's `acl_mode` between `"solo-edit"` and `"co-edit"`.
+Creator-only (`not_creator` 403 otherwise). Rejected on session exoms
+(`acl_mode_not_applicable` 400). Side effects:
+
+- `solo-edit → co-edit`: clears `main.claimed_by_user_email = None` so any
+  auth-admitted writer lands on the shared trunk.
+- `co-edit → solo-edit`: deterministically re-claims `main` for the exom
+  creator. Non-`main` branches are not touched (TOFU still applies there).
+
+A `_meta/acl_mode` audit fact is appended on every successful flip so the
+mode change is visible in `fact-row` / `fact_history`. No-op when the
+requested mode equals the current mode (returns `changed: false`).
+Returns `{ ok, exom, mode, previous_mode, changed }`.
 
 ### `exom_fork` `{ source, target? }`
 
@@ -612,23 +662,23 @@ audits, not for incremental sync.
 | `cannot archive branch 'main'` | Tried to `archive_branch` on `main` | Archive a feature branch instead; `main` is the trunk and is permanent. |
 | `fork_session_unsupported` | Tried to fork a session exom | Fork the parent project's `main` instead; sessions aren't durable knowledge artifacts. |
 | `fork_collision` | The default fork target and 100 auto-suffixed variants are all taken | Pass `target` explicitly to choose a free path. |
-| `not_creator` | Tried to flip `acl_mode` on an exom you didn't create | Mode flips are creator-only; ask the creator. (HTTP route only.) |
+| `not_creator` | Tried to flip `acl_mode` on an exom you didn't create | Mode flips are creator-only; ask the creator. |
 | `acl_mode_not_applicable` | Tried to flip `acl_mode` on a session exom | Sessions are always `solo-edit`; flip the parent project instead. |
+| `namespace_root_immutable` | Tried to `rename` or `delete` a top-level namespace root (e.g. `vasily@lynxtrading.com`, `public`) | Top-level roots are immutable when auth is on — renaming or deleting one would orphan every share grant under it. Operate on a sub-path instead. |
+| `session_id_immutable` | Tried to `rename` a session exom | Session paths encode timestamp + label and must stay stable. Change the display label via `assert_fact` on `session/label`. |
+| `already exists as Exom at <path>` | `folder_new` on a path that's already an exom (has `exom.json`) | Pick a different path; folders and exoms can't share an address. |
+| `not found at <path>` | `delete` on a path that doesn't exist | Use `tree` first to confirm the path is real before deleting. |
+| `no_such_exom` | `exom_mode` on a path with no `exom.json` | Use `exom_status` / `tree` to confirm the path is an exom before flipping its mode. |
 | 0 rows from a pinned EAV query (no error, just empty result) | Often: pinned the wrong slot. `(?tx 'tx/id "tx/22")` returns 0 because `"tx/22"` is the entity ref; the `tx/id` *value* is `"22"`. Same with `fact_id` vs predicate name. | Run the unpinned form first (`(?tx 'tx/id ?id)`) to see what the value actually is, then pin against that. |
 
 ---
 
 ## 7. Out-of-scope today (file an issue or use HTTP)
 
-- Session `archive` and `rename` (the `session/archived_at` and `session/label`
-  predicates exist; you can write them through `assert_fact`, but there's no
-  convenience tool yet).
+- Session `archive` (the `session/archived_at` predicate exists; you can
+  write it through `assert_fact`, but there's no convenience tool yet).
 - Branch `rename` and `diff` (create / list / merge / archive are MCP tools;
   rename and diff are HTTP-only today).
-- `acl_mode` flip — `POST /api/actions/exom-mode { exom, mode }` is the
-  only entry point today (creator-only, body `mode: "solo-edit" | "co-edit"`,
-  rejected on session exoms with `acl_mode_not_applicable`). Use `exom_new`
-  / `init` with `acl_mode` to set the mode at creation time from MCP.
 - API-key issuance / rotation — issue keys via the UI at `/auth/api-keys`.
 - Group-based access — sharing private `{email}/...` paths is per-email today.
 

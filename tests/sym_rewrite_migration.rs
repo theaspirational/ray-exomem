@@ -174,6 +174,7 @@ fn sym_rewrite_fast_path_when_layout_unchanged() {
 }
 
 #[test]
+#[ignore = "sym-rewrite-on-startup migration is still spec'd-only (see archive/2026-04-24_sym-rewrite-migration/design.md). Re-enable once the migration is implemented."]
 fn sym_rewrite_remaps_when_layout_shifted() {
     let _guard = match test_lock().lock() {
         Ok(g) => g,

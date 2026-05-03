@@ -74,7 +74,7 @@ Components:
 
 Gotchas:
 
-- Fresh persistent state boots with an empty `tree/`. There is no auto-created bare `main` exom — under the privacy model nobody would own it, so the only effect would be an unreachable directory. Exoms enter the tree explicitly via `init`, `exom-new`, or first authenticated login (which seeds `{email}/main`). `factory-reset` likewise leaves the tree empty.
+- Fresh persistent state boots with an empty `tree/`. There is no auto-created bare `main` exom — under the privacy model nobody would own it, so the only effect would be an unreachable directory. Exoms enter the tree explicitly via `init` or `exom-new`. First authenticated login seeds the `public/*` paths declared by `bootstrap/*.json` fixtures (one fixture per `<path>/main` exom); it does NOT auto-create a `{email}/main` user-namespace exom — users initialize their own namespace via `init {email}`. `factory-reset` likewise leaves the tree empty.
 - When changing auth/postgres flags, fully stop the daemon (`ray-exomem stop`) before restarting — the new `serve` invocation will not take over a daemonised instance bound to the same port.
 
 ## Important gotchas
@@ -127,7 +127,7 @@ ray-exomem query --exom work::team::project::repo::main --json
 - Queries are lowered/re-written before eval so exom-scoped rules are injected correctly.
 - Splay tables under each `tree/<exom-path>/` directory are the source of truth on disk. There are no JSONL sidecars for facts/txs/observations/beliefs/branches; `auth.jsonl` is a separate subsystem and still exists.
 - The daemon nests all routes (`/api`, `/auth`, `/mcp`, `/events`, UI fallback) under `server::BASE_PATH`. Default mount is root; override via `RAY_EXOMEM_BASE_PATH` at build time.
-- A fresh persistent data dir boots with an empty `tree/`. Namespaces, projects, and sessions enter the tree explicitly via `init`, `exom-new`, or first authenticated login — never via auto-create.
+- A fresh persistent data dir boots with an empty `tree/`. Namespaces, projects, and sessions enter the tree explicitly via `init` or `exom-new`. First authenticated login additionally seeds the `public/*` exoms declared by `bootstrap/*.json` fixtures — never auto-creates a user-namespace exom.
 - After state changes, runtime bindings must be refreshed.
 
 ## Files worth knowing

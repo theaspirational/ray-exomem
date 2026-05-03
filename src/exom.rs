@@ -212,6 +212,82 @@ fn is_leap(y: i32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
+/// All-attempts-taken signal returned by `default_fork_target` when 100
+/// auto-suffixed candidates were already in use. The caller should respond
+/// with the canonical `fork_collision` error and ask the user to pass an
+/// explicit `target`.
+#[derive(Debug)]
+pub struct ForkCollision;
+
+impl std::fmt::Display for ForkCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("could not find a free target path; pass `target` explicitly")
+    }
+}
+
+impl std::error::Error for ForkCollision {}
+
+/// Compute the default fork target for `source_slash` when the caller
+/// passed no explicit `target`. Returns the spec-correct
+/// `{user_email}/forked/<source-subpath>` shape, with `-2`/`-3`/...
+/// auto-suffix on the leaf segment if `tree_root.join(candidate)` already
+/// exists.
+///
+/// `source_last` is the source path's last segment (`TreePath::last`),
+/// accepted as a plain `Option<&str>` so callers don't have to import
+/// `TreePath` here.
+///
+/// This is the **single source of truth** for the default-target shape.
+/// Both `server::api_exom_fork` and `mcp::tool_exom_fork` call it, so
+/// the two transports cannot drift again. Subpath stripping rules:
+///
+/// - `public/X/Y/Z`         → `{user}/forked/X/Y/Z`
+/// - `{other_email}/X/Y`    → `{user}/forked/{other_email}/X/Y`
+///   (preserves the source owner so lineage is readable from the path)
+/// - `{user}/X/Y` (self-fork) → `{user}/forked/X/Y`
+///
+/// On collision (the disk path already exists) the leaf segment is
+/// suffixed with `-2`, `-3`, ... up to 100 attempts.
+pub fn default_fork_target(
+    tree_root: &Path,
+    user_email: &str,
+    source_slash: &str,
+    source_last: Option<&str>,
+) -> Result<String, ForkCollision> {
+    let self_prefix = format!("{}/", user_email);
+    let subpath: String = if source_slash == "public" || source_slash.starts_with("public/") {
+        source_slash
+            .strip_prefix("public/")
+            .unwrap_or("forked")
+            .to_string()
+    } else if source_slash == user_email || source_slash.starts_with(&self_prefix) {
+        source_slash
+            .strip_prefix(&self_prefix)
+            .unwrap_or("forked")
+            .to_string()
+    } else {
+        source_slash.to_string()
+    };
+    // Defensive: a folder root (no leaf) shouldn't reach here, but if it
+    // does, fall back to the literal `forked` segment.
+    let subpath = if subpath.is_empty() {
+        source_last.unwrap_or("forked").to_string()
+    } else {
+        subpath
+    };
+    let base = format!("{}/forked/{}", user_email, subpath);
+    let mut candidate = base.clone();
+    let mut i = 2;
+    while tree_root.join(&candidate).exists() {
+        candidate = format!("{}-{}", base, i);
+        i += 1;
+        if i > 100 {
+            return Err(ForkCollision);
+        }
+    }
+    Ok(candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +316,71 @@ mod tests {
         let ts = now_iso8601_basic();
         assert_eq!(ts.len(), 16); // YYYYMMDDTHHMMSSZ
         assert!(ts.ends_with('Z'));
+    }
+
+    // ---------------------------------------------------------------------
+    // default_fork_target — guards against the MCP/HTTP drift fixed
+    // 2026-05-02 (regression report at archive/2026-05-02_stress-test-763e40fb/).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn default_fork_target_strips_public_prefix() {
+        let d = tempdir().unwrap();
+        let target = default_fork_target(
+            d.path(),
+            "alice@test",
+            "public/work/team/proj/main",
+            Some("main"),
+        )
+        .unwrap();
+        assert_eq!(target, "alice@test/forked/work/team/proj/main");
+    }
+
+    #[test]
+    fn default_fork_target_self_fork_strips_self_prefix() {
+        let d = tempdir().unwrap();
+        let target =
+            default_fork_target(d.path(), "alice@test", "alice@test/notes/draft", Some("draft"))
+                .unwrap();
+        assert_eq!(target, "alice@test/forked/notes/draft");
+    }
+
+    #[test]
+    fn default_fork_target_preserves_other_email_subpath() {
+        let d = tempdir().unwrap();
+        let target = default_fork_target(
+            d.path(),
+            "alice@test",
+            "bob@test/shared/notebook",
+            Some("notebook"),
+        )
+        .unwrap();
+        assert_eq!(target, "alice@test/forked/bob@test/shared/notebook");
+    }
+
+    #[test]
+    fn default_fork_target_auto_suffix_on_collision() {
+        let d = tempdir().unwrap();
+        // Pre-create the default target so the helper has to suffix.
+        std::fs::create_dir_all(d.path().join("alice@test/forked/work/wiki")).unwrap();
+        let t1 = default_fork_target(
+            d.path(),
+            "alice@test",
+            "public/work/wiki",
+            Some("wiki"),
+        )
+        .unwrap();
+        assert_eq!(t1, "alice@test/forked/work/wiki-2");
+
+        // Now both base and -2 are taken; expect -3.
+        std::fs::create_dir_all(d.path().join(&t1)).unwrap();
+        let t2 = default_fork_target(
+            d.path(),
+            "alice@test",
+            "public/work/wiki",
+            Some("wiki"),
+        )
+        .unwrap();
+        assert_eq!(t2, "alice@test/forked/work/wiki-3");
     }
 }

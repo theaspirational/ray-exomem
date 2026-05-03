@@ -22,25 +22,33 @@
 | 0     | Schema snapshot (attrs, view arities)                           | <pass/fail> | <attr count, view arities>                        |
 | 0     | Two Chrome contexts dev-login OK                                | <skip/p/f>  | <`/auth/me` per context>                          |
 | **1** | A: read-tool surface (guide, list_exoms, exom_status, list_branches) | <pass/fail> | <bytes, count, status without current_branch, branch count without is_current> |
-| 1     | B: typed values (i64×2 + str×2 + sym×1 land in correct EDB)     | <pass/fail> | <fact_ids + EDB row counts>                       |
+| 1     | B: typed values land in correct EDB (i64=1, str=3, sym=1)       | <pass/fail> | <fact_ids + EDB row counts; verifies no silent string→i64 coerce> |
 | 1     | B: cmp filter `< 100` returns `84`                              | <pass/fail> | <result>                                          |
-| 1     | C: bitemporal — 4 transitions, 3 value-intervals, back-pointers | <pass/fail> | <T1..T4, history rows>                            |
+| 1     | C: bitemporal — 4 transitions, 3 value-intervals, back-pointers (T3.valid_to == T4.tx_time per retract semantics) | <pass/fail> | <T1..T4, history rows>      |
 | 1     | C: retract event in tx-log                                      | <pass/fail> | <tx row>                                          |
 | 1     | D: belief lifecycle (believe + supersede + revoke + v2)         | <pass/fail> | <belief_ids, statuses>                            |
 | 1     | D: belief-row total = 2                                         | <pass/fail> | <row count>                                       |
 | 1     | E: 2 observations + 3-tag obs                                   | <pass/fail> | <obs_ids, tag count>                              |
-| 1     | F: builtin-view sweep (required views + optional advertised views) | <pass/fail> | <per-view row counts>                          |
+| 1     | F: builtin-view sweep (fact-row=5, claim-owner-row=0, +advertised) | <pass/fail> | <per-view row counts>                          |
+| 1     | F: branch-claim probe `branch/claimed_by_user_email` ≥ 1        | <pass/fail> | <branch + user_email>                             |
 | 1     | G: attribution triple non-empty                                 | <pass/fail> | <tx-row tuple>                                    |
-| 1     | H: explain (predicate + fact_id) + export (canonical + jsonl)   | <pass/fail> | <bytes / line count>                              |
+| 1     | H: explain by predicate = `{"facts":[]}`; by fact_id = 4 events | <pass/fail> | <events count>                                    |
+| 1     | H: export canonical ≥ 200 bytes; jsonl ≥ 5 lines                | <pass/fail> | <bytes / line count>                              |
 | **2** | A: branch lifecycle (create parent / assert branch / isolation / list no-current / merge target / archive) | <pass/fail> | <T_fx, merge_tx, target, archived flag> |
 | 2     | B: session lifecycle (single / bad-label / unknown-agent / close / closed_at) | <pass/fail> | <error strings>                            |
-| 2     | C: scaffolding (init / exom_new / folder_new / rename / delete) | <pass/fail> | <`<scratch_bare>` path>                           |
+| 2     | C1-C4: scaffolding via MCP (init + exom_new with `acl_mode`)    | <pass/fail> | <`<scratch_bare>`, `<coedit_bare>`, `<coedit_proj>` + acl_mode from tree> |
+| 2     | C5-C6: folder_new (idempotent + reject-on-exom)                 | <pass/fail> | <ok response, `already exists as Exom` error>     |
+| 2     | C7-C10: rename folder + exom + reject namespace-root + reject session-id | <pass/fail> | <old/new paths, evicted_exoms, verbatim errors> |
+| 2     | C11-C15: delete (empty folder, exom, missing, namespace-root, recursive subtree) | <pass/fail> | <removed_exoms per call, verbatim errors> |
 | 2     | D1: hyphen attr probe → 0 rows                                  | <pass/fail> | <count>                                           |
 | 2     | D2: default-fact-id supersede → 2 intervals                     | <pass/fail> | <fact_history>                                    |
 | 2     | D3: sym health (no domain error)                                | <pass/fail> | <ok / RAY_ERROR text>                             |
 | 2     | D4: cache staleness post-join (claim populated immediately)     | <pass/fail> | <list_branches probe-d row>                       |
 | 2     | D5: no branch cursor state (`current_branch` / `is_current` absent) | <pass/fail> | <status/list evidence>                         |
 | 2     | D6: branch-param API/UI smoke + exom-level observations/rules layout | <skip/p/f> | <URL, facts/beliefs/observations/schema/graph summaries> |
+| 2     | E1-E3: exom_mode flip co→solo→co (changed/previous_mode + claim restore/clear) | <pass/fail> | <flip responses + list_branches snapshots>  |
+| 2     | E4: `_meta/acl_mode` audit fact landed (≥ 2 intervals)          | <pass/fail> | <fact-row + fact_history>                         |
+| 2     | E5-E6: exom_mode session rejected + missing-exom rejected       | <pass/fail> | <verbatim `acl_mode_not_applicable` + `no_such_exom`> |
 | **3** | A: Model A 403 (auth-layer; NOT branch_owned)                   | <skip/p/f>  | <verbatim error>                                  |
 | 3     | A: created_by stamp + forked_from absent on non-fork            | <skip/p/f>  | <tree node fields>                                |
 | 3     | B: fork default-target shape (public → `{email}/forked/...`)    | <skip/p/f>  | <returned target verbatim>                        |

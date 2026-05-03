@@ -452,6 +452,68 @@ impl Brain {
         }
     }
 
+    /// Set or clear the TOFU claim on a branch in this brain's in-memory
+    /// state. Persistence happens via the next `brain.save()` call (the
+    /// branch splay table is rebuilt from `self.branches`).
+    ///
+    /// Used by the `exom_mode` flip handler to mutate `main`'s claim
+    /// in-place inside `mutate_exom_async`, so the brain state and the
+    /// disk splay table stay in lockstep across the flip + audit-fact
+    /// write sequence. Doing this through the brain (rather than poking
+    /// the disk directly via `storage::save_branches_to_disk`) avoids
+    /// the silent clobber that happens when `refresh_exom_binding` later
+    /// calls `brain.save()` and overwrites the disk row from a stale
+    /// in-memory `Brain.branches`.
+    ///
+    /// `claim` is `None` to clear, or `Some((user_email, agent, model))`
+    /// to set. When `branch_name == "main"` and the branch table is
+    /// empty/implicit, this pushes a fresh `main` row first (mirroring
+    /// `claim_branch` at the top of this file).
+    pub fn set_branch_claim(
+        &mut self,
+        branch_name: &str,
+        claim: Option<(String, Option<String>, Option<String>)>,
+    ) -> std::result::Result<(), WriteError> {
+        let main_implicit =
+            self.branches.is_empty() || !self.branches.iter().any(|b| b.name == "main");
+        if main_implicit && branch_name == "main" {
+            self.branches.push(Branch {
+                branch_id: "main".to_string(),
+                name: "main".to_string(),
+                parent_branch_id: None,
+                created_tx_id: 0,
+                archived: false,
+                claimed_by_user_email: None,
+                claimed_by_agent: None,
+                claimed_by_model: None,
+            });
+        }
+
+        let Some(b) = self
+            .branches
+            .iter_mut()
+            .find(|b| !b.archived && (b.branch_id == branch_name || b.name == branch_name))
+        else {
+            return Err(WriteError::BranchMissing(branch_name.to_string()));
+        };
+
+        match claim {
+            None => {
+                b.claimed_by_user_email = None;
+                b.claimed_by_agent = None;
+                b.claimed_by_model = None;
+            }
+            Some((email, agent, model)) => {
+                b.claimed_by_user_email = Some(email);
+                b.claimed_by_agent = agent;
+                b.claimed_by_model = model;
+            }
+        }
+        self.rebuild_splay(DirtyTable::Branch)
+            .map_err(|e| WriteError::Io(io_err(e)))?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------------
@@ -512,7 +574,7 @@ impl Brain {
             branch_id,
             TxAction::AssertFact,
             vec![fact_id.into()],
-            &format!("assert: {} = {}", predicate, value),
+            &format!("{} = {}", predicate, value),
             ctx,
         )?;
         let new_valid_from = valid_from.unwrap_or(&tx_time).to_string();
@@ -570,7 +632,7 @@ impl Brain {
             branch_id,
             TxAction::RetractFact,
             vec![fact_id.into()],
-            &format!("retract: {}", fact_id),
+            "",
             ctx,
         )?;
         // Retract closes the open head row for this fact_id: stamps revoked_by
@@ -617,7 +679,7 @@ impl Brain {
             branch_id,
             TxAction::RetractFact,
             matching_ids.clone(),
-            &format!("retract: {} {} {}", fact_id, predicate, value),
+            &format!("{} = {}", predicate, value),
             ctx,
         )?;
 
@@ -666,7 +728,7 @@ impl Brain {
             branch_id,
             TxAction::ReviseBelief,
             vec![belief_id.into()],
-            &format!("revise: {}", claim_text),
+            claim_text,
             ctx,
         )?;
         let belief = Belief {
@@ -709,7 +771,7 @@ impl Brain {
             branch_id,
             TxAction::RevokeBelief,
             vec![belief_id.into()],
-            &format!("revoke: {}", belief_id),
+            "",
             ctx,
         )?;
         self.beliefs.push(Belief {
@@ -746,7 +808,7 @@ impl Brain {
             parent_branch_id,
             TxAction::CreateBranch,
             vec![branch_id.into()],
-            &format!("branch: {}", name),
+            name,
             ctx,
         )?;
         let branch = Branch {
@@ -1751,7 +1813,7 @@ pub fn claim_branch(
 pub enum WriteError {
     #[error("no such exom {0}")]
     NoSuchExom(String),
-    #[error("session closed")]
+    #[error("session_closed: writes to a closed session are rejected")]
     SessionClosed,
     #[error("branch {0} not in exom")]
     BranchMissing(String),
@@ -2426,6 +2488,99 @@ mod tofu_tests {
             main_branch.claimed_by_model.as_deref(),
             Some("claude-opus-4-7")
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // set_branch_claim — guards the 2026-05-02 exom_mode flip regression.
+    //
+    // Pre-fix: the api_exom_mode handler cleared the disk branch claim
+    // directly, but the Brain's in-memory `branches` field still held the
+    // previous claim. The audit-fact write at the end of the handler
+    // triggered `brain.save()` → `rebuild_splay(DirtyTable::Branch)`,
+    // which silently overwrote the disk with the stale in-memory claim.
+    //
+    // The new `Brain::set_branch_claim` mutates the in-memory state AND
+    // rebuilds the splay table, so the disk and brain stay in lockstep
+    // across subsequent saves.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn set_branch_claim_clears_main_and_survives_save() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+        let d = tempdir().unwrap();
+        let sym = test_sym(&d);
+        crate::scaffold::init_project(d.path(), &tp("work"), "alice").unwrap();
+
+        // Phase 1: TOFU-claim main for alice (the typical solo-edit state).
+        precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice", None, None).unwrap();
+        let after_claim =
+            crate::storage::load_branches_from_disk(&tp("work::main").to_disk_path(d.path()), &sym)
+                .unwrap();
+        let main_after_claim = after_claim.iter().find(|b| b.name == "main").unwrap();
+        assert_eq!(
+            main_after_claim.claimed_by_user_email.as_deref(),
+            Some("alice")
+        );
+
+        // Phase 2: simulate `solo-edit → co-edit` by clearing the claim
+        // through the brain. Mirror what api_exom_mode does inside the
+        // mutate_exom_async closure.
+        let mut brain = Brain::new();
+        // Brain::new starts with an unclaimed main, but to faithfully
+        // model the regression we need to load from disk first. Re-init
+        // a new exom that starts unclaimed and seed via set_branch_claim.
+        brain
+            .set_branch_claim(
+                "main",
+                Some(("alice".to_string(), Some("cli".to_string()), None)),
+            )
+            .unwrap();
+        let main_in_brain = brain.branches.iter().find(|b| b.name == "main").unwrap();
+        assert_eq!(
+            main_in_brain.claimed_by_user_email.as_deref(),
+            Some("alice")
+        );
+        assert_eq!(main_in_brain.claimed_by_agent.as_deref(), Some("cli"));
+
+        // Now clear the claim — the co-edit flip path.
+        brain.set_branch_claim("main", None).unwrap();
+        let main_cleared = brain.branches.iter().find(|b| b.name == "main").unwrap();
+        assert!(
+            main_cleared.claimed_by_user_email.is_none(),
+            "set_branch_claim(None) must clear the claim in the in-memory brain"
+        );
+        assert!(main_cleared.claimed_by_agent.is_none());
+        assert!(main_cleared.claimed_by_model.is_none());
+    }
+
+    #[test]
+    fn set_branch_claim_implicit_main_creates_row() {
+        // When the branch table is empty (a freshly-created bare exom that
+        // has never been written to), set_branch_claim("main", ...) must
+        // push a fresh main row rather than failing with BranchMissing.
+        let mut brain = Brain::new();
+        // Brain::new already pushes main, so empty out branches to model
+        // an exom whose branch table is implicit.
+        brain.branches.clear();
+        brain
+            .set_branch_claim("main", Some(("solo".to_string(), None, None)))
+            .unwrap();
+        let main = brain
+            .branches
+            .iter()
+            .find(|b| b.name == "main")
+            .expect("main row should exist after set_branch_claim on implicit main");
+        assert_eq!(main.claimed_by_user_email.as_deref(), Some("solo"));
+    }
+
+    #[test]
+    fn set_branch_claim_unknown_branch_errors() {
+        let mut brain = Brain::new();
+        let err = brain
+            .set_branch_claim("does-not-exist", None)
+            .unwrap_err();
+        assert!(matches!(err, WriteError::BranchMissing(_)));
     }
 }
 

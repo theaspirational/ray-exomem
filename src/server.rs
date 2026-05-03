@@ -166,9 +166,10 @@ impl AppState {
                 // root-level `main` is owned by no one — so the only thing
                 // an auto-create would do is mint an unreachable directory.
                 // Fresh deployments boot with an empty exoms map; projects
-                // and user namespaces are added explicitly via `init`,
-                // `exom-new`, or first authenticated login (which seeds
-                // `{email}/main`).
+                // and user namespaces are added explicitly via `init` or
+                // `exom-new`. First authenticated login additionally seeds
+                // the `public/*` paths declared by `bootstrap/*.json`
+                // fixtures, but never auto-creates `{email}/main`.
                 (engine, Some(tree_dir), Some(sym))
             }
             None => {
@@ -1286,8 +1287,6 @@ async fn api_tree(
 //     name / type / summary / docs_url pulled from the predicate
 //     registry.
 //   - latest: post-bootstrap transactions (tx_time within 30d of now).
-//   - seeded: the most-recent bootstrap-seed transactions, so the page
-//     is never empty on a fresh deployment.
 //
 // Auth-gated like the rest of the API. Iterates over
 // `bootstrap_seed_exom_paths()` so a daemon with no fixtures still
@@ -1428,13 +1427,6 @@ async fn api_welcome_summary(
         .collect();
     latest.sort_by(|a, b| b.1.tx_time.cmp(&a.1.tx_time));
 
-    let mut seeded: Vec<(String, &crate::brain::Tx)> = all_txs
-        .iter()
-        .filter(|(_, t)| t.tx_time <= watershed)
-        .map(|(p, t)| (p.clone(), t))
-        .collect();
-    seeded.sort_by(|a, b| b.1.tx_time.cmp(&a.1.tx_time));
-
     let serialize_tx = |(exom, tx): &(String, &crate::brain::Tx)| {
         serde_json::json!({
             "exom": exom,
@@ -1465,7 +1457,6 @@ async fn api_welcome_summary(
         "totals": totals,
         "featured": featured_json,
         "latest": latest.iter().take(10).map(serialize_tx).collect::<Vec<_>>(),
-        "seeded": seeded.iter().take(5).map(serialize_tx).collect::<Vec<_>>(),
     }))
     .into_response()
 }
@@ -1741,58 +1732,33 @@ async fn api_exom_fork(
         return resp;
     }
 
-    // Default target: {user.email}/forked/<source-subpath>, with collision
+    // Default target: `{user.email}/forked/<source-subpath>` with collision
     // suffixes on the leaf segment. The `forked/` prefix groups every fork
     // the user has made into one place in their personal namespace, and the
     // sub-path mirrors the source so a fork of `public/work/team/proj/main`
     // lands at `{user.email}/forked/work/team/proj/main` — readable lineage
     // without having to read the `forked_from` block.
+    //
+    // The actual derivation lives in `crate::exom::default_fork_target`,
+    // which is also called from `mcp::tool_exom_fork` so the two transports
+    // cannot drift apart again.
     let target_slash = match body.target.as_deref() {
         Some(t) => t.to_string(),
-        None => {
-            // Strip the source's namespace marker so it doesn't repeat.
-            // - `public/X/Y/Z`         → `X/Y/Z`
-            // - `{user.email}/X/Y`     → `X/Y` (self-fork)
-            // - `{other_email}/X/Y`    → `{other_email}/X/Y` (keep, for lineage)
-            let self_prefix = format!("{}/", user.email);
-            let subpath: String = if source_slash == "public" || source_slash.starts_with("public/")
-            {
-                source_slash
-                    .strip_prefix("public/")
-                    .unwrap_or("forked")
-                    .to_string()
-            } else if source_slash == user.email || source_slash.starts_with(&self_prefix) {
-                source_slash
-                    .strip_prefix(&self_prefix)
-                    .unwrap_or("forked")
-                    .to_string()
-            } else {
-                source_slash.clone()
-            };
-            // Defensive: if subpath is empty (would only happen on a folder root,
-            // which shouldn't reach this code path), fall back to `forked`.
-            let subpath = if subpath.is_empty() {
-                source_path.last().unwrap_or("forked").to_string()
-            } else {
-                subpath
-            };
-            let base = format!("{}/forked/{}", user.email, subpath);
-            let tree_root = server_tree_root(&state);
-            let mut candidate = base.clone();
-            let mut i = 2;
-            while tree_root.join(&candidate).exists() {
-                candidate = format!("{}-{}", base, i);
-                i += 1;
-                if i > 100 {
-                    return ApiError::new(
-                        "fork_collision",
-                        "could not find a free target path; pass `target` explicitly",
-                    )
-                    .into_response();
-                }
+        None => match crate::exom::default_fork_target(
+            &server_tree_root(&state),
+            &user.email,
+            &source_slash,
+            source_path.last(),
+        ) {
+            Ok(t) => t,
+            Err(_) => {
+                return ApiError::new(
+                    "fork_collision",
+                    "could not find a free target path; pass `target` explicitly",
+                )
+                .into_response();
             }
-            candidate
-        }
+        },
     };
     let target_path: crate::path::TreePath = match target_slash.parse() {
         Ok(p) => p,
@@ -2009,7 +1975,6 @@ async fn api_exom_mode(
     let exom_slash = exom_path.to_slash_string();
 
     let tree_root = server_tree_root(&state);
-    let sym_path = server_sym_path(&state);
     let disk = exom_path.to_disk_path(&tree_root);
 
     let mut meta = match crate::exom::read_meta(&disk) {
@@ -2054,74 +2019,31 @@ async fn api_exom_mode(
         .into_response();
     }
 
-    // Persist the new mode in exom.json.
+    // Persist the new mode in exom.json BEFORE touching the brain. `acl_mode`
+    // is owned by `ExomMeta`, not by `Brain`, so any concurrent reader (e.g.
+    // a parallel `precheck_write` call) needs to observe the new mode the
+    // moment we publish it. `write_meta` is the single source of truth.
     meta.acl_mode = new_mode;
     if let Err(e) = crate::exom::write_meta(&disk, &meta) {
         return ApiError::new("io", format!("failed to write exom.json: {}", e)).into_response();
     }
 
-    // Adjust the `main` branch claim. Non-`main` branches are not touched.
-    let mut branches = match crate::storage::load_branches_from_disk(&disk, &sym_path) {
-        Ok(b) => b,
-        Err(e) => return ApiError::new("io", e.to_string()).into_response(),
+    // Decide what the new `main` claim should be. `co-edit` clears it so any
+    // auth-admitted writer lands on the shared trunk; `solo-edit` re-claims
+    // for the exom creator so they regain deterministic trunk write.
+    let new_claim: Option<(String, Option<String>, Option<String>)> = match new_mode {
+        crate::exom::AclMode::CoEdit => None,
+        crate::exom::AclMode::SoloEdit => Some((user.email.clone(), None, None)),
     };
-    match new_mode {
-        crate::exom::AclMode::CoEdit => {
-            let mut found = false;
-            for b in branches.iter_mut() {
-                if b.branch_id == "main" {
-                    b.claimed_by_user_email = None;
-                    b.claimed_by_agent = None;
-                    b.claimed_by_model = None;
-                    found = true;
-                }
-            }
-            // If `main` is not represented on disk it's implicitly unclaimed
-            // already; nothing to write.
-            if !found {
-                // No-op: nothing to persist.
-            }
-        }
-        crate::exom::AclMode::SoloEdit => {
-            let mut found = false;
-            for b in branches.iter_mut() {
-                if b.branch_id == "main" {
-                    b.claimed_by_user_email = Some(user.email.clone());
-                    b.claimed_by_agent = None;
-                    b.claimed_by_model = None;
-                    found = true;
-                }
-            }
-            if !found {
-                branches.push(crate::brain::Branch {
-                    branch_id: "main".to_string(),
-                    name: "main".to_string(),
-                    parent_branch_id: None,
-                    created_tx_id: 0,
-                    archived: false,
-                    claimed_by_user_email: Some(user.email.clone()),
-                    claimed_by_agent: None,
-                    claimed_by_model: None,
-                });
-            }
-        }
-    }
-    if let Err(e) = crate::storage::save_branches_to_disk(&disk, &sym_path, &branches) {
-        return ApiError::new("io", e.to_string()).into_response();
-    }
-
-    // Update the in-memory ExomState so subsequent guard_write / lookup_owner
-    // calls see the new mode without a daemon restart.
-    {
-        let mut exoms = state.exoms.lock().unwrap();
-        if let Some(es) = exoms.get_mut(&exom_slash) {
-            es.acl_mode = new_mode;
-        }
-    }
 
     // Append an audit fact tx so the flip is visible in history alongside
     // every other mutation. `_meta/acl_mode` is a single fact_id so
-    // assert_fact's last-write-wins gives a clean "current mode" view.
+    // assert_fact's last-write-wins gives a clean "current mode" view. Run
+    // the claim mutation in the SAME `mutate_exom_async` closure so the
+    // in-memory `Brain.branches` and the disk splay table stay in lockstep:
+    // `refresh_exom_binding`'s tail `brain.save()` then writes back exactly
+    // the state we just set, instead of clobbering a fresh disk write with
+    // stale in-memory branches (the original 2026-05-02 regression).
     let (header_agent, header_model) = read_attribution_headers(&headers);
     let write_ctx = MutationContext::from_user(user, header_agent, header_model);
     let mode_str = match new_mode {
@@ -2130,7 +2052,14 @@ async fn api_exom_mode(
     };
     let exom_for_assert = exom_slash.clone();
     let ctx = write_ctx.clone();
-    let _ = mutate_exom_async(&state, &exom_for_assert, move |ex| {
+    if let Err(e) = mutate_exom_async(&state, &exom_for_assert, move |ex| {
+        // Sync the in-memory ExomState mode field so subsequent
+        // guard_write / lookup_owner calls observe the new mode without
+        // a daemon restart.
+        ex.acl_mode = new_mode;
+        ex.brain
+            .set_branch_claim(brain::MAIN_BRANCH, new_claim)
+            .map_err(|e| anyhow::anyhow!("set_branch_claim failed: {}", e))?;
         ex.brain.assert_fact(
             brain::MAIN_BRANCH,
             "_meta/acl_mode",
@@ -2141,9 +2070,13 @@ async fn api_exom_mode(
             None,
             None,
             &ctx,
-        )
+        )?;
+        Ok(())
     })
-    .await;
+    .await
+    {
+        return ApiError::new("io", format!("exom-mode flip failed: {}", e)).into_response();
+    }
 
     emit_tree_changed(&state);
 

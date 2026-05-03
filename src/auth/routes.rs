@@ -301,7 +301,7 @@ impl<'a> SeedBuilder<'a> {
         let tx_id = self.push_tx(
             crate::brain::TxAction::CreateBranch,
             vec![spec.branch_id.clone()],
-            format!("branch: {}", spec.name),
+            spec.name.clone(),
             &spec.tx_time,
             &spec.parent_branch_id,
         );
@@ -321,7 +321,7 @@ impl<'a> SeedBuilder<'a> {
         let tx_id = self.push_tx(
             crate::brain::TxAction::AssertFact,
             vec![spec.fact_id.clone()],
-            format!("assert: {} = {}", spec.predicate, spec.value),
+            format!("{} = {}", spec.predicate, spec.value),
             &spec.tx_time,
             &spec.branch,
         );
@@ -366,7 +366,7 @@ impl<'a> SeedBuilder<'a> {
         let tx_id = self.push_tx(
             crate::brain::TxAction::ReviseBelief,
             vec![spec.belief_id.clone()],
-            format!("revise: {}", spec.claim_text),
+            spec.claim_text.clone(),
             &spec.tx_time,
             &spec.branch,
         );

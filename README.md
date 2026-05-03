@@ -30,8 +30,13 @@ The active model is tree-first:
 - Branches live inside one exom. They are used for parallel work, hypothetical
 changes, and multi-agent coordination.
 
-Fresh persistent state starts empty. Create exoms explicitly with `init` or `exom-new`, or enable auth and
-let first login seed `{email}/main`.
+Fresh persistent state starts empty — `tree/` has no auto-created exoms.
+Create exoms explicitly with `init` or `exom-new`. With auth enabled, the
+first authenticated login also seeds the `public/*` exoms declared by
+`bootstrap/*.json` fixtures (see [Bootstrap Seeds](#bootstrap-seeds)). The
+daemon does **not** auto-create a `{email}/main` user-namespace exom; users
+initialise their own private namespace by calling `init` or `exom-new` against
+their own `{email}/...` path.
 
 ### Permissions and `acl_mode`
 
@@ -44,8 +49,10 @@ combines with the namespace to produce the write policy:
   in the allowed domain can write to the shared `main` trunk.
 - `{email}/...` solo-edit → owner-only writes; sharing reads requires an
   explicit share grant.
-- `{email}/...` co-edit → grantees with any share can write to the shared
-  trunk (the share's `permission` field becomes informational).
+- `{email}/...` co-edit → owner + grantees with a `read-write` share can
+  write to the shared `main` trunk (co-edit only short-circuits TOFU on
+  `main`; the auth layer still enforces the share's `read` vs `read-write`
+  permission, and non-`main` branches keep first-writer-wins).
 
 Auth and branch-claim (TOFU) are independent decisions: co-edit short-circuits
 TOFU **only on `main`**; non-`main` branches keep first-writer-wins. Sessions
@@ -298,26 +305,30 @@ Canonical API routes:
 - `POST /api/actions/exom-new` (accepts `acl_mode`)
 - `POST /api/actions/exom-fork` (Model A contribution path; default target `{user_email}/forked/<source-subpath>`, auto-suffixed on collision)
 - `POST /api/actions/exom-mode` (creator-only `solo-edit` ↔ `co-edit` flip; rejected on session exoms)
+- `POST /api/actions/folder-new` (idempotent; rejects with `already_exists_different` if the path is an exom)
+- `POST /api/actions/rename` (folders + exoms; rejects `namespace_root_immutable`, `session_id_immutable`)
+- `POST /api/actions/delete` (recursive subtree delete; rejects `namespace_root_immutable`, `not_found`)
 - `POST /api/actions/session-new`
 - `POST /api/actions/session-join`
 - `POST /api/actions/branch-create`
-- `POST /api/actions/rename`
 - `POST /api/actions/assert-fact`
 - `POST /api/query` (accepts `?branch=<branch_id>` to evaluate against a specific branch view)
 - `POST /api/expand-query`
 - `POST /api/actions/eval`
-- `GET /api/facts`
+- `GET /api/facts` (accepts `?branch=<branch_id>`)
 - `GET /api/facts/valid-at`
 - `GET /api/facts/bitemporal`
 - `GET /api/facts/{id}`
+- `GET /api/beliefs` (accepts `?branch=<branch_id>`; response carries the resolved `branch`)
+- `GET /api/observations` (exom-level; ignores `?branch` since observations are not branch-scoped in the read API)
 - `GET|POST /api/branches`
 - `GET|DELETE /api/branches/{id}`
 - `GET /api/branches/{id}/diff`
 - `POST /api/branches/{id}/merge` (JSON: `target_branch`, `policy`)
 - `GET /api/explain`
-- `GET /api/schema`
+- `GET /api/schema` (accepts `?branch=<branch_id>`)
 - `GET /api/graph`
-- `GET /api/relation-graph`
+- `GET /api/relation-graph` (accepts `?branch=<branch_id>`)
 - `GET /api/clusters`
 - `GET /api/clusters/{id}`
 - `GET /api/provenance`
@@ -369,6 +380,12 @@ Auth persistence:
 - With `--database-url`, users, sessions, API keys, domains, and shares use
 Postgres.
 - Exom memory data always lives in local rayforce2 splay tables.
+
+Share grants on private `{email}/...` paths are managed via `POST /auth/shares`
+(`{ path, grantee_email, permission: "read" | "read-write" }`). Shares are
+per-email today (no group-based access yet); combined with `acl_mode: co-edit`
+on the granted path, a `read-write` share lets the grantee write to the shared
+`main` trunk without hitting branch-TOFU.
 
 `ray-exomem daemon` currently does not expose the auth provider flags. Use
 foreground `serve` for authenticated development and deployment until that is

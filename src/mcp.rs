@@ -376,8 +376,8 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "source": { "type": "string", "description": "Rayfall source to evaluate" },
-                    "exom": { "type": "string", "description": "Exom name (defaults to main)" },
-                    "branch": { "type": "string", "description": "Branch to evaluate against. Defaults to `main`." }
+                    "exom": { "type": "string", "description": "Optional exom to bind for the eval. Omit for pure expressions that don't reference any exom (e.g. `(+ 1 2)`)." },
+                    "branch": { "type": "string", "description": "Branch to evaluate against. Defaults to `main`. Ignored when no `exom` is provided." }
                 },
                 "required": ["source"]
             }
@@ -501,11 +501,12 @@ fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "init",
-            "description": "Scaffold a new project at <path>: creates `<path>/main` (the project's main exom) plus an empty `<path>/sessions/` folder. Idempotent — re-running on an already-initialised project is a no-op.",
+            "description": "Scaffold a new project at <path>: creates `<path>/main` (the project's main exom) plus an empty `<path>/sessions/` folder. Idempotent — re-running on an already-initialised project is a no-op. `acl_mode` is stamped on `<path>/main` only; sessions under `<path>/sessions/` are always `solo-edit`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Tree path for the project (slash or :: form), e.g. `public/example/getting-started` or `work::team::project`." }
+                    "path": { "type": "string", "description": "Tree path for the project (slash or :: form), e.g. `public/example/getting-started` or `work::team::project`." },
+                    "acl_mode": { "type": "string", "enum": ["solo-edit", "co-edit"], "description": "Write policy for the project's `main` exom. Defaults to `solo-edit`." }
                 },
                 "required": ["path"]
             }
@@ -516,9 +517,58 @@ fn tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Full tree path for the new exom (slash or :: form)." }
+                    "path": { "type": "string", "description": "Full tree path for the new exom (slash or :: form)." },
+                    "acl_mode": { "type": "string", "enum": ["solo-edit", "co-edit"], "description": "Write policy. Defaults to `solo-edit`." }
                 },
                 "required": ["path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "folder_new",
+            "description": "Create an empty folder at <path>. Folders are pure grouping — they hold child folders and exoms, but no facts of their own. Idempotent: re-running on an existing folder is a no-op; rejected if the path is already an exom.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Tree path for the new folder (slash or :: form)." }
+                },
+                "required": ["path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "rename",
+            "description": "Rename the last segment of `path` to `new_segment`. Works on both folders and exoms. Rejects: top-level namespace roots (`namespace_root_immutable`); session exom ids (`session_id_immutable` — use `session/label` to change the display label). Updates any share grants whose path prefix matches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Existing tree path to rename." },
+                    "new_segment": { "type": "string", "description": "New name for the last segment. Must be a valid path segment (no `/`, `::`, or whitespace)." }
+                },
+                "required": ["path", "new_segment"]
+            }
+        }),
+        serde_json::json!({
+            "name": "delete",
+            "description": "Recursively delete the subtree at `path` from disk and unbind every exom underneath from the engine. Works on folders and exoms (deleting a folder removes every exom under it). Rejects: top-level namespace roots (`namespace_root_immutable`). Drops any share grants under the deleted path. Returns the slash-form paths of every exom that was removed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Tree path to delete (folder or exom)." }
+                },
+                "required": ["path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "exom_mode",
+            "description": "Flip an exom's `acl_mode` between `solo-edit` and `co-edit`. Creator-only (`not_creator` 403 otherwise). Rejected on session exoms (`acl_mode_not_applicable` 400). Side effects: `solo-edit → co-edit` clears `main.claimed_by_user_email = None` so any auth-admitted writer lands on the shared trunk; `co-edit → solo-edit` deterministically re-claims `main` for the exom creator. Non-`main` branches are not touched. A `_meta/acl_mode` audit fact is appended to record the flip. No-op when the requested mode equals the current mode (`changed: false`).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "exom": { "type": "string", "description": "Exom path (slash or :: form). Must be a Bare or ProjectMain exom; sessions are rejected." },
+                    "mode": { "type": "string", "enum": ["solo-edit", "co-edit"], "description": "Target mode." },
+                    "agent": { "type": "string", "description": "Tool/integration making the call. Falls back to the API key's label." },
+                    "model": { "type": "string", "description": "LLM identity. Explicit only." }
+                },
+                "required": ["exom", "mode"]
             }
         }),
         serde_json::json!({
@@ -627,6 +677,10 @@ async fn handle_tool_call(
         "export" => tool_export(state, &arguments),
         "init" => tool_init(state, user, &arguments).await,
         "exom_new" => tool_exom_new(state, user, &arguments).await,
+        "folder_new" => tool_folder_new(state, user, &arguments).await,
+        "rename" => tool_rename(state, user, &arguments).await,
+        "delete" => tool_delete(state, user, &arguments).await,
+        "exom_mode" => tool_exom_mode(state, user, &arguments).await,
         "exom_fork" => tool_exom_fork(state, user, &arguments).await,
         "tree" => tool_tree(state, user, &arguments).await,
         "merge_branch" => tool_merge_branch(state, user, &arguments).await,
@@ -730,6 +784,47 @@ fn load_exom<'a>(
         code: -32000,
         message: format!("unknown exom '{}'", exom_slash),
     })
+}
+
+/// MCP analogue of the HTTP layer's `precheck_write` call. Runs the auth/TOFU
+/// gate (`brain::precheck_write` → `claim_branch`) before any mutation handler
+/// touches the brain, then evicts the cached `ExomState` so the next
+/// `mutate_exom_async` reloads with the freshly-stamped branch metadata.
+///
+/// Mutation handlers in this module MUST call this before invoking
+/// `mutate_exom_async`. Without it, non-`main` branch TOFU never fires and
+/// branch ownership is not enforced on the MCP transport.
+fn precheck_write_mcp(
+    state: &AppState,
+    exom_slash: &str,
+    branch: &str,
+    ctx: &crate::context::MutationContext,
+) -> Result<(), JsonRpcError> {
+    let (Some(tree_root), Some(sym_path)) = (state.tree_root.as_deref(), state.sym_path.as_deref())
+    else {
+        return Ok(());
+    };
+    let exom_path: crate::path::TreePath =
+        exom_slash.parse().map_err(|e: crate::path::PathError| JsonRpcError {
+            code: -32602,
+            message: format!("bad_exom_path: {e}"),
+        })?;
+    let user_email = ctx.user_email.as_deref().unwrap_or("");
+    crate::brain::precheck_write(
+        tree_root,
+        sym_path,
+        &exom_path,
+        branch,
+        user_email,
+        ctx.agent.as_deref(),
+        ctx.model.as_deref(),
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e.to_string(),
+    })?;
+    state.exoms.lock().unwrap().remove(exom_slash);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +952,8 @@ async fn tool_assert_fact(
 
     let ctx = mcp_mutation_ctx(user, args);
 
+    precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.assert_fact(
             &branch,
@@ -873,16 +970,44 @@ async fn tool_assert_fact(
     .await;
 
     match result {
-        Ok(tx_id) => Ok(serde_json::json!({
-            "ok": true,
-            "tx_id": tx_id,
-            "fact_id": fact_id,
-            "predicate": predicate,
-            "confidence": confidence,
-            "source": source,
-            "branch": branch,
-        })
-        .to_string()),
+        Ok(tx_id) => {
+            // Mirror session-meta predicates back to exom.json so the tree
+            // projection (which reads from disk) stays in sync — same fix as
+            // HTTP `api_assert_fact`.
+            if state.tree_root.is_some()
+                && matches!(
+                    predicate.as_str(),
+                    "session/label" | "session/closed_at" | "session/archived_at"
+                )
+            {
+                if let Some(tree_root) = state.tree_root.as_deref() {
+                    if let Ok(exom_path) = exom_slash.parse::<crate::path::TreePath>() {
+                        let display_value = value.display();
+                        if let Err(e) = crate::brain::mirror_session_meta_to_disk(
+                            tree_root,
+                            &exom_path,
+                            &predicate,
+                            &display_value,
+                        ) {
+                            eprintln!(
+                                "[ray-exomem] mirror_session_meta_to_disk failed (best-effort): {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::json!({
+                "ok": true,
+                "tx_id": tx_id,
+                "fact_id": fact_id,
+                "predicate": predicate,
+                "confidence": confidence,
+                "source": source,
+                "branch": branch,
+            })
+            .to_string())
+        }
         Err(e) => Err(JsonRpcError {
             code: -32000,
             message: e.to_string(),
@@ -900,6 +1025,8 @@ async fn tool_retract_fact(
     let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
+
+    precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.retract_fact(&branch, &fact_id, &ctx)
@@ -948,6 +1075,8 @@ async fn tool_observe(
     let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
+
+    precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.assert_observation(
@@ -1009,6 +1138,8 @@ async fn tool_believe(
 
     let ctx = mcp_mutation_ctx(user, args);
 
+    precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.revise_belief(
             &branch,
@@ -1048,6 +1179,8 @@ async fn tool_revoke_belief(
     let branch = branch_arg(args);
 
     let ctx = mcp_mutation_ctx(user, args);
+
+    precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.revoke_belief(&branch, &belief_id, &ctx)
@@ -1092,31 +1225,34 @@ fn tool_exom_status(state: &AppState, args: &serde_json::Value) -> Result<String
 
 fn tool_eval(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
     let source = require_str(args, "source")?;
-    let target_branch = branch_arg(args);
-    let exom_slash = exom_slug(args);
-    let mut exoms = state.exoms.lock().unwrap();
-    let _ = load_exom(state, &mut exoms, &exom_slash)?;
-    crate::server::rebind_datoms_only(state, &mut exoms, &exom_slash, &target_branch).map_err(
-        |e| JsonRpcError {
-            code: -32000,
-            message: format!("rebind failed: {e}"),
-        },
-    )?;
 
-    let bind_result = crate::server::bind_typed_facts_for_exom(&state.engine, &exoms, &exom_slash)
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: format!("failed to bind typed facts: {e}"),
-        });
+    // Exom-scoped setup is opt-in: only when the caller passes `exom`. Pure
+    // expressions like `(+ 1 2)` should not require any exom to exist.
+    if let Some(raw_exom) = get_str(args, "exom") {
+        let exom_slash = match raw_exom.parse::<crate::path::TreePath>() {
+            Ok(tp) => tp.to_slash_string(),
+            Err(_) => raw_exom.to_string(),
+        };
+        let target_branch = branch_arg(args);
+        let mut exoms = state.exoms.lock().unwrap();
+        let _ = load_exom(state, &mut exoms, &exom_slash)?;
+        crate::server::rebind_datoms_only(state, &mut exoms, &exom_slash, &target_branch)
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: format!("rebind failed: {e}"),
+            })?;
+        crate::server::bind_typed_facts_for_exom(&state.engine, &exoms, &exom_slash).map_err(
+            |e| JsonRpcError {
+                code: -32000,
+                message: format!("failed to bind typed facts: {e}"),
+            },
+        )?;
+    }
 
-    let outcome = bind_result.and_then(|()| {
-        state.engine.eval(source).map_err(|e| JsonRpcError {
-            code: -32000,
-            message: e.to_string(),
-        })
-    });
-
-    outcome
+    state.engine.eval(source).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e.to_string(),
+    })
 }
 
 fn tool_explain(state: &AppState, args: &serde_json::Value) -> Result<String, JsonRpcError> {
@@ -1415,12 +1551,13 @@ async fn tool_session_close(
 
     let now = crate::brain::now_iso();
     let closed_at = now.clone();
+    let closed_at_for_brain = closed_at.clone();
     let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
         es.brain.assert_fact(
             crate::brain::MAIN_BRANCH,
             "session/closed_at",
             "session/closed_at",
-            crate::fact_value::FactValue::Str(closed_at.clone()),
+            crate::fact_value::FactValue::Str(closed_at_for_brain),
             1.0,
             "mcp",
             None,
@@ -1431,13 +1568,31 @@ async fn tool_session_close(
     .await;
 
     match result {
-        Ok(tx_id) => Ok(serde_json::json!({
-            "ok": true,
-            "tx_id": tx_id,
-            "session_path": exom_slash,
-            "closed_at": now,
-        })
-        .to_string()),
+        Ok(tx_id) => {
+            // Mirror to exom.json so tree projections see `session.closed_at`
+            // and `closed: true` immediately — the tree walker reads from disk
+            // metadata, not from the brain's facts.
+            if let Some(tree_root) = state.tree_root.as_deref() {
+                if let Err(e) = crate::brain::mirror_session_meta_to_disk(
+                    tree_root,
+                    &session_path,
+                    "session/closed_at",
+                    &closed_at,
+                ) {
+                    eprintln!(
+                        "[ray-exomem] mirror_session_meta_to_disk failed (best-effort): {}",
+                        e
+                    );
+                }
+            }
+            Ok(serde_json::json!({
+                "ok": true,
+                "tx_id": tx_id,
+                "session_path": exom_slash,
+                "closed_at": now,
+            })
+            .to_string())
+        }
         Err(e) => Err(JsonRpcError {
             code: -32000,
             message: e.to_string(),
@@ -1491,10 +1646,27 @@ async fn tool_init(
         message: "daemon has no tree_root configured".into(),
     })?;
 
+    let acl_mode = parse_acl_mode_arg(args, "acl_mode")?.unwrap_or(crate::exom::AclMode::SoloEdit);
+
     crate::scaffold::init_project(tree_root, &path, &user.email).map_err(|e| JsonRpcError {
         code: -32000,
         message: e.to_string(),
     })?;
+
+    // Stamp acl_mode on the project's `main` exom only. Sessions under
+    // `<path>/sessions/` are always SoloEdit (Q7). Mirrors `api_init`.
+    if acl_mode == crate::exom::AclMode::CoEdit {
+        let main_disk = path.to_disk_path(tree_root).join("main");
+        if let Ok(mut m) = crate::exom::read_meta(&main_disk) {
+            m.acl_mode = acl_mode;
+            if let Err(e) = crate::exom::write_meta(&main_disk, &m) {
+                eprintln!(
+                    "[ray-exomem] WARNING: init created but acl_mode stamp failed on main: {}",
+                    e
+                );
+            }
+        }
+    }
 
     let _ = state.sse_tx.send((
         None,
@@ -1504,6 +1676,7 @@ async fn tool_init(
     Ok(serde_json::json!({
         "ok": true,
         "path": path_slash,
+        "acl_mode": acl_mode,
     })
     .to_string())
 }
@@ -1544,10 +1717,26 @@ async fn tool_exom_new(
         message: "daemon has no tree_root configured".into(),
     })?;
 
+    let acl_mode = parse_acl_mode_arg(args, "acl_mode")?.unwrap_or(crate::exom::AclMode::SoloEdit);
+
     crate::scaffold::new_bare_exom(tree_root, &path, &user.email).map_err(|e| JsonRpcError {
         code: -32000,
         message: e.to_string(),
     })?;
+
+    // Stamp acl_mode on the freshly-created exom.json. Mirrors `api_exom_new`.
+    if acl_mode == crate::exom::AclMode::CoEdit {
+        let disk = path.to_disk_path(tree_root);
+        if let Ok(mut m) = crate::exom::read_meta(&disk) {
+            m.acl_mode = acl_mode;
+            if let Err(e) = crate::exom::write_meta(&disk, &m) {
+                eprintln!(
+                    "[ray-exomem] WARNING: exom-new created but acl_mode stamp failed: {}",
+                    e
+                );
+            }
+        }
+    }
 
     let _ = state.sse_tx.send((
         None,
@@ -1557,14 +1746,17 @@ async fn tool_exom_new(
     Ok(serde_json::json!({
         "ok": true,
         "path": path_slash,
+        "acl_mode": acl_mode,
     })
     .to_string())
 }
 
-/// MCP `exom_fork`. Mirrors `POST /api/actions/exom-fork`. The HTTP handler
-/// is the canonical reference; this duplicates its flow because the two
-/// surfaces have different async/error idioms (axum extractors vs JsonRpc).
-/// Keep them in sync — if you find drift, the HTTP handler wins.
+/// MCP `exom_fork`. Mirrors `POST /api/actions/exom-fork`. The two surfaces
+/// share the default-target derivation via `crate::exom::default_fork_target`,
+/// so the result for an omitted `target` is byte-identical regardless of
+/// transport. The remainder of the flow (read-access check, write-access
+/// check, scaffold + replay) is duplicated because the surfaces have
+/// different async/error idioms (axum extractors vs JsonRpc).
 async fn tool_exom_fork(
     state: &AppState,
     user: &User,
@@ -1604,27 +1796,22 @@ async fn tool_exom_fork(
         message: "daemon has no tree_root configured".into(),
     })?;
 
-    // Resolve target with auto-suffix on collision (default
-    // `{user.email}/{basename}`).
+    // Resolve target. Default is `{user.email}/forked/<source-subpath>`
+    // with auto-suffix on collision — see `crate::exom::default_fork_target`.
+    // Both this MCP tool and the HTTP route call the same helper so the two
+    // transports cannot drift apart again.
     let target_slash = match target_arg {
         Some(t) => t,
-        None => {
-            let basename = source_path.last().unwrap_or("forked");
-            let base = format!("{}/{}", user.email, basename);
-            let mut candidate = base.clone();
-            let mut i = 2;
-            while tree_root.join(&candidate).exists() {
-                candidate = format!("{}-{}", base, i);
-                i += 1;
-                if i > 100 {
-                    return Err(JsonRpcError {
-                        code: -32000,
-                        message: "fork_collision: could not find a free target path; pass `target` explicitly".into(),
-                    });
-                }
-            }
-            candidate
-        }
+        None => crate::exom::default_fork_target(
+            tree_root,
+            &user.email,
+            &source_slash,
+            source_path.last(),
+        )
+        .map_err(|e| JsonRpcError {
+            code: -32000,
+            message: format!("fork_collision: {}", e),
+        })?,
     };
     let target_path: crate::path::TreePath =
         target_slash
@@ -2099,4 +2286,438 @@ fn tool_export(state: &AppState, args: &serde_json::Value) -> Result<String, Jso
             .to_string())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// folder_new / rename / delete / exom_mode
+//
+// Each tool mirrors a `POST /api/actions/<...>` route (`api_folder_new`,
+// `api_rename`, `api_delete`, `api_exom_mode` in src/server.rs). The HTTP
+// handler is the canonical reference; if these drift, the HTTP version wins.
+// ---------------------------------------------------------------------------
+
+/// Parse an optional `solo-edit` / `co-edit` value at `key` (`"acl_mode"`
+/// for init/exom_new, `"mode"` for exom_mode). Returns `Ok(None)` when the
+/// field is absent or `null`.
+fn parse_acl_mode_arg(
+    args: &serde_json::Value,
+    key: &str,
+) -> Result<Option<crate::exom::AclMode>, JsonRpcError> {
+    let Some(raw) = args.get(key) else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value::<crate::exom::AclMode>(raw.clone())
+        .map(Some)
+        .map_err(|e| JsonRpcError {
+            code: -32602,
+            message: format!(
+                "invalid '{key}' (expected \"solo-edit\" or \"co-edit\"): {e}"
+            ),
+        })
+}
+
+async fn tool_folder_new(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let path_str = require_str(args, "path")?;
+    let path: crate::path::TreePath =
+        path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid path: {e}"),
+            })?;
+    let path_slash = path.to_slash_string();
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(
+            user,
+            &path_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &path_slash),
+        )
+        .await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", path_slash),
+            });
+        }
+    }
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    crate::scaffold::new_folder(tree_root, &path).map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e.to_string(),
+    })?;
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path_slash,
+    })
+    .to_string())
+}
+
+async fn tool_rename(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let path_str = require_str(args, "path")?;
+    let new_segment = require_str(args, "new_segment")?.to_string();
+    let path: crate::path::TreePath =
+        path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid path: {e}"),
+            })?;
+    let path_slash = path.to_slash_string();
+
+    // Top-level namespace roots (e.g. `vasily@lynxtrading.com`, `public`)
+    // are immutable when auth is on; renaming them would orphan every share
+    // and bind every cached ExomState to a stale prefix.
+    if state.auth_store.is_some() && path.len() == 1 {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "namespace_root_immutable: cannot rename a user namespace root".into(),
+        });
+    }
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(
+            user,
+            &path_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &path_slash),
+        )
+        .await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", path_slash),
+            });
+        }
+    }
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    // Reject session-id renames before touching disk: session paths encode
+    // timestamp+label and need to stay stable; use the `session/label`
+    // predicate to change the display label instead.
+    let disk = path.to_disk_path(tree_root);
+    if crate::tree::classify(&disk) == crate::tree::NodeKind::Exom {
+        if let Ok(meta) = crate::exom::read_meta(&disk) {
+            if meta.kind == crate::exom::ExomKind::Session {
+                return Err(JsonRpcError {
+                    code: -32000,
+                    message:
+                        "session_id_immutable: cannot rename session id; use session/label to change the display label"
+                            .into(),
+                });
+            }
+        }
+    }
+
+    let new_path = crate::tree::rename_last_segment(tree_root, &path, &new_segment).map_err(
+        |e| JsonRpcError {
+            code: -32000,
+            message: format!("rename_failed: {e}"),
+        },
+    )?;
+    let new_slash = new_path.to_slash_string();
+
+    // Evict every in-memory ExomState whose key starts with the old slash;
+    // their disk paths just moved out from under them. Reconcile so the
+    // engine drops the stale named-db bindings.
+    let removed: Vec<String> = {
+        let mut exoms = state.exoms.lock().unwrap();
+        let stale_keys: Vec<String> = exoms
+            .keys()
+            .filter(|k| k.as_str() == path_slash || k.starts_with(&format!("{}/", path_slash)))
+            .cloned()
+            .collect();
+        for k in &stale_keys {
+            exoms.remove(k);
+        }
+        crate::server::reconcile_engine(state, &exoms);
+        stale_keys
+    };
+
+    if let Some(ref auth_store) = state.auth_store {
+        auth_store.update_share_paths(&path_slash, &new_slash).await;
+    }
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "old_path": path_slash,
+        "new_path": new_slash,
+        "evicted_exoms": removed,
+    })
+    .to_string())
+}
+
+async fn tool_delete(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let path_str = require_str(args, "path")?;
+    let path: crate::path::TreePath =
+        path_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("invalid path: {e}"),
+            })?;
+    let path_slash = path.to_slash_string();
+
+    if state.auth_store.is_some() && path.len() == 1 {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "namespace_root_immutable: cannot delete a top-level namespace root".into(),
+        });
+    }
+
+    if let Some(ref auth_store) = state.auth_store {
+        let level = crate::auth::access::resolve_access(
+            user,
+            &path_slash,
+            auth_store,
+            crate::server::lookup_owner(state, &path_slash),
+        )
+        .await;
+        if !level.can_write() {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("forbidden: write access denied to {}", path_slash),
+            });
+        }
+    }
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    let exoms_under = crate::scaffold::collect_exoms_under(tree_root, &path).map_err(|e| {
+        JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        }
+    })?;
+
+    // Drop in-memory ExomState entries; reconcile only after the disk
+    // delete so the engine ends up consistent with the in-memory map.
+    {
+        let mut exoms = state.exoms.lock().unwrap();
+        for slash in &exoms_under {
+            exoms.remove(slash);
+        }
+    }
+
+    if let Err(e) = crate::scaffold::delete_subtree(tree_root, &path) {
+        // Engine bindings are now stale w.r.t. what's still on disk; force
+        // reconcile so the engine matches `state.exoms` again.
+        let exoms = state.exoms.lock().unwrap();
+        crate::server::reconcile_engine(state, &exoms);
+        return Err(JsonRpcError {
+            code: -32000,
+            message: e.to_string(),
+        });
+    }
+
+    {
+        let exoms = state.exoms.lock().unwrap();
+        crate::server::reconcile_engine(state, &exoms);
+    }
+
+    if let Some(ref auth_store) = state.auth_store {
+        auth_store.delete_shares_under(&path_slash).await;
+    }
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "deleted": path_slash,
+        "removed_exoms": exoms_under,
+    })
+    .to_string())
+}
+
+async fn tool_exom_mode(
+    state: &AppState,
+    user: &User,
+    args: &serde_json::Value,
+) -> Result<String, JsonRpcError> {
+    let exom_str = require_str(args, "exom")?;
+    let mode = parse_acl_mode_arg(args, "mode")?.ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "missing required parameter: mode".into(),
+    })?;
+
+    let exom_path: crate::path::TreePath =
+        exom_str
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("bad_exom_path: {e}"),
+            })?;
+    let exom_slash = exom_path.to_slash_string();
+
+    let tree_root = state.tree_root.as_deref().ok_or_else(|| JsonRpcError {
+        code: -32000,
+        message: "daemon has no tree_root configured".into(),
+    })?;
+
+    let disk = exom_path.to_disk_path(tree_root);
+
+    let mut meta = match crate::exom::read_meta(&disk) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("no_such_exom: no such exom {}", exom_slash),
+            });
+        }
+        Err(e) => {
+            return Err(JsonRpcError {
+                code: -32000,
+                message: format!("io: {}", e),
+            });
+        }
+    };
+
+    // Creator-only flip. The auth-store may also grant `read-write` on
+    // `{email}/...` paths via shares, but only the creator gets to change
+    // the write policy itself.
+    if meta.created_by != user.email {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: "not_creator: only the exom creator may change the acl_mode".into(),
+        });
+    }
+
+    if meta.kind == crate::exom::ExomKind::Session {
+        return Err(JsonRpcError {
+            code: -32000,
+            message:
+                "acl_mode_not_applicable: session exoms use orchestrator-allocated branches; co-edit is not applicable to this exom kind"
+                    .into(),
+        });
+    }
+
+    let prev_mode = meta.acl_mode;
+
+    if prev_mode == mode {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "exom": exom_slash,
+            "mode": mode,
+            "previous_mode": prev_mode,
+            "changed": false,
+        })
+        .to_string());
+    }
+
+    // Persist the new mode in exom.json BEFORE touching the brain. `acl_mode`
+    // is owned by `ExomMeta`, not by `Brain`, so any concurrent reader (e.g.
+    // a parallel `precheck_write` call) needs to observe the new mode the
+    // moment we publish it.
+    meta.acl_mode = mode;
+    if let Err(e) = crate::exom::write_meta(&disk, &meta) {
+        return Err(JsonRpcError {
+            code: -32000,
+            message: format!("io: failed to write exom.json: {}", e),
+        });
+    }
+
+    // Decide what the new `main` claim should be. `co-edit` clears it so any
+    // auth-admitted writer lands on the shared trunk; `solo-edit` re-claims
+    // for the exom creator. Non-`main` branches are not touched (Q5).
+    let new_claim: Option<(String, Option<String>, Option<String>)> = match mode {
+        crate::exom::AclMode::CoEdit => None,
+        crate::exom::AclMode::SoloEdit => Some((user.email.clone(), None, None)),
+    };
+
+    // Append a `_meta/acl_mode` audit fact so the flip is visible in
+    // history alongside every other mutation. Run the claim mutation in
+    // the SAME `mutate_exom_async` closure so the in-memory `Brain.branches`
+    // and the disk splay table stay in lockstep — `refresh_exom_binding`'s
+    // tail `brain.save()` then writes back exactly the state we just set,
+    // instead of clobbering a fresh disk write with stale in-memory branches
+    // (the original 2026-05-02 regression).
+    let ctx = mcp_mutation_ctx(user, args);
+    let mode_str = match mode {
+        crate::exom::AclMode::CoEdit => "co-edit",
+        crate::exom::AclMode::SoloEdit => "solo-edit",
+    };
+    let exom_for_assert = exom_slash.clone();
+    let assert_ctx = ctx.clone();
+    crate::server::mutate_exom_async(state, &exom_for_assert, move |ex| {
+        // Sync the in-memory ExomState mode field so subsequent
+        // guard_write / lookup_owner calls observe the new mode without
+        // a daemon restart.
+        ex.acl_mode = mode;
+        ex.brain
+            .set_branch_claim(crate::brain::MAIN_BRANCH, new_claim)
+            .map_err(|e| anyhow::anyhow!("set_branch_claim failed: {}", e))?;
+        ex.brain.assert_fact(
+            crate::brain::MAIN_BRANCH,
+            "_meta/acl_mode",
+            "_meta/acl_mode",
+            crate::fact_value::FactValue::Str(mode_str.to_string()),
+            1.0,
+            "exom-mode-flip",
+            None,
+            None,
+            &assert_ctx,
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("exom-mode flip failed: {}", e),
+    })?;
+
+    let _ = state.sse_tx.send((
+        None,
+        r#"{"v":1,"kind":"tree-changed","op":"tree_changed"}"#.to_string(),
+    ));
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "exom": exom_slash,
+        "mode": mode,
+        "previous_mode": prev_mode,
+        "changed": true,
+    })
+    .to_string())
 }

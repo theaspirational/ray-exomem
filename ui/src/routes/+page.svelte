@@ -6,7 +6,6 @@
 	import { getExomemBaseUrl } from '$lib/exomem.svelte';
 	import FeaturedCards from '$lib/Welcome/FeaturedCards.svelte';
 	import LatestChanges from '$lib/Welcome/LatestChanges.svelte';
-	import SeededKnowledge from '$lib/Welcome/SeededKnowledge.svelte';
 	import StatsStrip from '$lib/Welcome/StatsStrip.svelte';
 	import { welcomeSheetState } from '$lib/Welcome/welcomeSheetState.svelte';
 
@@ -28,16 +27,6 @@
 			last_tx_time: string;
 		}[];
 		latest: {
-			exom: string;
-			tx_id: number;
-			tx_time: string;
-			actor: string;
-			action: string;
-			note: string | null;
-			branch_id: string;
-			refs: string[];
-		}[];
-		seeded: {
 			exom: string;
 			tx_id: number;
 			tx_time: string;
@@ -127,10 +116,6 @@
 
 			{#if summary.latest.length > 0}
 				<LatestChanges items={summary.latest} />
-			{/if}
-
-			{#if summary.seeded.length > 0}
-				<SeededKnowledge items={summary.seeded} />
 			{/if}
 		{/if}
 	</div>
