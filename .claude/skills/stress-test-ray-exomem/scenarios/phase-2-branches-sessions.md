@@ -21,7 +21,7 @@ Most session-class probes need fresh sessions to avoid conflict with `<session>`
 
 1. **Single-session** — `session_new { project_path: <scratch_project>, session_type: "single", label: "single-probe" }`. Capture `<single_session>`. List its branches: should be only `main` (no agent-* branches because no `agents` field).
 2. **Bad label rejection** — `session_new { project_path: <scratch_project>, session_type: "multi", label: "bad/label", agents: ["a"] }`. Pass: error containing `invalid label`.
-3. **Unknown agent rejection** — `session_join { session_path: <session>, agent_label: "ghost-agent" }`. Pass: error containing `BranchMissing`.
+3. **Unknown agent rejection** — `session_join { session_path: <session>, agent_label: "ghost-agent" }`. Pass: error containing `not in exom` (the user-facing template is `branch <name> not in exom` — see `src/brain.rs::WriteError::BranchMissing`'s `#[error("branch {0} not in exom")]`; `BranchMissing` is the Rust enum variant name and never appears in the wire response).
 4. **Close blocks writes** — `session_close { session_path: <single_session> }`. Then `assert_fact { exom: <single_session>, fact_id: "post-close", predicate: "post/close", value: 1 }`. Pass: error containing `session_closed`.
 5. **closed_at meta** — fetch `tree { path: <single_session> }`. Before close, `session.closed_at == null`. After close, `session.closed_at` is a timestamp. (Steps 1 and 4 above bracket this.)
 

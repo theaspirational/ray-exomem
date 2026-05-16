@@ -14,7 +14,7 @@ Verify preconditions, discover identities, open the two isolated browser context
 
 ## Steps
 
-1. **Discover `<user1_email>`** — the runner's authenticated identity from MCP. Prefer the bearer's auth context. Fallback: `mcp__ray-exomem__tree { path: "" }` and pick the top-level node that matches the orchestrator's email if that namespace exists. Do not assume login auto-seeds `<email>/main`; private scratch is created explicitly in step 4.
+1. **Discover `<user1_email>`** — call `mcp__ray-exomem__tree { path: "" }` and pick the unique top-level node whose path looks like an email and is not `public/*`. Under the privacy model that's the orchestrator's namespace by construction (the user only sees their own namespace + `public/*` + share grants, and share grants don't appear as top-level email folders). Do **not** rely on any `userEmail` context the harness reports — it's set by the chat client and can disagree with the live MCP bearer (e.g. one identity in chat, another in the API key). Do not assume login auto-seeds `<email>/main`; private scratch is created explicitly in step 4. If `tree { path: "" }` returns *zero* email-shaped top-level nodes, the bearer maps to an unknown user — abort with the tree dump as evidence.
 
 2. **Discover `<user2_email>`** — passed by the operator in the run prompt, or discovered by probe (preconditions step 4). Record both emails as evidence.
 

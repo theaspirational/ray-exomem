@@ -139,7 +139,7 @@ impl AppState {
                 // canonical slots. If an old sym file exists, the
                 // rewrite below re-interns each persisted string and
                 // remaps on-disk splays through the shift. This
-                // decouples on-disk string identity from rayforce2's
+                // decouples on-disk string identity from rayforce's
                 // slot layout, so builtin-shape refactors upstream
                 // (e.g. commit 7db37e4 turning flat `.sys.gc` into a
                 // dotted sym) no longer require wiping the sym file.
@@ -198,10 +198,10 @@ impl AppState {
 /// Surface the sym-rewrite outcome to stderr. `FreshBoot` and `FastPath`
 /// are the quiet cases — single line each, since nothing interesting
 /// happened. `Remapped` is the loud case: the on-disk layout shifted
-/// relative to the current binary (expected after a rayforce2 upgrade
+/// relative to the current binary (expected after a rayforce upgrade
 /// that changed builtin interning shape) and we just rewrote every
 /// splay. An operator seeing this on boot should know the migration
-/// fired so they can correlate it with the rayforce2 version change.
+/// fired so they can correlate it with the rayforce version change.
 fn log_sym_rewrite_outcome(outcome: &crate::sym_rewrite::RewriteOutcome) {
     use crate::sym_rewrite::RewriteOutcome;
     match outcome {
@@ -225,7 +225,7 @@ fn log_sym_rewrite_outcome(outcome: &crate::sym_rewrite::RewriteOutcome) {
             eprintln!("[ray-exomem] binary's canonical layout; {splays_rewritten} on-disk splays");
             eprintln!("[ray-exomem] rewritten through the old→new remap.");
             eprintln!("[ray-exomem]");
-            eprintln!("[ray-exomem] This is expected after a rayforce2 upgrade that");
+            eprintln!("[ray-exomem] This is expected after a rayforce upgrade that");
             eprintln!("[ray-exomem] reshaped builtin interning (e.g. a builtin moving");
             eprintln!("[ray-exomem] from flat to dotted sym). Data was preserved via");
             eprintln!("[ray-exomem] the remap; next boot should hit the fast-path.");
@@ -240,7 +240,7 @@ fn log_sym_rewrite_outcome(outcome: &crate::sym_rewrite::RewriteOutcome) {
 /// logged loudly so an operator sees it at daemon start (in
 /// `/tmp/ray-exomem.log`) rather than at first request.
 ///
-/// Typical failure mode post-rayforce2-upgrade: queries return
+/// Typical failure mode post-rayforce-upgrade: queries return
 /// `RAY_ERROR code=domain` with an empty msg because a persisted
 /// sym entry (often a dotted-name builtin like `.sys.gc`) collides
 /// with a reshaped builtin in the new binary. See CLAUDE.md
@@ -274,7 +274,7 @@ fn engine_health_probe(
     eprintln!("[ray-exomem] WARNING: engine health probe FAILED on startup");
     eprintln!("[ray-exomem]");
     eprintln!("[ray-exomem] The sym table or bound tables appear incompatible with");
-    eprintln!("[ray-exomem] the current rayforce2 build. This usually happens after");
+    eprintln!("[ray-exomem] the current rayforce build. This usually happens after");
     eprintln!("[ray-exomem] an upstream change to builtin interning shape (e.g. a");
     eprintln!("[ray-exomem] builtin moving from flat to dotted sym).");
     eprintln!("[ray-exomem]");
@@ -2623,7 +2623,7 @@ fn expand_canonical_query(
     // Two paths:
     //   - direct EAV `(?e 'attr "literal")` — rewritten in place.
     //   - rule-call `(rule-name ?id "literal" ?v)` — the literal arrives at
-    //     the inlined rule body's value slot only after rayforce2 expands
+    //     the inlined rule body's value slot only after rayforce expands
     //     the rule, so we rewrite at the call site using a per-rule head-
     //     param→attr map derived from each rule's inline body.
     let mut rule_attr_map: std::collections::HashMap<String, Vec<Option<String>>> =
@@ -2853,7 +2853,7 @@ fn unknown_relation_error(unknown: &str, known: &BTreeSet<String>) -> anyhow::Er
 /// Bind typed-fact tables and evaluate a prepared query, returning the
 /// decoded output. Rejects non-TABLE engine returns instead of silently
 /// formatting them as scalars: a `(query ...)` form that doesn't
-/// produce a table means rayforce2 failed mid-eval, and the caller
+/// produce a table means rayforce failed mid-eval, and the caller
 /// should see that as an error.
 ///
 /// Caller MUST hold `state.exoms.lock()` since `bind_typed_facts_for_exom`
@@ -2869,7 +2869,7 @@ fn execute_prepared_query(
     if obj_type != ffi::RAY_TABLE {
         anyhow::bail!(
             "query evaluator returned a non-table result (ray obj type {obj_type}); \
-             this usually means the rule failed to compile or evaluate inside rayforce2"
+             this usually means the rule failed to compile or evaluate inside rayforce"
         );
     }
     let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;

@@ -272,7 +272,7 @@ pub fn datom_query_projection_roles(query_source: &str) -> Option<Vec<Option<Dat
         return None;
     }
 
-    // Only infer datom roles for raw triple patterns. In Rayfall / rayforce2
+    // Only infer datom roles for raw triple patterns. In Rayfall / rayforce
     // a rule invocation starts with a bare predicate name, while a triple
     // pattern starts with either a ?variable, a quoted symbol / string
     // (e.g. `'foo`, `"bar"`), an underscore, or a bare integer. A rule

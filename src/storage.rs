@@ -1,4 +1,4 @@
-//! Safe Rust wrappers over rayforce2 FFI for columnar table persistence.
+//! Safe Rust wrappers over rayforce FFI for columnar table persistence.
 //!
 //! Provides typed table builders and loaders for each Brain entity type,
 //! plus RAII wrappers and symbol table helpers.
@@ -24,7 +24,7 @@ pub struct RayObj {
 }
 
 // Safety: RayObj is always accessed behind a Mutex; raw pointer transfer
-// between threads is safe because rayforce2 operations are not re-entrant.
+// between threads is safe because rayforce operations are not re-entrant.
 unsafe impl Send for RayObj {}
 
 impl RayObj {
@@ -72,7 +72,7 @@ pub fn sym_intern(s: &str) -> i64 {
     unsafe { ffi::ray_sym_intern(s.as_ptr() as *const _, s.len()) }
 }
 
-/// Current number of entries in the global rayforce2 symbol table (best-effort diagnostic).
+/// Current number of entries in the global rayforce symbol table (best-effort diagnostic).
 pub fn sym_count() -> u32 {
     unsafe { ffi::ray_sym_count() }
 }
@@ -298,7 +298,7 @@ pub fn encode_symbol_datom(value: &str) -> i64 {
 /// Encode a [`FactValue`] as the tagged datom that fills the shared
 /// `?fact ?attr ?value` slot in the datoms relation.
 ///
-/// The datoms V column MUST be homogeneous: rayforce2's per-column type
+/// The datoms V column MUST be homogeneous: rayforce's per-column type
 /// inference faults (or silently returns `error:type`) when queries scan a
 /// column that mixes tags in the same slot. We therefore STR-tag every
 /// variant here — numeric and symbol values render to their display form
@@ -1257,7 +1257,7 @@ pub fn build_datoms_table(brain: &Brain, branch_id: &str) -> Result<RayObj> {
 
 /// Typed fact sub-tables split by `FactValue` variant. Each is a 3-column
 /// table `(fact_id, predicate, value)` with a homogeneously-typed `value`
-/// column so rayforce2 can apply `<`, `>=`, `sum`, `avg` etc. natively.
+/// column so rayforce can apply `<`, `>=`, `sum`, `avg` etc. natively.
 ///
 ///   * `facts_i64` — rows where the fact value is `FactValue::I64(n)`. The
 ///     `value_i64` column is a bare `RAY_I64` (no datom tag), enabling live
@@ -1363,7 +1363,7 @@ pub fn build_typed_fact_tables(brain: &Brain, branch_id: &str) -> Result<TypedFa
     })
 }
 
-/// Well-known rayforce2 env names used by [`TypedFactTables`]. Rules reference
+/// Well-known rayforce env names used by [`TypedFactTables`]. Rules reference
 /// `(facts_i64 ?e ?a ?v)` by these bare names. Server query handlers rebind
 /// each one to the executing exom's sub-tables immediately before running a
 /// query so the shared names always resolve to the right data.

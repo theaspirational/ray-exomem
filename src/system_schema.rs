@@ -529,7 +529,7 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
         (
             "fact-with-tx".to_string(),
             "Joined fact row with provenance and transaction time. \
-             Cap-limited to 8 columns (rayforce2 distinct/group cap on n_keys); \
+             Cap-limited to 8 columns (rayforce distinct/group cap on n_keys); \
              join with `tx-row` if the actor or branch is also needed."
                 .to_string(),
             format!(
@@ -545,7 +545,7 @@ fn static_builtin_rule_specs(exom: &str) -> Vec<(String, String, String)> {
         ),
         (
             "tx-row".to_string(),
-            "Transaction row with the full three-axis attribution (user_email, agent, model) plus action, time, branch. Empty strings indicate no attribution recorded for that axis (e.g. system-internal writes have user_email=\"\"; cookie-auth UI writes have agent=\"\"; writes without a model arg have model=\"\"). 8 columns — exactly the rayforce2 distinct/group n_keys cap.".to_string(),
+            "Transaction row with the full three-axis attribution (user_email, agent, model) plus action, time, branch. Empty strings indicate no attribution recorded for that axis (e.g. system-internal writes have user_email=\"\"; cookie-auth UI writes have agent=\"\"; writes without a model arg have model=\"\"). 8 columns — exactly the rayforce distinct/group n_keys cap.".to_string(),
             format!(
                 "(rule {exom} (tx-row ?tx ?id ?email ?agent ?model ?action ?when ?branch) (?tx '{id_attr} ?id) (?tx '{email_attr} ?email) (?tx '{agent_attr} ?agent) (?tx '{model_attr} ?model) (?tx '{action_attr} ?action) (?tx '{time_attr} ?when) (?tx '{branch_attr} ?branch))",
                 id_attr = attrs::tx::ID,

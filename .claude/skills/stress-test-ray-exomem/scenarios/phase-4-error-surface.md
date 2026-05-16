@@ -14,7 +14,10 @@ Trigger every documented error class intentionally. **All steps here expect a fa
 
 5. **Invalid value (array)** — `assert_fact { exom: <session>, fact_id: "bad/array", predicate: "bad/array", value: [1,2,3] }`. Pass: contains `invalid` and `value`.
 
-6. **Missing required parameter** — `assert_fact { exom: <session>, fact_id: "no/predicate", value: 1 }` (no `predicate`). Pass: contains `missing required parameter: predicate`.
+6. **Missing required parameter** — `assert_fact { exom: <session>, fact_id: "no/predicate", value: 1 }` (no `predicate`).
+   - **MCP transport:** the `assert_fact` `inputSchema` marks `predicate` as required (`src/mcp.rs`), so the rejection comes from the schema validator before the call hits the daemon. Pass: any `-32602`-class rejection mentioning `predicate`. If the harness/client refuses to send the call at all (some MCP wrappers won't dispatch a body that fails their local schema check), mark this row as `skipped` with reason "MCP transport blocked the call client-side" — the daemon code path is then verified by the HTTP transport row below.
+   - **HTTP transport** (when a bearer/cookie is available): POST `/api/actions/assert-fact` with the same incomplete body. Pass: response contains the substring `missing required parameter: predicate`.
+   - At least one of the two transports must produce a rejection. If both return `200 ok`, the daemon's parameter validation regressed.
 
 7. **Empty-string predicate rejected** — `assert_fact { exom: <session>, fact_id: "empty/predicate", predicate: "", value: 1 }`. Pass: code `-32602`, contains `invalid 'predicate'` and `non-empty`.
 
@@ -22,7 +25,7 @@ Trigger every documented error class intentionally. **All steps here expect a fa
 
 9. **Cross-references already covered earlier** — these aren't repeated here, just cross-marked:
     - **`session_closed`** → covered Phase 2 step B.4.
-    - **`BranchMissing`** → covered Phase 2 step B.3.
+    - **`branch <name> not in exom`** (the user-facing form of `WriteError::BranchMissing`) → covered Phase 2 step B.3. The literal `BranchMissing` is the Rust variant name and never appears in the wire response.
     - **`branch_owned` (cross-user, public/* or rw-share)** → covered Phase 3 steps A.3, D.2, F.5.
     - **`fork_session_unsupported`** → covered Phase 3 step B.5.
     - **`acl_mode_not_applicable`** → covered Phase 3 step C.8.

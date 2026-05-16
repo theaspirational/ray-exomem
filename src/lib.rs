@@ -32,7 +32,7 @@ pub use backend::{rayforce_version, RayforceEngine};
 // ---------------------------------------------------------------------------
 
 pub fn backend_name() -> &'static str {
-    "rayforce2"
+    "rayforce"
 }
 
 pub fn frontend_name() -> &'static str {
@@ -65,7 +65,7 @@ pub fn build_identity() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Core execution — thin wrappers over native rayforce2
+// Core execution — thin wrappers over native rayforce
 // ---------------------------------------------------------------------------
 
 pub fn run_source(source: &str) -> Result<String> {
@@ -93,7 +93,7 @@ pub fn run_file(path: &Path) -> Result<String> {
 // no Teide translation path exists in the frontend.
 // ---------------------------------------------------------------------------
 
-/// Global test lock — rayforce2 uses global state, so tests must be serialized.
+/// Global test lock — rayforce uses global state, so tests must be serialized.
 #[cfg(test)]
 pub fn global_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn version_info_is_consistent() {
-        assert_eq!(backend_name(), "rayforce2");
+        assert_eq!(backend_name(), "rayforce");
         assert_eq!(frontend_name(), "ray-exomem");
         assert_eq!(frontend_version(), env!("CARGO_PKG_VERSION"));
         assert_eq!(syntax_name(), "rayfall-native");

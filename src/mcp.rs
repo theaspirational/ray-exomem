@@ -573,12 +573,12 @@ fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "exom_fork",
-            "description": "Fork an exom you can read into a new exom you'll own. Copies currently-active facts as new tx records attributed to you, stamps lineage (`forked_from`) on the target's meta, and gives you full ownership of the result. Refused on session exoms. Default target is `{your_email}/{source_basename}`, auto-suffixed (`-2`, `-3`, ...) if taken.",
+            "description": "Fork an exom you can read into a new exom you'll own. Copies currently-active facts as new tx records attributed to you, stamps lineage (`forked_from`) on the target's meta, and gives you full ownership of the result. The fork is always created as `solo-edit` regardless of the source's mode. Refused on session exoms (`fork_session_unsupported`). Default target is `{your_email}/forked/<source-subpath>` — the namespace marker is stripped so lineage is readable from the path: `public/X/Y` → `{you}/forked/X/Y`; `{other_email}/X/Y` → `{you}/forked/{other_email}/X/Y`; `{your_email}/X/Y` (self-fork) → `{your_email}/forked/X/Y`. Auto-suffixed (`-2`, `-3`, ...) on the leaf segment if the default target is taken (up to 100 attempts before `fork_collision`).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "source": { "type": "string", "description": "Path of the exom to fork. You must have read access (own it, share grant, or it's in `public/*`)." },
-                    "target": { "type": "string", "description": "Optional target path. Defaults to `{your_email}/{source_basename}` with auto-suffix on collision." }
+                    "target": { "type": "string", "description": "Optional explicit target path. Always overrides the default. Defaults to `{your_email}/forked/<source-subpath>` (see tool description) with leaf-segment auto-suffix on collision." }
                 },
                 "required": ["source"]
             }

@@ -254,7 +254,7 @@ enum SessionCmd {
 #[command(
     name = "ray-exomem",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Native rayforce2 exomemory front-end — Rayfall list-style syntax only",
+    about = "Native rayforce exomemory front-end — Rayfall list-style syntax only",
     long_about = concat!(
         "ray-exomem persists memory as a tree of folders and exoms.\n\n",
         "                  Tree:        work/team/project/repo/main          (the project's main exom)\n",
@@ -371,7 +371,7 @@ enum Commands {
         #[arg(long)]
         ui_dir: Option<PathBuf>,
 
-        /// Data directory for persistent storage (rayforce2 splayed tables).
+        /// Data directory for persistent storage (rayforce splayed tables).
         /// Defaults to ~/.ray-exomem. Pass --no-persist to run in-memory only.
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -2222,7 +2222,7 @@ fn main() {
         }
         Commands::Version => {
             println!(
-                "ray-exomem {} (build: {}, backend: rayforce2 {}, syntax: {})",
+                "ray-exomem {} (build: {}, backend: rayforce {}, syntax: {})",
                 ray_exomem::frontend_version(),
                 ray_exomem::build_identity(),
                 ray_exomem::rayforce_version(),

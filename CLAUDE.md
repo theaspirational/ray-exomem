@@ -17,7 +17,7 @@ When adding or modifying any db/rayfall interactions test them against the runni
 
 ### Live-test loop (mandatory for db/rayfall/server changes)
 
-Unit tests (`cargo test`) are not a substitute for this — the bug classes that matter here (engine error surfacing, EDB auto-register, sym-table load, typed-fact binding) only show up against a live daemon. After making changes touching `src/server.rs`, `src/brain.rs`, `src/storage.rs`, `src/backend.rs`, `src/auth/**`, or rayforce2 FFI, always:
+Unit tests (`cargo test`) are not a substitute for this — the bug classes that matter here (engine error surfacing, EDB auto-register, sym-table load, typed-fact binding) only show up against a live daemon. After making changes touching `src/server.rs`, `src/brain.rs`, `src/storage.rs`, `src/backend.rs`, `src/auth/**`, or rayforce FFI, always:
 
 1. **Rebuild** — `cargo build --release --bin ray-exomem` (not just `cargo test`; `cargo test --lib --release` compiles a test binary, not the daemon binary).
 2. **Kill the old daemon** — `pgrep -lf "ray-exomem serve" | awk '{print $1}' | xargs -r kill`. Note: `ray-exomem stop` only finds daemons started via `ray-exomem daemon`; the dev-workflow `serve` invocation needs `kill` by PID.
@@ -36,7 +36,7 @@ The `server.build.identity` in `/api/status` is cached across rebuilds when `HEA
 
 - Storage model: tree of folders and exoms; facts, observations, beliefs, transactions, branches
 - Query model: Rayfall / Datalog
-- Runtime: Rust daemon + rayforce2 via FFI + embedded Svelte UI
+- Runtime: Rust daemon + rayforce via FFI + embedded Svelte UI
 
 ## Build and run
 
@@ -80,15 +80,14 @@ Gotchas:
 ## Important gotchas
 
 - Use `ln -f`, not `cp`, when deploying the binary on macOS. `com.apple.provenance` can make copied binaries hang silently.
-- If `rayforce2` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
+- If `rayforce` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
 - The Svelte 5 UI is embedded in the binary at build time.
 - `ray-exomem daemon` forks. Use `serve` if you want logs in the terminal.
 - The tree/session model is the only supported flow. Use `ray-exomem inspect`, `init`, `exom-new`, `session ...`, and `GET /api/tree` for discovery and setup.
 - In authenticated UI mode, mutation actor attribution should fall back to the logged-in email. Do not require a separate `ray-exomem-actor` localStorage value for basic writes.
 - JSONL auth replay must preserve `user.active` / `last_login` on repeated `user` entries. A naive replay that resets them on login makes deactivation appear to succeed in the UI while leaving the account effectively active.
-- The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These require rayforce2 master ≥ `dda2b98` (PR #7 merged: head-const projection + auto-registered env-bound EDBs). If the sibling `../rayforce2` checkout is on a commit older than `dda2b98`, bootstrap rule registration fails with unstratifiable-negation / missing-relation errors.
-- The runtime uses `ray_runtime_create_with_sym_err` so persisted user symbol IDs keep their slots across binary upgrades — builtins are appended afterwards, not interleaved. This is the correct design. **Caveat:** if a rayforce2 update changes the _shape_ of an existing builtin's interning (e.g. master commit `7db37e4` made `.sys.gc` a dotted sym backed by a `.sys` dict where it used to be a flat interned name), the old sym file's flat-interned `.sys.gc` slot will conflict with the new dotted registration path and queries fail with `RAY_ERROR code=domain` (empty msg — see the `__VM` shadowing bug below). Startup runs a canonical health probe (`engine_health_probe` in `src/server.rs`) to surface this loudly instead of failing silently at first query time. **Do not wipe `~/.ray-exomem/sym` as a reflex** — that strands every persisted RAY_SYM column on disk (fact ids, predicates, etc.) because splay tables encode sym IDs by slot. The forward path is either (a) file an upstream issue asking for a sym-compat contract across such refactors, or (b) implement the rewrite-on-startup migration spec'd in `archive/2026-04-24_sym-rewrite-migration/design.md`.
-- rayforce2 has duplicate `static _Thread_local ray_vm_t *__VM = NULL;` declarations in both `src/core/runtime.c` and `src/lang/eval.c` — they shadow each other instead of sharing storage. As a result, `ray_error_msg()` (which reads runtime.c's `__VM`) returns NULL on any thread that didn't call `ray_runtime_create`, including every tokio worker thread. The eval's RAY_ERROR object still carries the 8-byte ASCII code in `sdata` (read via `ray_err_code`, see `src/backend.rs::eval_raw`), so we get the label but lose the explanatory string. Worth filing upstream.
+- The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These rely on the eval-detail, runtime FFI, and DATOM typed-body fixes now merged in upstream `RayforceDB/rayforce`.
+- The runtime uses `ray_runtime_create_with_sym_err` so persisted user symbol IDs keep their slots across binary upgrades — builtins are appended afterwards, not interleaved. This is the correct design. **Caveat:** if a rayforce update changes the _shape_ of an existing builtin's interning (e.g. master commit `7db37e4` made `.sys.gc` a dotted sym backed by a `.sys` dict where it used to be a flat interned name), the old sym file's flat-interned `.sys.gc` slot will conflict with the new dotted registration path and queries fail with `RAY_ERROR code=domain` (empty msg). Startup runs a canonical health probe (`engine_health_probe` in `src/server.rs`) to surface this loudly instead of failing silently at first query time. **Do not wipe `~/.ray-exomem/sym` as a reflex** — that strands every persisted RAY_SYM column on disk (fact ids, predicates, etc.) because splay tables encode sym IDs by slot. The forward path is either (a) file an upstream issue asking for a sym-compat contract across such refactors, or (b) implement the rewrite-on-startup migration spec'd in `archive/2026-04-24_sym-rewrite-migration/design.md`.
 - Fact values are typed at the API/brain layer via `FactValue { I64 | Str | Sym }` (`src/fact_value.rs`). Splay emits parallel `facts_i64` / `facts_str` / `facts_sym` EDBs so Datalog rule bodies can run cmp/agg against numeric columns natively. Only typed asserts populate `facts_i64`. Bootstrap seeds numeric profile predicates (weight_kg, height_cm, age) as `FactValue::I64` — if a pre-typed-values exom still has them as `Str`, the derivation rules won't fire until those facts are re-asserted typed.
 
 ## Current agent-facing workflow

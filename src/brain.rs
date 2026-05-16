@@ -2,7 +2,7 @@
 //!
 //! All state is immutable and append-only. Every mutation is recorded as a
 //! transaction, enabling time-travel queries (`as_of`, `history`, `explain`).
-//! Persistence uses rayforce2 splayed columnar tables.
+//! Persistence uses rayforce splayed columnar tables.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -344,7 +344,7 @@ impl Brain {
             );
         }
 
-        // Rebuild splay cache for rayforce2
+        // Rebuild splay cache for rayforce
         self.save()?;
         Ok(())
     }
@@ -359,7 +359,7 @@ impl Brain {
         Ok(())
     }
 
-    /// Rebuild the splay table for rayforce2 query cache. Always called after mutations.
+    /// Rebuild the splay table for rayforce query cache. Always called after mutations.
     fn rebuild_splay(&self, table: DirtyTable) -> Result<()> {
         use crate::storage;
         let (data_dir, sym_path) = match (&self.data_dir, &self.sym_path) {
@@ -3325,7 +3325,7 @@ mod tests {
     #[test]
     fn persistence_round_trip() {
         let _guard = test_lock().lock().unwrap();
-        // Initialize rayforce2 runtime (needed for symbol table)
+        // Initialize rayforce runtime (needed for symbol table)
         let _engine = crate::RayforceEngine::new().unwrap();
 
         let dir = std::env::temp_dir().join(format!("brain-splay-{}", std::process::id()));
@@ -3692,7 +3692,7 @@ mod tests {
     //
     // The main datoms V column stays STR-tagged (see
     // `storage::encode_fact_value_datom`) to keep the column homogeneous and
-    // avoid rayforce2 faults on queries that scan mixed int + str values in
+    // avoid rayforce faults on queries that scan mixed int + str values in
     // the shared slot. Typed cmp over I64 facts is therefore wired through a
     // dedicated datoms table built just for this scenario — the same shape
     // that Phase B of the Datalog Aggregates plan will productionise via a

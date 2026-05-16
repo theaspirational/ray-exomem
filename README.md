@@ -14,7 +14,7 @@ folders and exoms; each exom is an isolated knowledge base with facts, rules,
 branches, observations, beliefs, and transactions.
 
 Rayfall parsing, Datalog evaluation, symbol interning, and columnar persistence
-come from [rayforce2](https://github.com/RayforceDB/rayforce2). This crate adds
+come from [rayforce](https://github.com/RayforceDB/rayforce). This crate adds
 the daemon, tree/session workflow, auth/access layer, API, UI, and agent-facing
 commands.
 
@@ -113,8 +113,8 @@ Representative layout after creating a project and a session:
                 exom.json
 ```
 
-Memory data (facts, transactions, observations, beliefs, or  
-branches) is stored in rayforce2 splay tables under each exom directory.  
+Memory data (facts, transactions, observations, beliefs, or
+branches) is stored in rayforce splay tables under each exom directory.
 Auth state is separate: JSONL by default, or Postgres when configured.
 
 ## Build
@@ -139,9 +139,9 @@ inherit `com.apple.provenance` metadata and hang silently.
 ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
 ```
 
-`build.rs` also builds the Svelte UI and rayforce2 C library. It uses
-`RAYFORCE2_DIR` when set, otherwise it looks for a sibling `../rayforce2`, and
-falls back to fetching rayforce2 master.
+`build.rs` also builds the Svelte UI and rayforce C library. It uses
+`RAYFORCE_DIR` when set, otherwise it looks for a sibling `../rayforce`, and
+falls back to fetching upstream `RayforceDB/rayforce` `master`.
 
 The server base path is baked at compile time.
 
@@ -379,7 +379,7 @@ Auth persistence:
 - Without `--database-url`, auth state lives in `_system/auth/auth.jsonl`.
 - With `--database-url`, users, sessions, API keys, domains, and shares use
 Postgres.
-- Exom memory data always lives in local rayforce2 splay tables.
+- Exom memory data always lives in local rayforce splay tables.
 
 Share grants on private `{email}/...` paths are managed via `POST /auth/shares`
 (`{ path, grantee_email, permission: "read" | "read-write" }`). Shares are
@@ -477,7 +477,7 @@ cargo test
 cd ui && npm run check && npm run build
 ```
 
-For server, storage, auth, backend, or rayforce2 FFI changes, unit tests are not
+For server, storage, auth, backend, or rayforce FFI changes, unit tests are not
 enough. Follow the live daemon rebuild/redeploy loop in `CLAUDE.md` and exercise
 the change against the running daemon.
 
@@ -498,7 +498,7 @@ Useful source files:
 ## Operational Notes
 
 - The project is Rayfall-native. Legacy `.dl` / Teide inputs are rejected.
-- If `rayforce2` changed and behavior looks stale, run
+- If `rayforce` changed and behavior looks stale, run
 `cargo clean && cargo build --release --bin ray-exomem`.
 - The embedded UI is built into the binary at compile time.
 - `ray-exomem daemon` forks and redirects output. Use `serve` when you need logs
@@ -506,4 +506,4 @@ in the terminal.
 - The symbol table is part of persistent identity. Do not wipe `~/.ray-exomem/sym`
 reflexively; persisted splay rows encode symbol IDs by slot.
 - Startup runs a sym rewrite compatibility pass and an engine health probe over
-loaded exoms to surface rayforce2 symbol-layout problems early.
+loaded exoms to surface rayforce symbol-layout problems early.

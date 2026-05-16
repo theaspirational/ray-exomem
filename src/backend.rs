@@ -15,7 +15,7 @@ impl RayforceEngine {
     pub fn new() -> Result<Self> {
         let runtime = unsafe { ffi::ray_runtime_create(0, std::ptr::null_mut()) };
         if runtime.is_null() {
-            return Err(anyhow!("rayforce2 runtime initialization failed"));
+            return Err(anyhow!("rayforce runtime initialization failed"));
         }
 
         unsafe {
@@ -38,7 +38,7 @@ impl RayforceEngine {
         let runtime =
             unsafe { ffi::ray_runtime_create_with_sym_err(c_sym.as_ptr(), &mut sym_err as *mut _) };
         if runtime.is_null() {
-            return Err(anyhow!("rayforce2 runtime initialization failed"));
+            return Err(anyhow!("rayforce runtime initialization failed"));
         }
 
         unsafe {
@@ -84,7 +84,7 @@ impl RayforceEngine {
                     CStr::from_ptr(msg_ptr).to_string_lossy().into_owned()
                 };
                 ffi::ray_release(raw);
-                return Err(anyhow!("rayforce2 err {}: {}", label, msg));
+                return Err(anyhow!("rayforce err {}: {}", label, msg));
             }
 
             let err_msg = ffi::ray_error_msg();

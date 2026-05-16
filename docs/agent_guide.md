@@ -439,7 +439,7 @@ builtin views instead.
 
 **Pin literals in the body atom, not in a separate `(= ?var "lit")`
 clause.** Rayfall's `where` does not accept assignment-style equality forms:
-`(where (?tx 'tx/action ?act) (= ?act "retract-fact"))` returns `rayforce2
+`(where (?tx 'tx/action ?act) (= ?act "retract-fact"))` returns `rayforce
 err type: rule: cannot parse assignment expression`. Bind the literal
 directly inside the body atom instead — `(where (?tx 'tx/action
 "retract-fact"))`.
@@ -450,7 +450,7 @@ directly inside the body atom instead — `(where (?tx 'tx/action
 head-param→attribute map and tags the literal at the call site (so
 `"service/sla_p99_ms"` becomes `'service/sla_p99_ms` for the sym-encoded
 `fact/predicate` slot before the engine evaluates the rule). String-valued
-slots (`tx/action`, `tx/branch`) are matched by rayforce2's tag-aware
+slots (`tx/action`, `tx/branch`) are matched by rayforce's tag-aware
 compare without rewriting. Both the rule-call form and the direct EAV form
 `(?id 'fact/predicate "service/sla_p99_ms")` work — pick whichever reads
 more naturally.
@@ -649,10 +649,10 @@ audits, not for incremental sync.
 | `unknown_branch: unknown branch '<name>'` | Passed `branch:` arg that doesn't exist or is archived on the target exom | `list_branches` to enumerate; create with `create_branch` if you meant to. |
 | `query missing database name` | Sent `(query (find ...) ...)` with no exom path inside the form | Add the exom path: `(query <exom> (find ...) (where ...))`. |
 | `rule '<name>' expects N args, got M` | Server-side arity check rejected a body atom before evaluation | Look up the right arity in `schema.builtin_views` (`fact-row` is 3, `tx-row` is 8, typed EDBs are 3). |
-| `rayforce2 err type: rule: cannot parse assignment expression` | Used `(= ?var "lit")` in a `where` clause — Rayfall doesn't accept assignment-style equality | Pin the literal directly into the body atom: `(?tx 'tx/action "retract-fact")` instead of `(?tx 'tx/action ?act) (= ?act "retract-fact")`. |
+| `rayforce err type: rule: cannot parse assignment expression` | Used `(= ?var "lit")` in a `where` clause — Rayfall doesn't accept assignment-style equality | Pin the literal directly into the body atom: `(?tx 'tx/action "retract-fact")` instead of `(?tx 'tx/action ?act) (= ?act "retract-fact")`. |
 | `dl_project: unset head-const type` | A variable in `find` is pinned to a constant in the body (or otherwise never bound to a column) | Drop the unbound var from `find`, or rewrite the body atom with a real binding. |
 | `unknown relation '<name>' in query body` | Body atom referenced something that isn't a typed EDB, builtin view, or user rule head | The error suggests the closest match. Use `schema.builtin_views` to enumerate. |
-| `rayforce2 err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce2 upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
+| `rayforce err domain: query: evaluation failed` | Engine rejected the query at runtime. Often a sym-shape incompatibility after a rayforce upgrade. | If it's reproducible across exoms, fall back to `explain`/`fact_history` and surface the issue to a human. |
 | `missing required parameter: <name>` | MCP arg validation | Add the missing field. |
 | `invalid 'predicate': must be non-empty` | Predicate name is empty / whitespace / contains quotes | Use a `<namespace>/<name>` form with no whitespace or quotes. |
 | `invalid 'value'` | `value` JSON couldn't deserialize as a `FactValue` | Send a JSON number, string, or `{"$sym": "..."}`. Anything else (arrays, nested objects without `$sym`) is rejected. |

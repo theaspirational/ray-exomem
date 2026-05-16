@@ -15,7 +15,7 @@
 //!
 //! ## Splay encoding
 //!
-//! The rayforce2 splay tables speak tagged int64 datoms:
+//! The rayforce splay tables speak tagged int64 datoms:
 //!   * I64 → the raw i64 (no tag bits; bit 63 reserved for negatives)
 //!   * Sym → `encode_sym(intern)` (bits 63-62 = 01)
 //!   * Str → `encode_str(intern)` (bits 63-62 = 10)

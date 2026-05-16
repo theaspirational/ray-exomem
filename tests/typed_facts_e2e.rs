@@ -1,6 +1,6 @@
 //! End-to-end test for per-type splay sub-tables (T2).
 //!
-//! Walks a full Brain -> typed fact tables -> rayforce2 env binding ->
+//! Walks a full Brain -> typed fact tables -> rayforce env binding ->
 //! rule-backed query -> result table. This is the acceptance gate for
 //! declarative health-band derivations: the onboarding rules use
 //! `(facts_i64 ?id 'predicate ?v) (< ?v 60)` style clauses, which only
@@ -9,7 +9,7 @@
 //!
 //! The tests intentionally use variable-head rules only. Rule heads
 //! that carry bare constants (`(health/water-band 'medium)`) currently
-//! trip an upstream rayforce2 issue in `dl_project` — see the FIXME
+//! trip an upstream rayforce issue in `dl_project` — see the FIXME
 //! note in `src/auth/routes.rs::health_bootstrap_rules` for the exact
 //! restriction.
 //!
@@ -30,7 +30,7 @@ fn test_lock() -> &'static std::sync::Mutex<()> {
 }
 
 /// Build the water-band ruleset using variable-head rules joined against
-/// a seeded `water_band_codes` EDB. This sidesteps rayforce2's constant-
+/// a seeded `water_band_codes` EDB. This sidesteps rayforce's constant-
 /// head evaluation path.
 fn water_band_rules(exom: &str) -> Vec<String> {
     vec![
@@ -89,7 +89,7 @@ fn build_water_band_codes_table() -> storage::RayObj {
     }
 }
 
-/// Seed typed numeric profile facts and run a query via the rayforce2
+/// Seed typed numeric profile facts and run a query via the rayforce
 /// engine, with `facts_i64` and `water_band_codes` bound under the env
 /// names the auto-EDB hook expects.
 fn query_first_col(
@@ -212,7 +212,7 @@ fn facts_i64_scanned_as_edb_by_rule_body() {
     // Sanity: a rule body atom `(facts_i64 ?e 'attr ?v)` resolves against
     // the auto-registered facts_i64 EDB and the stored i64 value flows
     // through to the bound variable ?v for downstream cmp. Variable-head
-    // rule sidesteps the rayforce2 constant-head issue.
+    // rule sidesteps the rayforce constant-head issue.
     let exom = "dbg/main";
     let profile = &[("w1", "profile/weight_kg", FactValue::I64(55))];
     let rules = vec![format!(
@@ -297,12 +297,12 @@ fn water_band_large_for_heavy_profile() {
 }
 
 // ---------------------------------------------------------------------------
-// Plan-shape rule set (B2 + B3) — exercised end-to-end. rayforce2 ships
+// Plan-shape rule set (B2 + B3) — exercised end-to-end. rayforce ships
 // constant-head rule support (commit 862846e on feature/datalog-aggregates)
 // but a stratifiable version of B2 replaces the plan's `(not ...)` clauses
 // with their positive-body equivalents, because a `medium` rule that negates
 // the same predicate it writes to (`health/water-band`) is not
-// stratification-safe under rayforce2's current semi-naive evaluator. The
+// stratification-safe under rayforce's current semi-naive evaluator. The
 // positive-body encoding is semantically identical: the complement of
 // (w<60 AND h<170) is (w>=60 OR h>=170), and the complement of
 // (w>=85 OR h>=185) is (w<85 AND h<185). See `health_bootstrap_rules`
@@ -310,7 +310,7 @@ fn water_band_large_for_heavy_profile() {
 // ---------------------------------------------------------------------------
 
 fn plan_verbatim_health_rules(exom: &str) -> Vec<String> {
-    // CRITICAL: rule ORDER matters. rayforce2's IDB column-type alignment
+    // CRITICAL: rule ORDER matters. rayforce's IDB column-type alignment
     // pins types to the first rule that declares them. A rec rule whose
     // body references `(health/step-band "medium")` must NOT be declared
     // before the step-band derivation rules — otherwise an IDB for
@@ -334,7 +334,7 @@ fn plan_verbatim_health_rules(exom: &str) -> Vec<String> {
         // water-band = medium  :-  (w >= 60) AND (w < 85) AND (h < 185)
         // (Positive-body encoding of "not small AND not large" that the
         // plan writes with `(not ...)` clauses. A literal negation over
-        // the same predicate is not stratification-safe in rayforce2.)
+        // the same predicate is not stratification-safe in rayforce.)
         format!(
             r#"(rule {exom} (health/water-band "medium") (facts_i64 ?w_id 'profile/weight_kg ?w) (facts_i64 ?h_id 'profile/height_cm ?h) (>= ?w 60) (< ?w 85) (< ?h 185))"#
         ),
@@ -579,9 +579,9 @@ fn plan_verbatim_recommended_steps_default() {
 // ---------------------------------------------------------------------------
 // B7 regression: pinning a string literal in a body atom value position must
 // match a DATOM-encoded i64 column. ray-exomem stores str values in the V
-// column as `(0x4000... | sym_id)`; rayforce2 used to intern body string
+// column as `(0x4000... | sym_id)`; rayforce used to intern body string
 // literals as plain sym ids, so the equality compare missed every row. The
-// rayforce2-side fix tracks the body literal's source ray type and lets
+// rayforce-side fix tracks the body literal's source ray type and lets
 // dl_col_eq_row do a tag-aware payload compare against DATOM-tagged I64
 // columns. Plain RAY_SYM IDB columns (built from rule heads with string
 // constants) keep matching too — the fix is additive: the direct compare

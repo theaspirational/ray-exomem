@@ -9,7 +9,7 @@ pub enum GuideTopic {
     /// Full guide (all sections).
     #[default]
     All,
-    /// What ray-exomem is and how it relates to rayforce2.
+    /// What ray-exomem is and how it relates to rayforce.
     Overview,
     /// Daemon vs foreground, data directory, PID file.
     Workflow,
@@ -25,8 +25,8 @@ pub enum GuideTopic {
 
 const OVERVIEW: &str = r#"OVERVIEW
 --------
-ray-exomem is a thin front-end around native rayforce2: Rayfall parsing, evaluation,
-Datalog, and storage live in rayforce2. This binary adds:
+ray-exomem is a thin front-end around native rayforce: Rayfall parsing, evaluation,
+Datalog, and storage live in rayforce. This binary adds:
   • CLI for scripting and agents (many commands talk to the daemon over HTTP).
   • Web UI + JSON/HTTP API when `ray-exomem daemon` is running (recommended entry point).
   • Multi-exom layout on disk under the data directory (default ~/.ray-exomem).
@@ -63,7 +63,7 @@ const CLI: &str = r#"CLI REFERENCE
 Global: ray-exomem <command> [options]. Use `ray-exomem <command> --help` for flags.
 Global flag: --json (machine-readable stdout; several commands also default to JSON when stdout is not a TTY).
 
-run | load <file>     Run a .ray file via local rayforce2 (no daemon, no shared state).
+run | load <file>     Run a .ray file via local rayforce (no daemon, no shared state).
 eval <source>         POST Rayfall text to /api/actions/eval on the daemon. Prints JSON
                       field "output" on success. Requires daemon.
                       Example: ray-exomem eval '(+ 1 2)'
@@ -142,10 +142,10 @@ branch <subcommand>   List, create from an explicit parent, diff, merge into an 
                       and --json are accepted before or after the subcommand.
                       eval/assert/retract/observe/import accept --branch for per-operation views.
 
-version               Binary + rayforce2 version string plus build identity.
+version               Binary + rayforce version string plus build identity.
 
 brain-demo            Print the built-in Brain layer demo (time-travel sample); separate
-                      from daemon Brain + rayforce2 integration details.
+                      from daemon Brain + rayforce integration details.
 
 guide [--topic …]     Print this reference (section or full)."#;
 
@@ -206,8 +206,8 @@ Built-in derived views:
 
 const ENV: &str = r#"ENVIRONMENT
 -----------
-RAYFORCE2_DIR       If set, build.rs uses this path to find the rayforce2 native library
-                    and headers. Otherwise ../rayforce2 relative to this crate.
+RAYFORCE_DIR        If set, build.rs uses this path to find the rayforce native library
+                    and headers. Otherwise ../rayforce relative to this crate.
 
 UI (browser) may use PUBLIC_TEIDE_EXOMEM_BASE_URL to point API calls at a different
 origin; when unset and the UI is served from the daemon, it uses the page origin
@@ -218,7 +218,7 @@ const LIMITATIONS: &str = r#"LIMITATIONS (read before production use)
  • Some higher-level memory concepts still live in Rust-side structures; the intended public
    interface remains Rayfall queries and mutations plus the existing structured bitemporal helpers.
  • observe is currently a thin CLI convenience that emits a simple asserted fact.
- • import/eval: very large or complex Rayfall should be validated against rayforce2
+ • import/eval: very large or complex Rayfall should be validated against rayforce
    capabilities; there is no separate Teide layer.
  • Raw eval "output" is still the engine formatter; use query --json when you need decoded rows.
  • Metadata now lives in the same datom space as base facts via system predicates. That keeps the
@@ -274,7 +274,7 @@ mod tests {
         for needle in [
             "ray-exomem daemon",
             "/api/status",
-            "RAYFORCE2_DIR",
+            "RAYFORCE_DIR",
             "LIMITATIONS",
             "eval ",
             "POST /api/actions/eval",

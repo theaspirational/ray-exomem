@@ -2,7 +2,7 @@
 //!
 //! Builds a fresh data dir, writes some facts, saves sym + splays.
 //! Then synthetically rewrites the sym file on disk to shift user
-//! sym IDs — simulating what a rayforce2 builtin-shape refactor would
+//! sym IDs — simulating what a rayforce builtin-shape refactor would
 //! look like to a downstream binary. Finally, run_sym_rewrite should
 //! detect the shift, remap the splay RAY_SYM + datom-tagged columns
 //! through the shift, and queries against the remapped splays should

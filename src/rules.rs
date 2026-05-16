@@ -98,7 +98,7 @@ pub fn parse_rule_head(inline_body: &str) -> Result<(String, usize)> {
     // Arity is the count of positional args AFTER the predicate.  The old
     // implementation counted `?` chars, which undercounts rule heads whose
     // slots are typed literal constants (e.g. `(health/water-band "small")`).
-    // rayforce2 accepts both `?var` and `<const>` in head positions, so the
+    // rayforce accepts both `?var` and `<const>` in head positions, so the
     // rule's arity reflects the number of whitespace-separated tokens,
     // minus the predicate itself.  Quoted strings containing spaces are not
     // supported by this helper — rule bodies that need them should escape

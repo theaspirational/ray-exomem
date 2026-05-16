@@ -14,7 +14,7 @@ is "the textbook way" and the right column is "what actually runs here."
 | **Predicate names** | First-class **attributes** in the schema (`:user/name`) | **Values** inside the EAV store. Project them through `fact-row` to query. |
 | **Schema** | Declared up front (`db.install/attribute`) | Open — assert any predicate, the schema reports what's been seen. System attributes are pre-defined. |
 | **Branches** | Not a thing | Lightweight copy-on-write namespaces with TOFU ownership |
-| **Engine** | Proprietary, JVM | [rayforce2](https://github.com/RayforceDB/rayforce2) (C, Datalog-on-columnar) |
+| **Engine** | Proprietary, JVM | [rayforce](https://github.com/RayforceDB/rayforce) (C, Datalog-on-columnar) |
 | **Surface** | Peer / Client API, EDN, `[?e :a ?v]` body atoms | MCP / HTTP, Rayfall sexpr, `(rel ?args)` body atoms |
 
 ---
@@ -260,7 +260,7 @@ agents without a central lock.
 ### 6. "Negation"
 
 Datomic has `not` and `not-join`. ray-exomem has the same logical `not`
-in the body, with the rayforce2 stratifier checking for unstratifiable
+in the body, with the rayforce stratifier checking for unstratifiable
 cycles before evaluation.
 
 <table>
@@ -299,7 +299,7 @@ head (e.g. `r(x) :- not r(x)`), ray-exomem returns
 
 ## When ray-exomem is the wrong fit
 
-- **You need OLAP-grade joins on billions of rows.** rayforce2 is fast for
+- **You need OLAP-grade joins on billions of rows.** rayforce is fast for
   knowledge-base loads, not warehouse loads. Push to a real data warehouse.
 - **You need ACID across a remote cluster.** ray-exomem is a single-node
   daemon today; there's no replication or distributed consensus.
@@ -317,5 +317,5 @@ EAV+bitemporal+branches model lands the right tradeoffs.
 - [`agent_guide.md`](./agent_guide.md) — MCP tool reference for agents.
 - The bootstrap `getting-started/main` exom — assertions of these
   examples that you can `query` and inspect live.
-- [`rayforce2`](https://github.com/RayforceDB/rayforce2) — the Datalog
+- [`rayforce`](https://github.com/RayforceDB/rayforce) — the Datalog
   engine underneath.

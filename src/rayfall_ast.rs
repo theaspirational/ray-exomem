@@ -95,7 +95,7 @@ impl CanonicalQuery {
 
     /// Pin body-atom string literals to sym tags when the schema demands it.
     ///
-    /// rayforce2's column-aware compare matches body literals against typed
+    /// rayforce's column-aware compare matches body literals against typed
     /// columns by tag. Predicate names and entity refs are stored as
     /// SYM-tagged datoms, but the surface syntax `(?e 'fact/predicate "p")`
     /// emits the value as a STR-tagged datom — tag mismatch → 0 rows. For
@@ -112,7 +112,7 @@ impl CanonicalQuery {
     /// Like `rewrite_body_literals_with_schema`, but also rewrites literal
     /// args of rule-call body atoms.
     ///
-    /// Rule expansion happens server-side in rayforce2, so a literal in a
+    /// Rule expansion happens server-side in rayforce, so a literal in a
     /// rule-call slot — e.g. `"test/n"` in `(fact-row ?id "test/n" ?v)` —
     /// only lands in the inlined `(?fact 'fact/predicate "test/n")` AFTER
     /// the query string leaves Rust. Rewriting at expansion-time on our

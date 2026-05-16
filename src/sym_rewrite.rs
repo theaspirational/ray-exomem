@@ -173,7 +173,7 @@ fn marker_path(sym_path: &Path) -> PathBuf {
     parent.join(MARKER_NAME)
 }
 
-/// Parse a rayforce2 sym file (`STRL` magic + u64 count + per-entry
+/// Parse a rayforce sym file (`STRL` magic + u64 count + per-entry
 /// `u32 len + len bytes`). Returns strings in disk-position order, so
 /// `strings[i]` was sym ID `i` when the file was written.
 fn parse_sym_file(path: &Path) -> Result<Vec<String>> {
@@ -446,7 +446,7 @@ unsafe fn vector_len(v: *mut ffi::ray_t) -> i64 {
 }
 
 /// Build a fresh RAY_SYM column with every slot's sym ID remapped.
-/// Width (W8/W16/W32/i64) is re-chosen by rayforce2 internally as
+/// Width (W8/W16/W32/i64) is re-chosen by rayforce internally as
 /// `ray_vec_append` may widen when a new id exceeds the current cap.
 fn rebuild_sym_column(
     old: *mut ffi::ray_t,

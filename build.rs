@@ -126,58 +126,56 @@ fn main() {
     );
 
     // -----------------------------------------------------------------------
-    // 2. Locate or clone rayforce2
+    // 2. Locate or clone rayforce
     // -----------------------------------------------------------------------
-    let rayforce2_dir = env::var("RAYFORCE2_DIR")
+    let rayforce_dir = env::var("RAYFORCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let sibling = manifest_dir.join("../rayforce2");
+            let sibling = manifest_dir.join("../rayforce");
             if sibling.join("Makefile").exists() {
                 return sibling;
             }
 
             // Auto-clone into OUT_DIR for cargo install
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-            let cloned = out_dir.join("rayforce2");
-            // Tracking the fork branch fix/eval-error-detail (over master)
-            // for the eval-error-detail surfacing fixes; PR upstream pending.
-            const RAYFORCE2_REPO: &str = "https://github.com/theaspirational/rayforce2.git";
-            const RAYFORCE2_REF: &str = "fix/eval-error-detail";
+            let cloned = out_dir.join("rayforce");
+            const RAYFORCE_REPO: &str = "https://github.com/RayforceDB/rayforce.git";
+            const RAYFORCE_REF: &str = "master";
             if !cloned.join("Makefile").exists() {
-                eprintln!("[build.rs] fetching rayforce2 {RAYFORCE2_REF}...");
+                eprintln!("[build.rs] fetching rayforce {RAYFORCE_REF}...");
                 let _ = std::fs::remove_dir_all(&cloned);
-                std::fs::create_dir_all(&cloned).expect("failed to create rayforce2 clone dir");
-                run("git", &["init"], &cloned, "rayforce2 init");
+                std::fs::create_dir_all(&cloned).expect("failed to create rayforce clone dir");
+                run("git", &["init"], &cloned, "rayforce init");
                 run(
                     "git",
-                    &["remote", "add", "origin", RAYFORCE2_REPO],
+                    &["remote", "add", "origin", RAYFORCE_REPO],
                     &cloned,
-                    "rayforce2 remote add",
+                    "rayforce remote add",
                 );
                 let fetch_status = Command::new("git")
-                    .args(["fetch", "--depth", "1", "origin", RAYFORCE2_REF])
+                    .args(["fetch", "--depth", "1", "origin", RAYFORCE_REF])
                     .current_dir(&cloned)
                     .status()
                     .expect("failed to run git fetch — is git installed?");
                 if !fetch_status.success() {
                     panic!(
-                        "rayforce2 not found at ../rayforce2 and fetching {RAYFORCE2_REPO} {RAYFORCE2_REF} failed.\n\
+                        "rayforce not found at ../rayforce and fetching {RAYFORCE_REPO} {RAYFORCE_REF} failed.\n\
                          Either:\n  \
-                         - Check out rayforce2 alongside this repo on the same ref, or\n  \
-                         - Set RAYFORCE2_DIR=/path/to/rayforce2"
+                         - Check out RayforceDB/rayforce alongside this repo on the same ref, or\n  \
+                         - Set RAYFORCE_DIR=/path/to/rayforce"
                     );
                 }
                 run(
                     "git",
                     &["checkout", "--detach", "FETCH_HEAD"],
                     &cloned,
-                    "rayforce2 checkout",
+                    "rayforce checkout",
                 );
             }
             cloned
         });
 
-    println!("cargo:rerun-if-env-changed=RAYFORCE2_DIR");
+    println!("cargo:rerun-if-env-changed=RAYFORCE_DIR");
     for path in &[
         "Makefile",
         "include/rayforce.h",
@@ -193,16 +191,16 @@ fn main() {
     ] {
         println!(
             "cargo:rerun-if-changed={}",
-            rayforce2_dir.join(path).display()
+            rayforce_dir.join(path).display()
         );
     }
 
     // -----------------------------------------------------------------------
-    // 3. Build rayforce2 C library
+    // 3. Build rayforce C library
     // -----------------------------------------------------------------------
-    run("make", &["lib"], &rayforce2_dir, "rayforce2 build");
+    run("make", &["lib"], &rayforce_dir, "rayforce build");
 
-    println!("cargo:rustc-link-search=native={}", rayforce2_dir.display());
+    println!("cargo:rustc-link-search=native={}", rayforce_dir.display());
     println!("cargo:rustc-link-lib=static=rayforce");
     println!("cargo:rustc-link-lib=m");
     println!("cargo:rustc-link-lib=pthread");
