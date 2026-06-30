@@ -263,7 +263,10 @@ fn tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "exom": { "type": "string", "description": "Exom name (slash or :: form)." },
                     "predicate": { "type": "string", "description": "Fact predicate, e.g. `entity/name`." },
-                    "value": { "description": "Typed value. JSON number → I64, JSON string → Str, `{\"$sym\": \"...\"}` → Sym." },
+                    "value": {
+                        "type": ["number", "integer", "string", "object"],
+                        "description": "Typed value. JSON number → I64, JSON string → Str, `{\"$sym\": \"...\"}` → Sym. Arrays are rejected."
+                    },
                     "fact_id": { "type": "string", "description": "Stable fact id; defaults to the predicate. Use `<entity>#<property>` for multi-instance entities." },
                     "confidence": { "type": "number", "description": "0.0..1.0; defaults to 1.0." },
                     "source": { "type": "string", "description": "Provenance tag (where this fact came from). Defaults to 'mcp'." },
@@ -805,10 +808,12 @@ fn precheck_write_mcp(
         return Ok(());
     };
     let exom_path: crate::path::TreePath =
-        exom_slash.parse().map_err(|e: crate::path::PathError| JsonRpcError {
-            code: -32602,
-            message: format!("bad_exom_path: {e}"),
-        })?;
+        exom_slash
+            .parse()
+            .map_err(|e: crate::path::PathError| JsonRpcError {
+                code: -32602,
+                message: format!("bad_exom_path: {e}"),
+            })?;
     let user_email = ctx.user_email.as_deref().unwrap_or("");
     crate::brain::precheck_write(
         tree_root,
@@ -925,20 +930,27 @@ async fn tool_assert_fact(
         .get("value")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let value =
-        match &value_raw {
-            serde_json::Value::Null => {
-                return Err(JsonRpcError {
-                    code: -32602,
-                    message: "missing required argument 'value'".into(),
-                });
-            }
-            other => serde_json::from_value::<crate::fact_value::FactValue>(other.clone())
-                .map_err(|e| JsonRpcError {
-                    code: -32602,
-                    message: format!("invalid 'value': {e}"),
-                })?,
-        };
+    if matches!(value_raw, serde_json::Value::Null) {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "missing required argument 'value'".into(),
+        });
+    }
+    // Recover structured types from wrappers that JSON-stringify objects/arrays
+    // before transport. Restrict to inputs whose first byte unambiguously
+    // signals JSON structure so a plain string like "75" stays Str("75").
+    let parsed = match &value_raw {
+        serde_json::Value::String(s) if s.starts_with('{') || s.starts_with('[') => {
+            serde_json::from_str::<serde_json::Value>(s).unwrap_or_else(|_| value_raw.clone())
+        }
+        _ => value_raw.clone(),
+    };
+    let value = serde_json::from_value::<crate::fact_value::FactValue>(parsed).map_err(|e| {
+        JsonRpcError {
+            code: -32602,
+            message: format!("invalid 'value': {e}"),
+        }
+    })?;
     let fact_id = get_str(args, "fact_id").unwrap_or(&predicate).to_string();
 
     let confidence = args
@@ -954,6 +966,19 @@ async fn tool_assert_fact(
 
     precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
+    // Phase D: gate every MCP write through ray-transactor.
+    let cmd = crate::commands::build_fact_assert(&exom_slash, &branch, &fact_id, &predicate);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.assert_fact(
             &branch,
@@ -968,6 +993,12 @@ async fn tool_assert_fact(
         )
     })
     .await;
+
+    // Phase E: drain matched invalidations onto the SSE broadcast transport.
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(tx_id) => {
@@ -1028,10 +1059,27 @@ async fn tool_retract_fact(
 
     precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
+    let cmd = crate::commands::build_fact_retract(&exom_slash, &branch, &fact_id);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.retract_fact(&branch, &fact_id, &ctx)
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(tx_id) => Ok(serde_json::json!({
@@ -1078,6 +1126,18 @@ async fn tool_observe(
 
     precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
+    let cmd = crate::commands::build_observation_assert(&exom_slash, &branch, &obs_id);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.assert_observation(
             &branch,
@@ -1093,6 +1153,11 @@ async fn tool_observe(
         )
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(tx_id) => Ok(serde_json::json!({
@@ -1140,6 +1205,18 @@ async fn tool_believe(
 
     precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
+    let cmd = crate::commands::build_belief_revise(&exom_slash, &branch, &belief_id);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.revise_belief(
             &branch,
@@ -1154,6 +1231,11 @@ async fn tool_believe(
         )
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(tx_id) => Ok(serde_json::json!({
@@ -1182,10 +1264,27 @@ async fn tool_revoke_belief(
 
     precheck_write_mcp(state, &exom_slash, &branch, &ctx)?;
 
+    let cmd = crate::commands::build_belief_revoke(&exom_slash, &branch, &belief_id);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain.revoke_belief(&branch, &belief_id, &ctx)
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(tx_id) => Ok(serde_json::json!({
@@ -1236,11 +1335,12 @@ fn tool_eval(state: &AppState, args: &serde_json::Value) -> Result<String, JsonR
         let target_branch = branch_arg(args);
         let mut exoms = state.exoms.lock().unwrap();
         let _ = load_exom(state, &mut exoms, &exom_slash)?;
-        crate::server::rebind_datoms_only(state, &mut exoms, &exom_slash, &target_branch)
-            .map_err(|e| JsonRpcError {
+        crate::server::rebind_datoms_only(state, &mut exoms, &exom_slash, &target_branch).map_err(
+            |e| JsonRpcError {
                 code: -32000,
                 message: format!("rebind failed: {e}"),
-            })?;
+            },
+        )?;
         crate::server::bind_typed_facts_for_exom(&state.engine, &exoms, &exom_slash).map_err(
             |e| JsonRpcError {
                 code: -32000,
@@ -1366,11 +1466,28 @@ async fn tool_create_branch(
 
     let ctx = mcp_mutation_ctx(user, args);
 
+    let cmd = crate::commands::build_branch_create(&exom_slash, branch_name, &parent_branch);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, |es| {
         es.brain
             .create_branch(&parent_branch, branch_name, branch_name, &ctx)
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(branch_id) => Ok(serde_json::json!({
@@ -2137,7 +2254,10 @@ async fn tool_merge_branch(
     let exom_slash = exom_slug(args);
     let source_branch = require_str(args, "branch")?.to_string();
     let target_branch = require_str(args, "target_branch")?.to_string();
-    let policy = match get_str(args, "policy").unwrap_or("last-writer-wins") {
+    let policy_str = get_str(args, "policy")
+        .unwrap_or("last-writer-wins")
+        .to_string();
+    let policy = match policy_str.as_str() {
         "last-writer-wins" => crate::brain::MergePolicy::LastWriterWins,
         "keep-target" => crate::brain::MergePolicy::KeepTarget,
         "manual" => crate::brain::MergePolicy::Manual,
@@ -2167,11 +2287,33 @@ async fn tool_merge_branch(
 
     let ctx = mcp_mutation_ctx(user, args);
 
+    let cmd = crate::commands::build_branch_merge(
+        &exom_slash,
+        &source_branch,
+        &target_branch,
+        &policy_str,
+    );
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
         es.brain
             .merge_branch(&source_branch, &target_branch, policy, &ctx)
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(merge_result) => Ok(serde_json::json!({
@@ -2217,12 +2359,29 @@ async fn tool_archive_branch(
         }
     }
 
+    let cmd = crate::commands::build_branch_archive(&exom_slash, &branch);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_slash,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     let bid = branch.clone();
     let result = crate::server::mutate_exom_async(state, &exom_slash, move |es| {
         es.brain.archive_branch(&bid)?;
         Ok(())
     })
     .await;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     match result {
         Ok(()) => Ok(serde_json::json!({
@@ -2313,9 +2472,7 @@ fn parse_acl_mode_arg(
         .map(Some)
         .map_err(|e| JsonRpcError {
             code: -32602,
-            message: format!(
-                "invalid '{key}' (expected \"solo-edit\" or \"co-edit\"): {e}"
-            ),
+            message: format!("invalid '{key}' (expected \"solo-edit\" or \"co-edit\"): {e}"),
         })
 }
 
@@ -2436,30 +2593,19 @@ async fn tool_rename(
         }
     }
 
-    let new_path = crate::tree::rename_last_segment(tree_root, &path, &new_segment).map_err(
-        |e| JsonRpcError {
-            code: -32000,
-            message: format!("rename_failed: {e}"),
-        },
-    )?;
+    let new_path =
+        crate::tree::rename_last_segment(tree_root, &path, &new_segment).map_err(|e| {
+            JsonRpcError {
+                code: -32000,
+                message: format!("rename_failed: {e}"),
+            }
+        })?;
     let new_slash = new_path.to_slash_string();
 
-    // Evict every in-memory ExomState whose key starts with the old slash;
-    // their disk paths just moved out from under them. Reconcile so the
-    // engine drops the stale named-db bindings.
-    let removed: Vec<String> = {
-        let mut exoms = state.exoms.lock().unwrap();
-        let stale_keys: Vec<String> = exoms
-            .keys()
-            .filter(|k| k.as_str() == path_slash || k.starts_with(&format!("{}/", path_slash)))
-            .cloned()
-            .collect();
-        for k in &stale_keys {
-            exoms.remove(k);
-        }
-        crate::server::reconcile_engine(state, &exoms);
-        stale_keys
-    };
+    let path_prefix = format!("{}/", path_slash);
+    let removed = crate::server::evict_cached_exoms_where(state, |key| {
+        key == path_slash || key.starts_with(&path_prefix)
+    });
 
     if let Some(ref auth_store) = state.auth_store {
         auth_store.update_share_paths(&path_slash, &new_slash).await;
@@ -2522,36 +2668,21 @@ async fn tool_delete(
         message: "daemon has no tree_root configured".into(),
     })?;
 
-    let exoms_under = crate::scaffold::collect_exoms_under(tree_root, &path).map_err(|e| {
-        JsonRpcError {
+    let exoms_under =
+        crate::scaffold::collect_exoms_under(tree_root, &path).map_err(|e| JsonRpcError {
             code: -32000,
             message: e.to_string(),
-        }
-    })?;
+        })?;
 
-    // Drop in-memory ExomState entries; reconcile only after the disk
-    // delete so the engine ends up consistent with the in-memory map.
-    {
-        let mut exoms = state.exoms.lock().unwrap();
-        for slash in &exoms_under {
-            exoms.remove(slash);
-        }
-    }
+    let _evicted = crate::server::evict_cached_exoms_where(state, |key| {
+        exoms_under.iter().any(|slash| slash == key)
+    });
 
     if let Err(e) = crate::scaffold::delete_subtree(tree_root, &path) {
-        // Engine bindings are now stale w.r.t. what's still on disk; force
-        // reconcile so the engine matches `state.exoms` again.
-        let exoms = state.exoms.lock().unwrap();
-        crate::server::reconcile_engine(state, &exoms);
         return Err(JsonRpcError {
             code: -32000,
             message: e.to_string(),
         });
-    }
-
-    {
-        let exoms = state.exoms.lock().unwrap();
-        crate::server::reconcile_engine(state, &exoms);
     }
 
     if let Some(ref auth_store) = state.auth_store {
@@ -2680,6 +2811,19 @@ async fn tool_exom_mode(
     };
     let exom_for_assert = exom_slash.clone();
     let assert_ctx = ctx.clone();
+
+    let cmd = crate::commands::build_exom_mode_set(&exom_for_assert, mode_str);
+    let commit_res = crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_for_assert,
+        cmd,
+    )
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: format!("transactor: {}", e),
+    })?;
+
     crate::server::mutate_exom_async(state, &exom_for_assert, move |ex| {
         // Sync the in-memory ExomState mode field so subsequent
         // guard_write / lookup_owner calls observe the new mode without
@@ -2706,6 +2850,11 @@ async fn tool_exom_mode(
         code: -32000,
         message: format!("exom-mode flip failed: {}", e),
     })?;
+
+    let exom_for_bus = exom_slash.clone();
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_for_bus, &commit_res, |env| {
+        let _ = state.sse_tx.send((Some(exom_for_bus.clone()), env));
+    });
 
     let _ = state.sse_tx.send((
         None,

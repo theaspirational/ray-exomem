@@ -10,6 +10,11 @@ pub struct ray_runtime_t {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct ray_sym_domain_t {
+    _private: [u8; 0],
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -43,6 +48,7 @@ pub const RAY_TABLE: i8 = 98;
 pub const RAY_SYM_W8: u8 = 0x00;
 pub const RAY_SYM_W16: u8 = 0x01;
 pub const RAY_SYM_W32: u8 = 0x02;
+pub const RAY_ATTR_SLICE: u8 = 0x10;
 
 extern "C" {
     // -----------------------------------------------------------------------
@@ -124,6 +130,8 @@ extern "C" {
     pub fn ray_sym_intern(s: *const c_char, len: usize) -> i64;
     pub fn ray_sym_find(s: *const c_char, len: usize) -> i64;
     pub fn ray_sym_str(id: i64) -> *mut ray_t;
+    pub fn ray_sym_runtime_domain() -> *mut ray_sym_domain_t;
+    pub fn ray_sym_domain_str(dom: *mut ray_sym_domain_t, pos: i64) -> *mut ray_t;
     pub fn ray_sym_count() -> u32;
     pub fn ray_sym_save(path: *const c_char) -> ray_err_t;
     pub fn ray_sym_load(path: *const c_char) -> ray_err_t;
@@ -196,6 +204,32 @@ pub unsafe fn ray_obj_attrs(v: *mut ray_t) -> u8 {
         return 0;
     }
     *v.cast::<u8>().add(19)
+}
+
+#[inline]
+pub unsafe fn ray_slice_parent(v: *mut ray_t) -> *mut ray_t {
+    if v.is_null() {
+        return std::ptr::null_mut();
+    }
+    *(v.cast::<*mut ray_t>())
+}
+
+#[inline]
+pub unsafe fn ray_sym_vec_domain(v: *mut ray_t) -> *mut ray_sym_domain_t {
+    if v.is_null() {
+        return ray_sym_runtime_domain();
+    }
+    let owner = if ray_obj_attrs(v) & RAY_ATTR_SLICE != 0 {
+        ray_slice_parent(v)
+    } else {
+        v
+    };
+    let d = *(owner.cast::<u8>().add(8).cast::<*mut ray_sym_domain_t>());
+    if d.is_null() {
+        ray_sym_runtime_domain()
+    } else {
+        d
+    }
 }
 
 #[inline]

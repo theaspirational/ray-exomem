@@ -326,6 +326,175 @@ fn mcp_tool_eval() {
 // I/O failure so callers can pattern-match on the canonical substring).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Typed-value routing via MCP assert_fact (regression for stress-test finding #3).
+//
+// Verify the schema-tagged value pipeline lands FactValue variants in the
+// right typed EDB, and that the defensive parser recovers structured types
+// from stringified inputs without misclassifying plain strings.
+// ---------------------------------------------------------------------------
+
+fn call_mcp_tool(base_url: &str, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    mcp_call_no_auth(
+        base_url,
+        "/mcp",
+        "tools/call",
+        json!({ "name": name, "arguments": arguments }),
+    )
+}
+
+fn init_test_exom(base_url: &str, path: &str) {
+    let body = call_mcp_tool(base_url, "init", json!({ "path": path }));
+    assert!(body["error"].is_null(), "init failed: {body}");
+}
+
+fn assert_fact_value(
+    base_url: &str,
+    exom: &str,
+    fact_id: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    call_mcp_tool(
+        base_url,
+        "assert_fact",
+        json!({
+            "exom": exom,
+            "predicate": fact_id,
+            "fact_id": fact_id,
+            "value": value,
+        }),
+    )
+}
+
+fn fact_history_value(base_url: &str, exom: &str, fact_id: &str) -> serde_json::Value {
+    let body = call_mcp_tool(
+        base_url,
+        "fact_history",
+        json!({ "exom": exom, "id": fact_id }),
+    );
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fact_history returned no text: {body}"));
+    let inner: serde_json::Value =
+        serde_json::from_str(text).expect("fact_history text should be JSON");
+    inner["history"][0]["value"].clone()
+}
+
+#[test]
+fn tool_assert_fact_routes_json_number_to_i64() {
+    let daemon = common::daemon::TestDaemon::start();
+    init_test_exom(&daemon.base_url, "test/typed-i64");
+    let exom = "test/typed-i64/main";
+
+    let resp = assert_fact_value(&daemon.base_url, exom, "test/age", json!(84));
+    assert!(resp["error"].is_null(), "assert_fact failed: {resp}");
+
+    let value = fact_history_value(&daemon.base_url, exom, "test/age");
+    // FactValue::I64 serializes as a JSON number under #[serde(untagged)].
+    assert_eq!(value, json!(84), "JSON number must round-trip as I64");
+}
+
+#[test]
+fn tool_assert_fact_recovers_stringified_sym_object() {
+    let daemon = common::daemon::TestDaemon::start();
+    init_test_exom(&daemon.base_url, "test/typed-sym");
+    let exom = "test/typed-sym/main";
+
+    let resp = assert_fact_value(
+        &daemon.base_url,
+        exom,
+        "test/status",
+        json!("{\"$sym\":\"active\"}"),
+    );
+    assert!(
+        resp["error"].is_null(),
+        "stringified sym must be recovered, got: {resp}"
+    );
+
+    let value = fact_history_value(&daemon.base_url, exom, "test/status");
+    assert_eq!(
+        value,
+        json!({"$sym": "active"}),
+        "recovered Sym should serialize as $sym object"
+    );
+}
+
+#[test]
+fn tool_assert_fact_recovers_stringified_array_rejected() {
+    let daemon = common::daemon::TestDaemon::start();
+    init_test_exom(&daemon.base_url, "test/typed-arr");
+    let exom = "test/typed-arr/main";
+
+    let resp = assert_fact_value(&daemon.base_url, exom, "test/list", json!("[1,2,3]"));
+    let msg = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("invalid 'value'"),
+        "recovered array should be rejected with `invalid 'value'`, got: {resp}"
+    );
+}
+
+#[test]
+fn tool_assert_fact_leaves_plain_string_alone() {
+    let daemon = common::daemon::TestDaemon::start();
+    init_test_exom(&daemon.base_url, "test/typed-str");
+    let exom = "test/typed-str/main";
+
+    let resp = assert_fact_value(&daemon.base_url, exom, "test/label", json!("75"));
+    assert!(resp["error"].is_null(), "assert_fact failed: {resp}");
+
+    let value = fact_history_value(&daemon.base_url, exom, "test/label");
+    // Plain string "75" must NOT be promoted to I64(75) — it stays Str("75").
+    assert_eq!(
+        value,
+        json!("75"),
+        "plain string must stay as Str, not be coerced to I64"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hyphenated-predicate pinning round-trip (regression for the rayforce
+// `parse_symbol` char-class gap). The query lowerer rewrites a string
+// literal in a sym-encoded slot — `(fact-row ?f "profile/last-name" ?v)` —
+// to a quoted symbol — `(fact-row ?f 'profile/last-name ?v)` — before the
+// engine ever sees it. Until rayforce's `parse_symbol` learned to accept
+// `-`, the engine read that as `'profile/last` followed by an undefined
+// `-name` token and the query silently returned zero rows.
+// ---------------------------------------------------------------------------
+#[test]
+fn tool_query_pins_hyphenated_predicate_literal() {
+    let daemon = common::daemon::TestDaemon::start();
+    init_test_exom(&daemon.base_url, "test/hyphen-pin");
+    let exom = "test/hyphen-pin/main";
+
+    let asserted = assert_fact_value(&daemon.base_url, exom, "profile/last-name", json!("Ng"));
+    assert!(
+        asserted["error"].is_null(),
+        "assert_fact failed: {asserted}"
+    );
+
+    let query_body = call_mcp_tool(
+        &daemon.base_url,
+        "query",
+        json!({
+            "exom": exom,
+            "query": format!(
+                "(query {exom} (find ?f ?v) (where (fact-row ?f \"profile/last-name\" ?v)))"
+            ),
+        }),
+    );
+    let text = query_body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("query returned no text: {query_body}"));
+    let inner: serde_json::Value = serde_json::from_str(text).expect("query text should be JSON");
+    let rows = inner["rows"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        rows.len(),
+        1,
+        "hyphenated-predicate pin must match exactly one row, got rows={rows:?} from {inner}"
+    );
+    assert_eq!(rows[0][1], json!("Ng"));
+}
+
 #[test]
 fn mcp_tool_tree_returns_unknown_path_for_unmapped_path() {
     let (daemon, raw_key) = daemon_with_api_key();

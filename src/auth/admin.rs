@@ -78,14 +78,9 @@ async fn purge_user_namespace(state: &AppState, email: &str) -> Result<usize, Ap
         }
     }
 
-    let removed = {
-        let mut exoms = state.exoms.lock().unwrap();
-        let before = exoms.len();
-        exoms.retain(|path, _| !path_matches_prefix(path, email));
-        let removed = before.saturating_sub(exoms.len());
-        crate::server::reconcile_engine(state, &exoms);
-        removed
-    };
+    let removed =
+        crate::server::evict_cached_exoms_where(state, |path| path_matches_prefix(path, email))
+            .len();
 
     let _ = state
         .sse_tx

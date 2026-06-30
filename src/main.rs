@@ -1533,7 +1533,10 @@ fn main() {
                 }
             };
 
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
 
             #[cfg(feature = "postgres")]
             let postgres_pool: Option<sqlx::PgPool> = if let Some(ref db_url) = database_url {
@@ -1731,7 +1734,10 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
             if let Err(err) = rt.block_on(ray_exomem::server::serve(&bind.to_string(), state)) {
                 remove_pid(&data_dir);
                 eprintln!("error: {}", err);

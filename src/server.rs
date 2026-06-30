@@ -94,6 +94,15 @@ pub struct AppState {
     /// `resolve_access` so a subscriber never sees activity in an exom
     /// they cannot read.
     pub sse_tx: broadcast::Sender<(Option<String>, String)>,
+    /// Phase D-E: serialized command boundary in front of brain mutations.
+    /// Enforces auth + idempotency + touched-key emission. Brain still owns
+    /// persistence; the transactor uses a `NullProjection` so the audit log
+    /// in brain's `Tx` chain remains the durable source of truth.
+    pub transactor: crate::commands::SharedTransactor,
+    /// Phase D-E: subscription registry. Future SSE consumers will register
+    /// `Subscription`s here so the daemon can deliver dependency-matched,
+    /// auth-filtered invalidations instead of broadcast-fanout.
+    pub realtime: crate::commands::SharedRealtimeBus,
     pub auth_store: Option<Arc<crate::auth::store::AuthStore>>,
     pub auth_provider: Option<Arc<dyn crate::auth::provider::AuthProvider>>,
     pub ui_state: Option<Arc<dyn crate::db::UiStateDb>>,
@@ -121,6 +130,8 @@ impl AppState {
             sym_path,
             start_time: Instant::now(),
             sse_tx,
+            transactor: crate::commands::shared_transactor(),
+            realtime: crate::commands::shared_realtime_bus(),
             auth_store: None,
             auth_provider: None,
             ui_state: None,
@@ -428,16 +439,131 @@ fn api_router() -> Router<Arc<AppState>> {
 // SSE endpoint
 // ---------------------------------------------------------------------------
 
+/// RAII handle for the per-SSE-connection `RealtimeBus` subscription. Drops
+/// the subscription off the bus when the SSE stream is dropped (connection
+/// closes, axum's shutdown, or stream cancellation). Without this, a long-
+/// running daemon would accumulate dead subscriptions on every disconnect.
+struct SubscriptionGuard {
+    bus: crate::commands::SharedRealtimeBus,
+    id: Option<rayforce_realtime::subscription::SubscriptionId>,
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            if let Ok(mut bus) = self.bus.lock() {
+                bus.unsubscribe(id);
+            }
+        }
+    }
+}
+
+/// Stream wrapper that carries the `SubscriptionGuard` alongside the inner
+/// SSE stream. When the wrapper is dropped, the guard's `Drop` runs and the
+/// bus subscription is released. The inner stream is pin-boxed because the
+/// composed BroadcastStream → filter_map → map chain captures `!Unpin`
+/// async blocks, which prevents a stack-allocated Stream impl.
+struct GuardedSseStream {
+    inner: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<Event, std::convert::Infallible>> + Send>,
+    >,
+    _guard: SubscriptionGuard,
+}
+
+impl futures::Stream for GuardedSseStream {
+    type Item = Result<Event, std::convert::Infallible>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        this.inner.as_mut().poll_next(cx)
+    }
+}
+
+/// Walk every currently-loaded exom and build the (Dependency, Grant) pair
+/// list this user is allowed to subscribe to. Called once per SSE connect.
+async fn build_sse_subscription_scopes(
+    state: &Arc<AppState>,
+    user: &User,
+) -> Vec<ray_datom::scope::ScopeId> {
+    let exom_paths: Vec<String> = {
+        let exoms = state.exoms.lock().unwrap();
+        exoms.keys().cloned().collect()
+    };
+    let mut readable = Vec::new();
+    for exom_slash in exom_paths {
+        let allowed = match state.auth_store.as_ref() {
+            None => true,
+            Some(store) => {
+                let owner = lookup_owner(state, &exom_slash);
+                let level =
+                    crate::auth::access::resolve_access(user, &exom_slash, store, owner).await;
+                level.can_read()
+            }
+        };
+        if allowed {
+            readable.push(crate::commands::exom_scope(&exom_slash));
+        }
+    }
+    readable
+}
+
 async fn api_sse(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
 ) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.sse_tx.subscribe();
-    // Snapshot the subscriber's identity for the per-event filter. The
-    // `require_auth` middleware on `/events` guarantees `maybe_user.0` is
-    // `Some` whenever `auth_store` is configured; the `None` arm only
-    // fires in single-user dev mode where every event is delivered.
+
+    // Phase E: register a `RealtimeBus` Subscription for this connection.
+    // The deps cover every exom this user can read at connect time; the bus
+    // emits an `Invalidation` per matched commit, which flows through the
+    // existing `dispatch_invalidations` → broadcast::Sender bridge to this
+    // very SSE stream. The bus's `authorized()` check filters at delivery
+    // time using the per-connection grants, and the BroadcastStream filter
+    // below applies a second pass via `resolve_access` (defense in depth).
     let subscriber = maybe_user.0;
+    let bus_subscription_id = if let Some(ref user) = subscriber {
+        let scopes = build_sse_subscription_scopes(&state, user).await;
+        if scopes.is_empty() {
+            None
+        } else {
+            let principal = ray_datom::tx::PrincipalId::new(user.email.clone());
+            let grants: Vec<ray_transactor::auth::Grant> = scopes
+                .iter()
+                .map(|s| ray_transactor::auth::Grant {
+                    principal: principal.clone(),
+                    scope: s.clone(),
+                    permission: ray_transactor::auth::Permission::new(crate::commands::PERM_READ),
+                })
+                .collect();
+            let auth_ctx =
+                ray_transactor::auth::AuthContext::new(principal, ray_datom::tx::ActorKind::Human)
+                    .with_grants(grants);
+            let deps: Vec<rayforce_realtime::subscription::Dependency> = scopes
+                .into_iter()
+                .map(rayforce_realtime::subscription::Dependency::Scope)
+                .collect();
+            let id = state.realtime.lock().unwrap().subscribe(
+                auth_ctx,
+                rayforce_realtime::subscription::QuerySpec::new(
+                    "sse-firehose",
+                    serde_json::json!({}),
+                ),
+                deps,
+                ray_transactor::auth::Permission::new(crate::commands::PERM_READ),
+            );
+            Some(id)
+        }
+    } else {
+        None
+    };
+
+    let guard = SubscriptionGuard {
+        bus: state.realtime.clone(),
+        id: bus_subscription_id,
+    };
+
     let state_for_filter = state.clone();
     let events = BroadcastStream::new(rx)
         .filter_map(move |r| {
@@ -470,7 +596,11 @@ async fn api_sse(
         .map(|payload| Ok(Event::default().data(payload)));
     let pings = IntervalStream::new(tokio::time::interval(Duration::from_secs(15)))
         .map(|_| Ok(Event::default().event("ping").data("{}")));
-    Sse::new(futures::stream::select(events, pings))
+    let combined = futures::stream::select(events, pings);
+    Sse::new(GuardedSseStream {
+        inner: Box::pin(combined),
+        _guard: guard,
+    })
 }
 
 async fn set_response_headers(mut response: Response) -> Response {
@@ -792,7 +922,7 @@ fn refresh_exom_binding(
 }
 
 fn evict_cached_exom(state: &AppState, exom_name: &str) {
-    state.exoms.lock().unwrap().remove(exom_name);
+    evict_cached_exoms_where(state, |key| key == exom_name);
 }
 
 /// Bind the executing exom's per-type fact sub-tables under the shared env
@@ -1594,28 +1724,11 @@ async fn api_delete(
         Err(e) => return ApiError::from(e).into_response(),
     };
 
-    // Drop in-memory ExomState entries for everything we're about to remove.
-    // Hold the guard only for the structural mutation; reconcile_engine and
-    // the disk delete run after so the lock isn't held across IO.
-    {
-        let mut exoms = state.exoms.lock().unwrap();
-        for slash in &exoms_under {
-            exoms.remove(slash);
-        }
-    }
+    let _evicted =
+        evict_cached_exoms_where(&state, |key| exoms_under.iter().any(|slash| slash == key));
 
     if let Err(e) = crate::scaffold::delete_subtree(&tree_root, &path) {
-        // Engine bindings are now stale w.r.t. what's still on disk, but
-        // reconcile will rebind only what remains in `state.exoms`. Forcing
-        // a reconcile here keeps the engine consistent with the in-memory map.
-        let exoms = state.exoms.lock().unwrap();
-        reconcile_engine(&state, &exoms);
         return ApiError::from(e).into_response();
-    }
-
-    {
-        let exoms = state.exoms.lock().unwrap();
-        reconcile_engine(&state, &exoms);
     }
 
     if let Some(ref auth_store) = state.auth_store {
@@ -2052,6 +2165,25 @@ async fn api_exom_mode(
     };
     let exom_for_assert = exom_slash.clone();
     let ctx = write_ctx.clone();
+
+    // Phase D: gate the flip through the transactor (owner check above is
+    // ray-exomem-specific; the transactor enforces the generic write-permission
+    // contract on the exom scope).
+    let mode_cmd = crate::commands::build_exom_mode_set(&exom_for_assert, mode_str);
+    let mode_commit = match crate::commands::commit_for_user(
+        &state.transactor,
+        Some(user.email.as_str()),
+        &exom_for_assert,
+        mode_cmd,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiError::new("transactor", e.to_string())
+                .with_status(500)
+                .into_response();
+        }
+    };
+
     if let Err(e) = mutate_exom_async(&state, &exom_for_assert, move |ex| {
         // Sync the in-memory ExomState mode field so subsequent
         // guard_write / lookup_owner calls observe the new mode without
@@ -2077,6 +2209,10 @@ async fn api_exom_mode(
     {
         return ApiError::new("io", format!("exom-mode flip failed: {}", e)).into_response();
     }
+
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_slash, &mode_commit, |env| {
+        let _ = state.sse_tx.send((Some(exom_slash.clone()), env));
+    });
 
     emit_tree_changed(&state);
 
@@ -2358,14 +2494,17 @@ async fn api_rename(
     }
     match crate::tree::rename_last_segment(&tree_root, &path, &new_segment) {
         Ok(new_path) => {
+            let old_slash = path.to_slash_string();
+            let old_prefix = format!("{old_slash}/");
+            let new_slash = new_path.to_slash_string();
+            let _evicted = evict_cached_exoms_where(&state, |key| {
+                key == old_slash || key.starts_with(&old_prefix)
+            });
             if let Some(ref auth_store) = state.auth_store {
-                let old_slash = path.to_slash_string();
-                let new_slash = new_path.to_slash_string();
                 auth_store.update_share_paths(&old_slash, &new_slash).await;
             }
             emit_tree_changed(&state);
-            Json(serde_json::json!({"ok": true, "new_path": new_path.to_slash_string()}))
-                .into_response()
+            Json(serde_json::json!({"ok": true, "new_path": new_slash})).into_response()
         }
         Err(e) => ApiError::new("rename_failed", e).into_response(),
     }
@@ -2484,6 +2623,23 @@ async fn api_assert_fact(
     let valid_from = req.valid_from.clone();
     let valid_to = req.valid_to.clone();
 
+    // Phase D: route the write through ray-transactor as an auth +
+    // idempotency gate before invoking brain. guard_write above has already
+    // proven the caller can write, so the AuthContext carries the write
+    // grant unconditionally (defense-in-depth — the transactor would
+    // otherwise reject).
+    let cmd = crate::commands::build_fact_assert(&exom_slash, &branch_str, &fact_id, &predicate);
+    let commit_outcome =
+        crate::commands::commit_for_user(&state.transactor, Some(actor.as_str()), &exom_slash, cmd);
+    let commit_result = match commit_outcome {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiError::new("transactor", e.to_string())
+                .with_status(500)
+                .into_response();
+        }
+    };
+
     let result = mutate_exom_async(&state, &exom_slash, |ex| {
         ex.brain.assert_fact(
             &branch_str,
@@ -2498,6 +2654,14 @@ async fn api_assert_fact(
         )
     })
     .await;
+
+    // Phase E: surface the commit to the realtime bus. Any registered
+    // Subscription whose deps overlap the touched scope/entity/attr gets a
+    // typed `Invalidation` envelope on the legacy broadcast transport so a
+    // single SSE consumer can drain both coarse and dep-matched events.
+    crate::commands::dispatch_invalidations(&state.realtime, &exom_slash, &commit_result, |env| {
+        let _ = state.sse_tx.send((Some(exom_slash.clone()), env));
+    });
 
     match result {
         Ok(tx_id) => {
@@ -2926,6 +3090,40 @@ pub(crate) fn reconcile_engine(state: &AppState, exoms: &HashMap<String, ExomSta
     }
 }
 
+pub(crate) fn evict_cached_exoms_where<F>(state: &AppState, mut should_evict: F) -> Vec<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut exoms = state.exoms.lock().unwrap();
+    let evicted: Vec<String> = exoms
+        .keys()
+        .filter(|key| should_evict(key.as_str()))
+        .cloned()
+        .collect();
+    if evicted.is_empty() {
+        return evicted;
+    }
+
+    if let Err(e) = state.engine.reconcile_lang_env() {
+        eprintln!(
+            "[ray-exomem] reconcile_lang_env failed before exom eviction: {}",
+            e
+        );
+    }
+    for key in &evicted {
+        exoms.remove(key);
+    }
+    for (name, es) in exoms.iter() {
+        if let Err(e) = state
+            .engine
+            .bind_named_db(storage::sym_intern(name), &es.datoms)
+        {
+            eprintln!("[ray-exomem] bind_named_db failed for '{}': {}", name, e);
+        }
+    }
+    evicted
+}
+
 // ---------------------------------------------------------------------------
 // GET/POST /query
 // ---------------------------------------------------------------------------
@@ -2975,6 +3173,20 @@ async fn api_query_post(
     };
     if let Some(resp) = guard_read(&state, &maybe_user, &query.exom).await {
         return resp;
+    }
+    // Phase F: secured query gate via ray-transactor AuthContext model.
+    // Mirrors the guard_read decision into the transactor's auth surface so
+    // the read path uses the same primitive the write path does. Once Phase
+    // F's grant-mirroring lands, the transactor's `authorized()` will
+    // consult real Grant datoms — this call site does not change.
+    if let Err(e) = crate::commands::secured_query_check(
+        maybe_user.0.as_ref().map(|u| u.email.as_str()),
+        &query.exom,
+        true, // guard_read above admitted; transactor view mirrors that.
+    ) {
+        return ApiError::new("forbidden", e)
+            .with_status(403)
+            .into_response();
     }
     let target_branch = params
         .branch
@@ -3194,6 +3406,24 @@ async fn api_eval_inner(
                 let pred = mutation.predicate.clone();
                 let fact_id = mutation.fact_id.clone();
                 let value = mutation.value.clone();
+                // Phase D: route the eval-driven write through the transactor
+                // for auth + idempotency gating. authorize_rayfall above has
+                // already validated read/write access for the user; the
+                // AuthContext mirrors that decision.
+                let eval_cmd =
+                    crate::commands::build_fact_assert(&exom, &branch_id, &fact_id, &pred);
+                if let Err(e) = crate::commands::commit_for_user(
+                    &state.transactor,
+                    ctx.user_email.as_deref(),
+                    &exom,
+                    eval_cmd,
+                ) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("transactor: {}", e)})),
+                    )
+                        .into_response();
+                }
                 let r = (|| {
                     let mut exoms = state.exoms.lock().unwrap();
                     let es = exoms
@@ -3239,6 +3469,19 @@ async fn api_eval_inner(
                 let pred = mutation.predicate.clone();
                 let fact_id = mutation.fact_id.clone();
                 let value = mutation.value.clone();
+                let eval_cmd = crate::commands::build_fact_retract(&exom, &branch_id, &fact_id);
+                if let Err(e) = crate::commands::commit_for_user(
+                    &state.transactor,
+                    ctx.user_email.as_deref(),
+                    &exom,
+                    eval_cmd,
+                ) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("transactor: {}", e)})),
+                    )
+                        .into_response();
+                }
                 let r = (|| {
                     let mut exoms = state.exoms.lock().unwrap();
                     let es = exoms
@@ -4701,13 +4944,10 @@ async fn api_factory_reset(
         None => return ApiError::from(brain::WriteError::ActorRequired).into_response(),
     };
     let _ = &headers;
-    // The brain/tree wipe is fully sync. Wrap it in a closure so the
-    // std::sync::MutexGuard on `state.exoms` is released before we await
-    // the auth-store wipe below — otherwise the future would not be Send.
+    // The brain/tree wipe is fully sync. Wrap it in a closure so no local
+    // filesystem errors cross the auth-store await below.
     let sync_result: Result<Vec<String>, ApiError> = (|| {
-        let mut exoms = state.exoms.lock().unwrap();
-        let old_names: Vec<String> = exoms.keys().cloned().collect();
-        exoms.clear();
+        let old_names = evict_cached_exoms_where(&state, |_| true);
 
         // Nuke persisted splay state on disk before declaring success. Without
         // this the next lazy-load or daemon restart resurrects the "deleted"
@@ -4735,7 +4975,6 @@ async fn api_factory_reset(
             }
         }
 
-        reconcile_engine(&state, &exoms);
         Ok(old_names)
     })();
 
@@ -5543,7 +5782,10 @@ async fn api_get_graph_layout(
         return ApiError::new("missing_scope", "scope is required").into_response();
     }
     let Some(ui_state) = state.ui_state.as_ref() else {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"layout": null})))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"layout": null})),
+        )
             .into_response();
     };
     match ui_state.get_graph_layout(&user.email, scope).await {
@@ -5572,10 +5814,12 @@ async fn api_put_graph_layout(
             .into_response();
     };
     if !body.is_object() {
-        return ApiError::new("bad_payload", "layout body must be a JSON object")
-            .into_response();
+        return ApiError::new("bad_payload", "layout body must be a JSON object").into_response();
     }
-    match ui_state.upsert_graph_layout(&user.email, scope, &body).await {
+    match ui_state
+        .upsert_graph_layout(&user.email, scope, &body)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => ApiError::new("db_error", e.to_string()).into_response(),
     }

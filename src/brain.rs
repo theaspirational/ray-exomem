@@ -1795,7 +1795,9 @@ pub fn claim_branch(
     };
 
     match &b.claimed_by_user_email {
-        Some(owner) if owner != user_email => return Err(WriteError::BranchOwned(owner.clone())),
+        Some(owner) if !owner.is_empty() && owner != user_email => {
+            return Err(WriteError::BranchOwned(owner.clone()))
+        }
         Some(_) => {}
         None => {
             b.claimed_by_user_email = Some(user_email.to_string());
@@ -2513,7 +2515,16 @@ mod tofu_tests {
         crate::scaffold::init_project(d.path(), &tp("work"), "alice").unwrap();
 
         // Phase 1: TOFU-claim main for alice (the typical solo-edit state).
-        precheck_write(d.path(), &sym, &tp("work::main"), "main", "alice", None, None).unwrap();
+        precheck_write(
+            d.path(),
+            &sym,
+            &tp("work::main"),
+            "main",
+            "alice",
+            None,
+            None,
+        )
+        .unwrap();
         let after_claim =
             crate::storage::load_branches_from_disk(&tp("work::main").to_disk_path(d.path()), &sym)
                 .unwrap();
@@ -2577,9 +2588,7 @@ mod tofu_tests {
     #[test]
     fn set_branch_claim_unknown_branch_errors() {
         let mut brain = Brain::new();
-        let err = brain
-            .set_branch_claim("does-not-exist", None)
-            .unwrap_err();
+        let err = brain.set_branch_claim("does-not-exist", None).unwrap_err();
         assert!(matches!(err, WriteError::BranchMissing(_)));
     }
 }
@@ -3381,6 +3390,118 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claim_branch_after_create_branch_succeeds_after_disk_roundtrip() {
+        let _guard = test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+
+        let d = tempfile::tempdir().unwrap();
+        let sym_path = d.path().join("sym");
+        let project: TreePath = "work::ath".parse().unwrap();
+        crate::scaffold::init_project(d.path(), &project, "vasily@example.com").unwrap();
+
+        let exom: TreePath = "work::ath::main".parse().unwrap();
+        create_branch(d.path(), &sym_path, &exom, "feature-x").unwrap();
+
+        // Round-trips through save_branches_to_disk → load_branches_from_disk.
+        // Pre-fix A, `claimed_by_user_email` reloaded as Some("") and the TOFU
+        // path rejected the first writer with BranchOwned("").
+        claim_branch(
+            d.path(),
+            &sym_path,
+            &exom,
+            "feature-x",
+            "vasily@example.com",
+            None,
+            None,
+        )
+        .expect("first writer must successfully TOFU-claim the branch");
+
+        // Re-claiming as the same user is a no-op.
+        claim_branch(
+            d.path(),
+            &sym_path,
+            &exom,
+            "feature-x",
+            "vasily@example.com",
+            None,
+            None,
+        )
+        .expect("idempotent re-claim");
+
+        // A different user must be rejected with the real owner email.
+        let err = claim_branch(
+            d.path(),
+            &sym_path,
+            &exom,
+            "feature-x",
+            "tester@example.com",
+            None,
+            None,
+        )
+        .expect_err("second user must be rejected");
+        match err {
+            WriteError::BranchOwned(owner) => {
+                assert_eq!(owner, "vasily@example.com");
+            }
+            other => panic!("expected BranchOwned, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bitemporal_chain_preserves_superseded_by_after_eviction() {
+        let _guard = test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+
+        let d = tempfile::tempdir().unwrap();
+        let sym_path = d.path().join("sym");
+        let exom_dir = d.path().join("exom");
+        std::fs::create_dir_all(&exom_dir).unwrap();
+
+        let ctx = MutationContext::default();
+        let mut tx_ids = Vec::new();
+        for value in ["a", "b", "c"] {
+            let mut brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
+            let tx = brain
+                .assert_fact(
+                    MAIN_BRANCH,
+                    "chain/f1",
+                    "label",
+                    value,
+                    1.0,
+                    "test",
+                    None,
+                    None,
+                    &ctx,
+                )
+                .unwrap();
+            tx_ids.push(tx);
+            // drop brain → eviction → next iteration reopens from disk
+        }
+
+        let brain = Brain::open_exom(&exom_dir, &sym_path).unwrap();
+        let history = brain.fact_history("chain/f1");
+        assert_eq!(history.len(), 3, "expected three rows in chain");
+        let by_tx: std::collections::HashMap<TxId, &Fact> =
+            history.iter().map(|f| (f.created_by_tx, *f)).collect();
+        let f1 = by_tx[&tx_ids[0]];
+        let f2 = by_tx[&tx_ids[1]];
+        let f3 = by_tx[&tx_ids[2]];
+        assert_eq!(
+            f1.superseded_by_tx,
+            Some(tx_ids[1]),
+            "row1 must point at tx2; got {:?}",
+            f1.superseded_by_tx
+        );
+        assert_eq!(
+            f2.superseded_by_tx,
+            Some(tx_ids[2]),
+            "row2 must point at tx3 (this is the regression — pre-fix it stays None/Some(0)); got {:?}",
+            f2.superseded_by_tx
+        );
+        assert_eq!(f3.superseded_by_tx, None, "current head must be open");
     }
 
     #[test]

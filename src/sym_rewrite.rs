@@ -19,7 +19,6 @@
 use crate::{datom, ffi, storage};
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
-    ffi::CString,
     fs,
     path::{Path, PathBuf},
 };
@@ -102,13 +101,15 @@ pub fn run_sym_rewrite(sym_path: &Path, tree_root: &Path) -> Result<RewriteOutco
 
     // Re-intern every old string. Builtins hit existing slots (registered
     // by ray_lang_init before we got here); user strings append.
+    //
+    // Use the length-aware FFI directly rather than CString round-tripping:
+    // legitimate persisted strings may contain interior NULs (e.g. the
+    // nullable-SYM-column sentinel `NULL_SYM_SENTINEL = "\u{0}null"` in
+    // storage.rs), and `ray_sym_intern` takes an explicit length, so we
+    // never depend on C string-terminator semantics.
     let mut remap: Vec<i64> = Vec::with_capacity(persisted);
     for (old_id, s) in old_strings.iter().enumerate() {
-        let new_id = unsafe {
-            let c = CString::new(s.as_str())
-                .with_context(|| format!("sym[{old_id}] contains interior NUL"))?;
-            ffi::ray_sym_intern(c.as_ptr(), s.len())
-        };
+        let new_id = unsafe { ffi::ray_sym_intern(s.as_ptr() as *const _, s.len()) };
         if new_id < 0 {
             bail!(
                 "ray_sym_intern rejected persisted string at slot {old_id} ({:?}); \

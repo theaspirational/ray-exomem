@@ -68,8 +68,26 @@ impl Drop for RayObj {
 // Symbol table helpers
 // ---------------------------------------------------------------------------
 
+/// In-band null sentinel for nullable SYM columns. The byte sequence starts
+/// with NUL so it cannot collide with any user-facing predicate, path segment,
+/// email, or branch identifier. The empty string remains a legitimate value
+/// — only this exact interned id signals null.
+pub const NULL_SYM_SENTINEL: &str = "\u{0}null";
+
+/// In-band null sentinel for nullable I64 columns. Real tx_ids are allocated
+/// upward from 0, so `i64::MIN` cannot collide with any legitimate value.
+pub const NULL_I64_SENTINEL: i64 = i64::MIN;
+
 pub fn sym_intern(s: &str) -> i64 {
     unsafe { ffi::ray_sym_intern(s.as_ptr() as *const _, s.len()) }
+}
+
+/// Intern the sentinel sym used to encode null in nullable SYM columns.
+/// Not cached across calls — `sym_intern` is a fast hash lookup and the
+/// sentinel's id can shift across runtime resets / sym-table reloads, so a
+/// stale cache risks aliasing a real value to null.
+pub fn null_sym_id() -> i64 {
+    sym_intern(NULL_SYM_SENTINEL)
 }
 
 /// Current number of entries in the global rayforce symbol table (best-effort diagnostic).
@@ -80,8 +98,14 @@ pub fn sym_count() -> u32 {
 pub fn sym_lookup(id: i64) -> Result<String> {
     unsafe {
         let atom = ffi::ray_sym_str(id);
+        sym_atom_to_string(atom).with_context(|| format!("invalid symbol id {}", id))
+    }
+}
+
+fn sym_atom_to_string(atom: *mut ffi::ray_t) -> Result<String> {
+    unsafe {
         if atom.is_null() {
-            bail!("invalid symbol id {}", id);
+            bail!("null symbol atom");
         }
         let ptr = ffi::ray_str_ptr(atom);
         let len = ffi::ray_str_len(atom);
@@ -90,6 +114,15 @@ pub fn sym_lookup(id: i64) -> Result<String> {
         }
         let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
         Ok(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+fn sym_cell_lookup(col: *mut ffi::ray_t, row: i64) -> Result<String> {
+    unsafe {
+        let pos = ffi::ray_vec_get_sym_id(col, row);
+        let dom = ffi::ray_sym_vec_domain(col);
+        let atom = ffi::ray_sym_domain_str(dom, pos);
+        sym_atom_to_string(atom).with_context(|| format!("invalid symbol domain position {}", pos))
     }
 }
 
@@ -140,6 +173,10 @@ fn splay_save_raw(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn table_sym_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(".sym")
+}
+
 /// Like `save_table` but passes NULL for the sym path, so
 /// `ray_splay_save` does NOT call `ray_sym_save` internally. Needed by
 /// the sym-rewrite migration: during the rewrite the on-disk sym file
@@ -183,7 +220,7 @@ pub fn save_table_skip_sym(table: &RayObj, dir: &Path) -> Result<()> {
 ///   - dir.new/ exists, dir/ exists  → incomplete write, discard dir.new/
 ///   - dir.old/ exists, dir/ missing → swap interrupted, restore dir.old/
 ///   - dir.old/ exists, dir/ exists  → cleanup interrupted, remove dir.old/
-pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
+pub fn save_table(table: &RayObj, dir: &Path, _sym_path: &Path) -> Result<()> {
     let new_dir = dir.with_extension("new");
     let old_dir = dir.with_extension("old");
 
@@ -192,8 +229,12 @@ pub fn save_table(table: &RayObj, dir: &Path, sym_path: &Path) -> Result<()> {
         let _ = std::fs::remove_dir_all(&new_dir);
     }
 
-    // Write all columns to the staging directory
-    splay_save_raw(table, &new_dir, sym_path)?;
+    // Write all columns to the staging directory. Upstream rayforce `dev`
+    // treats the splay sym path as the table's symbol-domain file; keep that
+    // domain beside the table so it cannot overwrite ray-exomem's runtime
+    // symbol table.
+    let table_sym = table_sym_path(&new_dir);
+    splay_save_raw(table, &new_dir, &table_sym)?;
 
     // Atomic swap: old ← current, current ← new, remove old
     if dir.exists() {
@@ -235,7 +276,13 @@ pub fn recover_splay_dirs(exom_dir: &Path) {
 
 pub fn load_table(dir: &Path, sym_path: &Path) -> Result<RayObj> {
     let c_dir = path_to_cstring(dir)?;
-    let c_sym = path_to_cstring(sym_path)?;
+    let table_sym = table_sym_path(dir);
+    let effective_sym = if table_sym.exists() {
+        table_sym.as_path()
+    } else {
+        sym_path
+    };
+    let c_sym = path_to_cstring(effective_sym)?;
     let ptr = unsafe { ffi::ray_read_splayed(c_dir.as_ptr(), c_sym.as_ptr()) };
     wrap_splay_result(ptr, dir)
 }
@@ -557,12 +604,9 @@ fn decode_query_cell(
                 Ok(json!(String::from_utf8_lossy(bytes).into_owned()))
             }
         }
-        ffi::RAY_SYM => {
-            let sym_id = unsafe { ffi::ray_vec_get_sym_id(col, row) };
-            Ok(json!(
-                sym_lookup(sym_id).unwrap_or_else(|_| sym_id.to_string())
-            ))
-        }
+        ffi::RAY_SYM => Ok(json!(sym_cell_lookup(col, row).unwrap_or_else(|_| {
+            unsafe { ffi::ray_vec_get_sym_id(col, row) }.to_string()
+        }))),
         ffi::RAY_F32 | ffi::RAY_F64 => {
             let value = unsafe { ffi::ray_vec_get_f64(col, row) };
             Ok(json!(value))
@@ -1390,12 +1434,9 @@ impl TableBuilder {
             let col = ffi::ray_vec_new(ffi::RAY_I64, values.len() as i64);
             let mut col = col;
             for (i, &v) in values.iter().enumerate() {
-                col = ffi::ray_vec_append(col, &v as *const i64 as *const _);
-                if let Some(null_flags) = nulls {
-                    if null_flags[i] {
-                        ffi::ray_vec_set_null(col, i as i64, true);
-                    }
-                }
+                let is_null = nulls.map(|nf| nf[i]).unwrap_or(false);
+                let stored = if is_null { NULL_I64_SENTINEL } else { v };
+                col = ffi::ray_vec_append(col, &stored as *const i64 as *const _);
             }
             let name_id = sym_intern(name);
             self.tbl = ffi::ray_table_add_col(self.tbl, name_id, col);
@@ -1434,12 +1475,13 @@ impl TableBuilder {
         unsafe {
             let col = ffi::ray_vec_new(ffi::RAY_SYM, values.len() as i64);
             let mut col = col;
-            for (i, v) in values.iter().enumerate() {
-                let id = sym_intern(v.unwrap_or(""));
+            let null_id = null_sym_id();
+            for v in values.iter() {
+                let id = match v {
+                    Some(s) => sym_intern(s),
+                    None => null_id,
+                };
                 col = ffi::ray_vec_append(col, &id as *const i64 as *const _);
-                if v.is_none() {
-                    ffi::ray_vec_set_null(col, i as i64, true);
-                }
             }
             let name_id = sym_intern(name);
             self.tbl = ffi::ray_table_add_col(self.tbl, name_id, col);
@@ -1482,11 +1524,12 @@ fn read_i64_nullable_col(tbl: *mut ffi::ray_t, col_idx: i64, nrows: i64) -> Vec<
         let col = ffi::ray_table_get_col_idx(tbl, col_idx);
         (0..nrows)
             .map(|i| {
-                if ffi::ray_vec_is_null(col, i) {
+                let p = ffi::ray_vec_get(col, i) as *const i64;
+                let v = *p;
+                if v == NULL_I64_SENTINEL {
                     None
                 } else {
-                    let p = ffi::ray_vec_get(col, i) as *const i64;
-                    Some(*p)
+                    Some(v)
                 }
             })
             .collect()
@@ -1510,11 +1553,7 @@ fn read_sym_col(tbl: *mut ffi::ray_t, col_idx: i64, nrows: i64) -> Result<Vec<St
         let col = ffi::ray_table_get_col_idx(tbl, col_idx);
         let mut out = Vec::with_capacity(nrows as usize);
         for i in 0..nrows {
-            let p = ffi::ray_vec_get(col, i);
-            // SYM stores the intern ID; width depends on attrs but we read as the actual stored width.
-            // For W32 (most common), the value is a u32. For safety, read the i64 representation.
-            let id = *(p as *const i64);
-            out.push(sym_lookup(id)?);
+            out.push(sym_cell_lookup(col, i)?);
         }
         Ok(out)
     }
@@ -1529,12 +1568,11 @@ fn read_sym_nullable_col(
         let col = ffi::ray_table_get_col_idx(tbl, col_idx);
         let mut out = Vec::with_capacity(nrows as usize);
         for i in 0..nrows {
-            if ffi::ray_vec_is_null(col, i) {
+            let s = sym_cell_lookup(col, i)?;
+            if s == NULL_SYM_SENTINEL {
                 out.push(None);
             } else {
-                let p = ffi::ray_vec_get(col, i);
-                let id = *(p as *const i64);
-                out.push(Some(sym_lookup(id)?));
+                out.push(Some(s));
             }
         }
         Ok(out)
@@ -2057,5 +2095,86 @@ mod tests {
             std::path::PathBuf::from("/tmp/ray-exomem-test/tree")
         );
         std::env::remove_var("RAY_EXOMEM_HOME");
+    }
+}
+
+#[cfg(test)]
+mod nullable_roundtrip_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Build a 3-column scratch table (i64 key + nullable i64 + nullable sym),
+    /// save through the atomic splay protocol, then read it back. Returns the
+    /// loaded (nullable_i64, nullable_sym) vectors so each test asserts the
+    /// invariant it cares about.
+    fn roundtrip(
+        i64_values: &[Option<i64>],
+        sym_values: &[Option<&str>],
+    ) -> (Vec<Option<i64>>, Vec<Option<String>>) {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+
+        let d = tempdir().unwrap();
+        let sym_path = d.path().join("sym");
+        let dir = d.path().join("scratch");
+
+        let n = i64_values.len();
+        assert_eq!(n, sym_values.len(), "test setup: lengths must match");
+
+        // Key column: dense 0..n so the table has a stable column count.
+        let keys: Vec<i64> = (0..n as i64).collect();
+        let mut i_raw = Vec::with_capacity(n);
+        let mut i_nulls = Vec::with_capacity(n);
+        for v in i64_values {
+            i_raw.push(v.unwrap_or(0));
+            i_nulls.push(v.is_none());
+        }
+
+        let tbl = {
+            let mut b = TableBuilder::new(3);
+            b.add_i64_col("key", &keys, None);
+            b.add_i64_col("maybe_i64", &i_raw, Some(&i_nulls));
+            b.add_sym_col_nullable("maybe_sym", sym_values);
+            b.finish()
+        };
+        save_table(&tbl, &dir, &sym_path).unwrap();
+        sym_save(&sym_path).unwrap();
+        drop(tbl);
+
+        let loaded = load_table(&dir, &sym_path).unwrap();
+        let nrows = unsafe { ffi::ray_table_nrows(loaded.as_ptr()) };
+        assert_eq!(nrows as usize, n);
+
+        let got_i64 = read_i64_nullable_col(loaded.as_ptr(), 1, nrows);
+        let got_sym = read_sym_nullable_col(loaded.as_ptr(), 2, nrows).unwrap();
+        (got_i64, got_sym)
+    }
+
+    #[test]
+    fn nullable_i64_col_preserves_none_across_splay_roundtrip() {
+        let (got, _) = roundtrip(&[Some(7), None, Some(42)], &[None, None, None]);
+        assert_eq!(got, vec![Some(7), None, Some(42)]);
+    }
+
+    #[test]
+    fn nullable_sym_col_preserves_none_across_splay_roundtrip() {
+        let (_, got) = roundtrip(
+            &[None, None, None],
+            &[Some("vasily@example.com"), None, Some("tester@example.com")],
+        );
+        assert_eq!(
+            got,
+            vec![
+                Some("vasily@example.com".to_string()),
+                None,
+                Some("tester@example.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nullable_sym_col_preserves_empty_string_distinct_from_none() {
+        let (_, got) = roundtrip(&[None, None], &[Some(""), None]);
+        assert_eq!(got, vec![Some(String::new()), None]);
     }
 }

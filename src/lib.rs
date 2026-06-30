@@ -3,6 +3,7 @@ pub mod auth;
 pub mod backend;
 pub mod brain;
 pub mod client;
+pub mod commands;
 pub mod context;
 pub mod datom;
 pub mod db;
