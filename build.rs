@@ -140,7 +140,7 @@ fn main() {
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
             let cloned = out_dir.join("rayforce");
             const RAYFORCE_REPO: &str = "https://github.com/RayforceDB/rayforce.git";
-            const RAYFORCE_REF: &str = "master";
+            const RAYFORCE_REF: &str = "dev";
             if !cloned.join("Makefile").exists() {
                 eprintln!("[build.rs] fetching rayforce {RAYFORCE_REF}...");
                 let _ = std::fs::remove_dir_all(&cloned);

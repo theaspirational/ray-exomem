@@ -141,7 +141,9 @@ ln -f target/release/ray-exomem ~/.local/bin/ray-exomem
 
 `build.rs` also builds the Svelte UI and rayforce C library. It uses
 `RAYFORCE_DIR` when set, otherwise it looks for a sibling `../rayforce`, and
-falls back to fetching upstream `RayforceDB/rayforce` `master`.
+falls back to fetching upstream `RayforceDB/rayforce` `dev`.
+If `../rayforce` exists, make sure that checkout is on `dev` or set
+`RAYFORCE_DIR` to a different Rayforce checkout.
 
 The server base path is baked at compile time.
 
