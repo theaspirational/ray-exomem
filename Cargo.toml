@@ -13,9 +13,9 @@ test-auth = []
 postgres = ["sqlx"]
 
 [dependencies]
-ray-datom = { path = "../ray-datom" }
-ray-transactor = { path = "../ray-transactor" }
-rayforce-realtime = { path = "../rayforce-realtime" }
+ray-datom = { git = "https://github.com/theaspirational/ray-datom.git", rev = "330664d476e3e309afe7bfec03b5bfaf75a76c97" }
+ray-transactor = { git = "https://github.com/theaspirational/ray-transactor.git", rev = "7dce675784c1bd51121dbd8f127dc1648edb9a24" }
+rayforce-realtime = { git = "https://github.com/theaspirational/rayforce-realtime.git", rev = "7128c9ca63dd06f8fa343bc08a30ad7aac1490f7" }
 anyhow = "1"
 include_dir = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
@@ -45,11 +45,5 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate", "c
 [dev-dependencies]
 tempfile = "3"
 ureq = { version = "2", features = ["json"] }
-
-[patch."https://github.com/theaspirational/ray-datom.git"]
-ray-datom = { path = "../ray-datom" }
-
-[patch."https://github.com/theaspirational/ray-transactor.git"]
-ray-transactor = { path = "../ray-transactor" }
 
 [build-dependencies]

@@ -5,6 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const RAYFORCE_REPO: &str = "https://github.com/RayforceDB/rayforce.git";
+const RAYFORCE_REF: &str = "dev";
+
 fn run(cmd: &str, args: &[&str], dir: &PathBuf, label: &str) {
     let status = Command::new(cmd)
         .args(args)
@@ -106,8 +109,13 @@ fn main() {
     );
 
     if !ui_dir.join("node_modules").exists() {
-        eprintln!("[build.rs] npm install in ui/");
-        run("npm", &["install"], &ui_dir, "UI deps");
+        if ui_dir.join("package-lock.json").exists() {
+            eprintln!("[build.rs] npm ci in ui/");
+            run("npm", &["ci"], &ui_dir, "UI deps");
+        } else {
+            eprintln!("[build.rs] npm install in ui/");
+            run("npm", &["install"], &ui_dir, "UI deps");
+        }
     }
 
     // Wipe ui/build/ so SvelteKit's adapter-static doesn't accumulate stale
@@ -131,47 +139,57 @@ fn main() {
     let rayforce_dir = env::var("RAYFORCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let sibling = manifest_dir.join("../rayforce");
-            if sibling.join("Makefile").exists() {
-                return sibling;
-            }
-
-            // Auto-clone into OUT_DIR for cargo install
+            // Auto-clone into OUT_DIR for cargo install. Local Rayforce development
+            // should opt in explicitly with RAYFORCE_DIR instead of relying on
+            // sibling checkout layout.
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
             let cloned = out_dir.join("rayforce");
-            const RAYFORCE_REPO: &str = "https://github.com/RayforceDB/rayforce.git";
-            const RAYFORCE_REF: &str = "dev";
-            if !cloned.join("Makefile").exists() {
-                eprintln!("[build.rs] fetching rayforce {RAYFORCE_REF}...");
+
+            if !cloned.join(".git").exists() {
                 let _ = std::fs::remove_dir_all(&cloned);
                 std::fs::create_dir_all(&cloned).expect("failed to create rayforce clone dir");
                 run("git", &["init"], &cloned, "rayforce init");
+            }
+
+            if command_output("git", &["remote", "get-url", "origin"], &cloned).is_some() {
+                run(
+                    "git",
+                    &["remote", "set-url", "origin", RAYFORCE_REPO],
+                    &cloned,
+                    "rayforce remote set-url",
+                );
+            } else {
                 run(
                     "git",
                     &["remote", "add", "origin", RAYFORCE_REPO],
                     &cloned,
                     "rayforce remote add",
                 );
-                let fetch_status = Command::new("git")
-                    .args(["fetch", "--depth", "1", "origin", RAYFORCE_REF])
-                    .current_dir(&cloned)
-                    .status()
-                    .expect("failed to run git fetch — is git installed?");
-                if !fetch_status.success() {
-                    panic!(
-                        "rayforce not found at ../rayforce and fetching {RAYFORCE_REPO} {RAYFORCE_REF} failed.\n\
-                         Either:\n  \
-                         - Check out RayforceDB/rayforce alongside this repo on the same ref, or\n  \
-                         - Set RAYFORCE_DIR=/path/to/rayforce"
-                    );
-                }
-                run(
-                    "git",
-                    &["checkout", "--detach", "FETCH_HEAD"],
-                    &cloned,
-                    "rayforce checkout",
+            }
+
+            eprintln!("[build.rs] fetching rayforce {RAYFORCE_REF}...");
+            let fetch_status = Command::new("git")
+                .args(["fetch", "--depth", "1", "origin", RAYFORCE_REF])
+                .current_dir(&cloned)
+                .status()
+                .expect("failed to run git fetch — is git installed?");
+            if !fetch_status.success() {
+                panic!(
+                    "fetching {RAYFORCE_REPO} {RAYFORCE_REF} failed. \
+                     Set RAYFORCE_DIR=/path/to/rayforce to use a local checkout."
                 );
             }
+            run(
+                "git",
+                &["checkout", "--force", "--detach", "FETCH_HEAD"],
+                &cloned,
+                "rayforce checkout",
+            );
+
+            assert!(
+                cloned.join("Makefile").exists(),
+                "rayforce checkout did not contain a Makefile"
+            );
             cloned
         });
 

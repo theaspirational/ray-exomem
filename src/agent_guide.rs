@@ -207,7 +207,8 @@ Built-in derived views:
 const ENV: &str = r#"ENVIRONMENT
 -----------
 RAYFORCE_DIR        If set, build.rs uses this path to find the rayforce native library
-                    and headers. Otherwise ../rayforce relative to this crate.
+                    and headers. Otherwise build.rs fetches upstream Rayforce
+                    dev into Cargo's build output directory.
 
 UI (browser) may use PUBLIC_TEIDE_EXOMEM_BASE_URL to point API calls at a different
 origin; when unset and the UI is served from the daemon, it uses the page origin

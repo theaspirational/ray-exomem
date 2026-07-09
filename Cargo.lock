@@ -1591,6 +1591,7 @@ dependencies = [
 [[package]]
 name = "ray-datom"
 version = "0.1.0"
+source = "git+https://github.com/theaspirational/ray-datom.git?rev=330664d476e3e309afe7bfec03b5bfaf75a76c97#330664d476e3e309afe7bfec03b5bfaf75a76c97"
 dependencies = [
  "serde",
  "serde_json",
@@ -1635,6 +1636,7 @@ dependencies = [
 [[package]]
 name = "ray-transactor"
 version = "0.1.0"
+source = "git+https://github.com/theaspirational/ray-transactor.git?rev=7dce675784c1bd51121dbd8f127dc1648edb9a24#7dce675784c1bd51121dbd8f127dc1648edb9a24"
 dependencies = [
  "ray-datom",
  "serde",
@@ -1645,6 +1647,7 @@ dependencies = [
 [[package]]
 name = "rayforce-realtime"
 version = "0.1.0"
+source = "git+https://github.com/theaspirational/rayforce-realtime.git?rev=7128c9ca63dd06f8fa343bc08a30ad7aac1490f7#7128c9ca63dd06f8fa343bc08a30ad7aac1490f7"
 dependencies = [
  "ray-datom",
  "ray-transactor",
