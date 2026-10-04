@@ -81,6 +81,7 @@ Gotchas:
 
 - Use `ln -f`, not `cp`, when deploying the binary on macOS. `com.apple.provenance` can make copied binaries hang silently.
 - If `rayforce` changed, run `cargo clean && cargo build --release` or Cargo may keep the old static library linked.
+- `src/storage.rs` requires Rayforce's per-table symbol-domain contract (commit `d7541c2` or newer). Never leave a compatibility binary built against pre-domain Rayforce running after a migration: its process-global `persisted_count` can write only the first table-local `.sym`, leaving later splays unreadable on the next write. `build.rs` rejects that incompatible checkout.
 - The Svelte 5 UI is embedded in the binary at build time.
 - `ray-exomem daemon` forks. Use `serve` if you want logs in the terminal.
 - The tree/session model is the only supported flow. Use `ray-exomem inspect`, `init`, `exom-new`, `session ...`, and `GET /api/tree` for discovery and setup.

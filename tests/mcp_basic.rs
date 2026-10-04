@@ -381,6 +381,58 @@ fn fact_history_value(base_url: &str, exom: &str, fact_id: &str) -> serde_json::
 }
 
 #[test]
+fn exom_new_allows_repeated_authenticated_writes_after_branch_splay_roundtrip() {
+    let (daemon, raw_key) = daemon_with_api_key();
+    let exom = "alice@co.com/test/sequential-writes";
+
+    let call_tool = |name: &str, arguments: serde_json::Value| {
+        mcp_call(
+            &daemon.base_url,
+            &raw_key,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )
+    };
+
+    let created = call_tool("exom_new", json!({ "path": exom }));
+    assert!(created["error"].is_null(), "exom_new failed: {created}");
+
+    for (fact_id, value) in [("entity/name", "demo-service"), ("entity/status", "ready")] {
+        let asserted = call_tool(
+            "assert_fact",
+            json!({
+                "exom": exom,
+                "predicate": fact_id,
+                "fact_id": fact_id,
+                "value": value,
+                "agent": "claude-code-cli",
+                "model": "claude-fable-5"
+            }),
+        );
+        assert!(
+            asserted["error"].is_null(),
+            "sequential assert_fact for {fact_id} failed: {asserted}"
+        );
+    }
+
+    let branches = call_tool("list_branches", json!({ "exom": exom }));
+    assert!(
+        branches["error"].is_null(),
+        "list_branches failed: {branches}"
+    );
+    let text = branches["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("list_branches returned no text: {branches}"));
+    let body: serde_json::Value =
+        serde_json::from_str(text).expect("list_branches text should be JSON");
+    assert_eq!(
+        body["branches"][0]["claimed_by_user_email"],
+        json!("alice@co.com"),
+        "first write must persist the main-branch TOFU claim"
+    );
+}
+
+#[test]
 fn tool_assert_fact_routes_json_number_to_i64() {
     let daemon = common::daemon::TestDaemon::start();
     init_test_exom(&daemon.base_url, "test/typed-i64");

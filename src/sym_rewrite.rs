@@ -4,8 +4,9 @@
 //! runtime's slot layout. On startup we parse the persisted sym file as
 //! raw strings, let `ray_lang_init` register builtins at their canonical
 //! slots for the current binary, then re-intern each old string. This
-//! builds an `old_id → new_id` remap that we apply to every on-disk
-//! splay's RAY_SYM columns and datom-tagged I64 columns.
+//! builds an `old_id → new_id` remap that we apply to legacy, global-sym
+//! splays. Splays that already carry their own `.sym` domain are independent
+//! of the runtime slot layout and are deliberately left alone.
 //!
 //! Design doc: `archive/2026-04-24_sym-rewrite-migration/design.md`.
 //!
@@ -32,8 +33,9 @@ pub enum RewriteOutcome {
     /// Old sym file contents round-trip to identical slot layout under
     /// the current binary. Fast path — no on-disk rewrite needed.
     FastPath { persisted: usize },
-    /// Sym layout shifted; every splay's RAY_SYM / datom-tagged columns
-    /// were rewritten through the remap table.
+    /// Sym layout shifted; every legacy global-sym splay's RAY_SYM /
+    /// datom-tagged columns was rewritten through the remap table and
+    /// promoted to a table-local `.sym` domain.
     Remapped {
         persisted: usize,
         splays_rewritten: usize,
@@ -50,9 +52,9 @@ const MARKER_NAME: &str = ".sym_rewrite_in_progress";
 /// — only the sym table and on-disk splays.
 ///
 /// Postconditions: the persisted sym file's contents are round-trip-
-/// consistent with the current binary's sym interning; every on-disk
-/// splay under `tree_root` references strings through remapped sym
-/// IDs that resolve correctly with the new sym table.
+/// consistent with the current binary's sym interning; every legacy
+/// global-sym splay under `tree_root` references strings through remapped
+/// sym IDs and has been promoted to a table-local `.sym` domain.
 ///
 /// Crash safety: a marker file (`.sym_rewrite_in_progress`) is written
 /// before any destructive step and removed after commit. If the marker
@@ -214,9 +216,10 @@ fn parse_sym_file(path: &Path) -> Result<Vec<String>> {
     Ok(strings)
 }
 
-/// Enumerate every splay subdir under `tree_root` and rewrite each
-/// through the remap table. Returns the count of splays actually
-/// rewritten.
+/// Enumerate legacy global-sym splay subdirs under `tree_root` and rewrite
+/// each through the remap table. A splay with its own `.sym` file already
+/// has a file-local symbol domain, so runtime-global slot changes cannot
+/// invalidate it and it must not be remapped.
 ///
 /// Each splay save deliberately passes NULL for the sym path so
 /// `ray_sym_save` is not called during this phase — the on-disk sym
@@ -255,18 +258,19 @@ fn collect_splay_dirs(current: &Path, out: &mut Vec<PathBuf>) {
         // Splay dirs are recognized by their `.d` marker file, written
         // by ray_splay_save.
         if storage::table_exists(&path) {
-            out.push(path);
+            if !path.join(".sym").exists() {
+                out.push(path);
+            }
             continue;
         }
         collect_splay_dirs(&path, out);
     }
 }
 
-/// Load a splay by parsing `.d` schema directly and reading each named
-/// column file via `ray_col_load`. This bypasses `ray_splay_load`'s
-/// reliance on in-memory sym resolution for column names, which would
-/// fail here because the schema's sym IDs reference the OLD layout
-/// (pre-re-intern) while in-memory is the shifted-through-remap layout.
+/// Load a legacy global-sym splay by parsing `.d` directly and reading each
+/// named column file via `ray_col_load`. Two schema generations exist:
+/// older Rayforce wrote RAY_I64 global sym IDs, while newer pre-domain
+/// Rayforce wrote a self-describing RAY_STR vector of names.
 ///
 /// For each column:
 /// - RAY_SYM columns have their cell values passed through `remap`.
@@ -279,22 +283,8 @@ fn collect_splay_dirs(current: &Path, out: &mut Vec<PathBuf>) {
 /// `sym_intern` on those name strings, which produces canonical-layout
 /// IDs that match the post-rewrite sym table.
 fn rewrite_splay(dir: &Path, old_strings: &[String], remap: &[i64]) -> Result<()> {
-    // Parse .d schema file directly. It's a ray_col-saved RAY_I64
-    // vector whose values are OLD-layout sym IDs for each column name.
-    let old_col_name_ids = parse_d_schema(&dir.join(".d"))
+    let schema_resolved = parse_d_schema(&dir.join(".d"), old_strings)
         .with_context(|| format!("parse schema {}/.d", dir.display()))?;
-
-    // Resolve col names via old_strings (NOT in-memory sym — those
-    // IDs refer to the OLD layout we parsed from disk).
-    let schema_resolved: Vec<String> = old_col_name_ids
-        .iter()
-        .map(|&id| {
-            usize::try_from(id)
-                .ok()
-                .and_then(|i| old_strings.get(i).cloned())
-                .unwrap_or_default()
-        })
-        .collect();
 
     // Cross-check: every schema-derived name must exist as a file
     // in the dir. If it doesn't, the sym table has diverged from
@@ -396,15 +386,18 @@ fn rewrite_splay(dir: &Path, old_strings: &[String], remap: &[i64]) -> Result<()
     let final_ptr = *raii.ptr;
     std::mem::forget(raii);
     let new_tbl = storage::RayObj::from_raw(final_ptr)?;
-    storage::save_table_skip_sym(&new_tbl, dir)?;
+    // Save with the current per-table symbol-domain protocol. This both
+    // persists the remapped cells and adds `dir/.sym`, making this splay
+    // independent of future runtime-global builtin layout changes.
+    storage::save_table(&new_tbl, dir, &dir.join(".sym"))?;
     Ok(())
 }
 
-/// Read a splay's `.d` schema file directly and extract the OLD-layout
-/// sym IDs for each column name. Format: standard `ray_col` RAY_I64
-/// vector (32-byte ray_t header, then i64 values). We only need the
-/// values; no sym resolution happens here.
-fn parse_d_schema(path: &Path) -> Result<Vec<i64>> {
+/// Read either supported `.d` generation and return column names.
+///
+/// - RAY_I64: legacy global sym IDs, resolved through `old_strings`.
+/// - RAY_STR: self-describing names, decoded directly with `ray_col_load`.
+fn parse_d_schema(path: &Path, old_strings: &[String]) -> Result<Vec<String>> {
     let bytes = fs::read(path)?;
     if bytes.len() < 32 {
         bail!(".d too short ({} bytes)", bytes.len());
@@ -412,14 +405,48 @@ fn parse_d_schema(path: &Path) -> Result<Vec<i64>> {
     // Header layout (from rayforce.h): bytes 18 = type, 19 = attrs,
     // 24-31 = len (u64 / i64 / same field depending on interpretation).
     let type_byte = bytes[18] as i8;
+    if type_byte == ffi::RAY_STR {
+        let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
+        let raw = unsafe { ffi::ray_col_load(c_path.as_ptr()) };
+        let schema = storage::RayObj::from_raw(raw)
+            .with_context(|| format!("ray_col_load {}", path.display()))?;
+        if unsafe { ffi::ray_obj_type(schema.as_ptr()) } != ffi::RAY_STR {
+            bail!("{} changed type while loading", path.display());
+        }
+        let len = unsafe { vector_len(schema.as_ptr()) };
+        if len < 0 {
+            bail!(".d has negative length {len}");
+        }
+        let mut out = Vec::with_capacity(len as usize);
+        for row in 0..len {
+            let mut str_len = 0usize;
+            let ptr = unsafe { ffi::ray_str_vec_get(schema.as_ptr(), row, &mut str_len) };
+            if ptr.is_null() && str_len != 0 {
+                bail!(".d row {row} has null data with length {str_len}");
+            }
+            let body = if str_len == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), str_len) }
+            };
+            out.push(
+                std::str::from_utf8(body)
+                    .with_context(|| format!(".d row {row} is not utf-8"))?
+                    .to_string(),
+            );
+        }
+        return Ok(out);
+    }
     if type_byte != ffi::RAY_I64 {
         bail!(
-            ".d has unexpected type {} (expected RAY_I64={})",
+            ".d has unexpected type {} (expected RAY_I64={} or RAY_STR={})",
             type_byte,
-            ffi::RAY_I64
+            ffi::RAY_I64,
+            ffi::RAY_STR
         );
     }
-    let len = i64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
+    let raw_len = i64::from_le_bytes(bytes[24..32].try_into().unwrap());
+    let len = usize::try_from(raw_len).map_err(|_| anyhow!(".d has negative length {raw_len}"))?;
     let data_off = 32;
     if bytes.len() < data_off + 8 * len {
         bail!(
@@ -431,7 +458,13 @@ fn parse_d_schema(path: &Path) -> Result<Vec<i64>> {
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
         let off = data_off + 8 * i;
-        out.push(i64::from_le_bytes(bytes[off..off + 8].try_into().unwrap()));
+        let old_id = i64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+        let name = usize::try_from(old_id)
+            .ok()
+            .and_then(|idx| old_strings.get(idx))
+            .cloned()
+            .ok_or_else(|| anyhow!(".d column {i} references unknown old sym id {old_id}"))?;
+        out.push(name);
     }
     Ok(out)
 }
@@ -546,6 +579,33 @@ fn remap_one(old_id: i64, remap: &[i64]) -> Result<i64> {
 /// in a RayObj yet. Used so `?` early-returns don't leak the table.
 struct PartialTable<'a> {
     ptr: &'a mut *mut ffi::ray_t,
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn parse_d_schema_accepts_self_describing_string_schema() {
+        let _guard = crate::global_test_lock().lock().unwrap();
+        let _engine = crate::RayforceEngine::new().unwrap();
+        let dir = tempdir().unwrap();
+        let schema_path = dir.path().join(".d");
+
+        unsafe {
+            let mut schema = ffi::ray_vec_new(ffi::RAY_STR, 2);
+            for name in ["branch_id", "claimed_by_user_email"] {
+                schema = ffi::ray_str_vec_append(schema, name.as_ptr().cast(), name.len());
+            }
+            let c_path = std::ffi::CString::new(schema_path.to_string_lossy().as_bytes()).unwrap();
+            assert_eq!(ffi::ray_col_save(schema, c_path.as_ptr()), ffi::RAY_OK);
+            ffi::ray_release(schema);
+        }
+
+        let names = parse_d_schema(&schema_path, &[]).unwrap();
+        assert_eq!(names, ["branch_id", "claimed_by_user_email"]);
+    }
 }
 
 impl<'a> Drop for PartialTable<'a> {

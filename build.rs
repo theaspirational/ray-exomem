@@ -193,6 +193,8 @@ fn main() {
             cloned
         });
 
+    assert_rayforce_storage_contract(&rayforce_dir);
+
     println!("cargo:rerun-if-env-changed=RAYFORCE_DIR");
     for path in &[
         "Makefile",
@@ -222,6 +224,30 @@ fn main() {
     println!("cargo:rustc-link-lib=static=rayforce");
     println!("cargo:rustc-link-lib=m");
     println!("cargo:rustc-link-lib=pthread");
+}
+
+fn assert_rayforce_storage_contract(rayforce_dir: &Path) {
+    let splay_path = rayforce_dir.join("src/store/splay.c");
+    let source = fs::read_to_string(&splay_path).unwrap_or_else(|e| {
+        panic!(
+            "read Rayforce storage contract {}: {e}",
+            splay_path.display()
+        )
+    });
+    let required_markers = ["ray_sym_domain_open_or_create", "ray_col_save_sym_encoded"];
+    let missing: Vec<&str> = required_markers
+        .into_iter()
+        .filter(|marker| !source.contains(marker))
+        .collect();
+    if !missing.is_empty() {
+        panic!(
+            "unsupported pre-symbol-domain Rayforce checkout at {} (missing {}). \
+             ray-exomem requires per-table symbol domains; use Rayforce commit \
+             d7541c2 or newer",
+            rayforce_dir.display(),
+            missing.join(", ")
+        );
+    }
 }
 
 fn emit_bootstrap_seeds(manifest_dir: &Path) {
