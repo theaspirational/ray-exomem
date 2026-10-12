@@ -6,7 +6,7 @@ use std::{
 };
 
 const RAYFORCE_REPO: &str = "https://github.com/RayforceDB/rayforce.git";
-const RAYFORCE_REF: &str = "dev";
+const RAYFORCE_REF: &str = "master";
 
 fn run(cmd: &str, args: &[&str], dir: &PathBuf, label: &str) {
     let status = Command::new(cmd)
