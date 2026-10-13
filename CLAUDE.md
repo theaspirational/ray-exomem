@@ -49,6 +49,17 @@ ray-exomem stop
 
 Use `ray-exomem serve --bind 127.0.0.1:9780` for foreground debugging.
 
+## Deploy
+
+Production runs only on `myserv`, from the checkout `~/apps/ray-exomem`, as the systemd user unit `ray-exomem.service`. Deploy there with `scripts/deploy.sh`, never by copying a binary by hand:
+
+- `scripts/deploy.sh --check` — pull, build, run the gate. Touches nothing live.
+- `scripts/deploy.sh` — the same, then tar `~/.ray-exomem` into `~/backups/`, keep the old binary as `bin/ray-exomem.pre-deploy.<ts>`, swap, restart, and roll back by itself if `/auth/info` does not come up.
+
+The gate loads one snapshot of the live data with the running binary and with the new one (two throwaway no-auth daemons) and requires identical exports and `fact-row` query results for every exom. It exists because a rayforce or storage change can make a new binary read the same files as different strings with no error, and the first write after such a read makes it permanent. When the difference *is* the fix being deployed, rerun with `--accept-diff`.
+
+Do not print `systemctl --user status ray-exomem.service` or `ps` output for the daemon: the unit passes the database URL, password included, on the command line.
+
 ## Local dev with an HTTPS tunnel
 
 > Stale since 2026-10-13: the owner runs ray-exomem only on `myserv`, so do not follow this section on the dev Mac. It is kept as a description of how an authenticated instance is wired.
