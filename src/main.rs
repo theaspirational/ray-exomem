@@ -988,35 +988,6 @@ fn branch_param(branch: Option<&str>) -> &str {
         .unwrap_or(ray_exomem::brain::MAIN_BRANCH)
 }
 
-fn active_fact_tuple(
-    c: &ray_exomem::client::Client,
-    exom: &str,
-    fact_id: &str,
-    branch: Option<&str>,
-) -> Result<(String, String)> {
-    let body = c.get(&format!(
-        "/api/facts/{}?exom={}&branch={}",
-        encode_url_part(fact_id),
-        encode_url_part(exom),
-        encode_url_part(branch_param(branch))
-    ))?;
-    let v: serde_json::Value = serde_json::from_str(&body).context("parse fact detail JSON")?;
-    if v["fact"]["status"].as_str() != Some("active") {
-        anyhow::bail!("fact {:?} is not active", fact_id);
-    }
-    let predicate = v["fact"]["predicate"]
-        .as_str()
-        .or_else(|| v["fact"]["tuple"].get(1).and_then(|x| x.as_str()))
-        .context("fact detail missing predicate")?
-        .to_string();
-    let value = v["fact"]["tuple"]
-        .get(2)
-        .and_then(|x| x.as_str())
-        .context("fact detail missing value")?
-        .to_string();
-    Ok((predicate, value))
-}
-
 fn assert_fact_json(
     c: &ray_exomem::client::Client,
     exom: &str,
@@ -1052,6 +1023,15 @@ fn assert_fact_json(
     )
 }
 
+/// Rayfall retract by id: works for any value type, unlike naming the tuple.
+fn retract_by_id_form(exom: &str, fact_id: &str) -> String {
+    format!(
+        "(retract-fact {} \"{}\")",
+        exom,
+        fact_id.replace('"', "\\\"")
+    )
+}
+
 fn retract_fact_id(
     c: &ray_exomem::client::Client,
     exom: &str,
@@ -1059,14 +1039,7 @@ fn retract_fact_id(
     fact_id: &str,
     branch: Option<&str>,
 ) -> Result<String> {
-    let (predicate, value) = active_fact_tuple(c, exom, fact_id, branch)?;
-    let ray = format!(
-        "(retract-fact {} \"{}\" '{} \"{}\")",
-        exom,
-        fact_id.replace('"', "\\\""),
-        predicate.replace('"', "\\\""),
-        value.replace('"', "\\\""),
-    );
+    let ray = retract_by_id_form(exom, fact_id);
     c.post_text_with_headers(
         &format!(
             "/api/actions/eval?branch={}",
@@ -1838,21 +1811,7 @@ fn main() {
         } => {
             let c = ray_exomem::client::Client::new(Some(&addr));
             let h = ctx_headers(&actor, &session, &model);
-            let (predicate, value) = match active_fact_tuple(&c, &exom, &fact_id, branch.as_deref())
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let ray = format!(
-                "(retract-fact {} \"{}\" '{} \"{}\")",
-                exom,
-                fact_id.replace('"', "\\\""),
-                predicate.replace('"', "\\\""),
-                value.replace('"', "\\\""),
-            );
+            let ray = retract_by_id_form(&exom, &fact_id);
             match c.post_text_with_headers(
                 &format!(
                     "/api/actions/eval?branch={}",

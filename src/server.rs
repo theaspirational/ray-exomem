@@ -2849,24 +2849,6 @@ pub fn expand_query_validated(
     Ok(expanded)
 }
 
-/// Body-position operators that aren't relation references. Logical
-/// compounds descend into their children; comparison and `between` are
-/// terminal (their args are values, not predicate names).
-fn is_logical_body_op(name: &str) -> bool {
-    matches!(name, "and" | "or" | "not")
-}
-
-fn is_cmp_body_op(name: &str) -> bool {
-    matches!(name, "<" | "<=" | ">" | ">=" | "=" | "!=" | "between")
-}
-
-/// Aggregate forms: `(sum ?v pred [col] [by ?k key_col ...])`. The
-/// second argument is the source relation and gets validated; everything
-/// else is a var or column index.
-fn is_aggregate_body_op(name: &str) -> bool {
-    matches!(name, "count" | "sum" | "min" | "max" | "avg")
-}
-
 /// Compute the relation names a rule body in this exom may reference
 /// without being treated as a typo: the three typed-EDBs, the exom's own
 /// datoms table, all builtin view IDBs, and any user-defined rule heads.
@@ -2956,16 +2938,16 @@ fn validate_body_atom(
     if sym.starts_with('?') {
         return Ok(());
     }
-    if is_logical_body_op(sym) {
+    if rayfall_ast::is_logical_body_op(sym) {
         for child in &items[1..] {
             validate_body_atom(child, known, arities)?;
         }
         return Ok(());
     }
-    if is_cmp_body_op(sym) {
+    if rayfall_ast::is_cmp_body_op(sym) {
         return Ok(());
     }
-    if is_aggregate_body_op(sym) {
+    if rayfall_ast::is_aggregate_body_op(sym) {
         if let Some(pred) = items.get(2).and_then(|e| e.as_symbol()) {
             if !pred.starts_with('?') && !known.contains(pred) {
                 return Err(unknown_relation_error(pred, known));
@@ -3036,7 +3018,7 @@ fn execute_prepared_query(
              this usually means the rule failed to compile or evaluate inside rayforce"
         );
     }
-    let decoded = storage::decode_query_table(&raw, &expanded.normalized_query)?;
+    let decoded = storage::decode_query_table(&raw, &expanded.expanded_query)?;
     Ok((storage::format_decoded_query_table(&decoded), Some(decoded)))
 }
 
@@ -3464,11 +3446,11 @@ async fn api_eval_inner(
                 })();
                 r
             }
-            EvalForm::Canonical(CanonicalForm::RetractFact(mutation)) => {
-                let exom = mutation.exom.clone();
-                let pred = mutation.predicate.clone();
-                let fact_id = mutation.fact_id.clone();
-                let value = mutation.value.clone();
+            EvalForm::Canonical(CanonicalForm::RetractFact(retract)) => {
+                let exom = retract.exom.clone();
+                let fact_id = retract.fact_id.clone();
+                let tuple = retract.tuple.clone();
+                let pred = tuple.as_ref().map_or("", |(pred, _)| pred.as_str());
                 let eval_cmd = crate::commands::build_fact_retract(&exom, &branch_id, &fact_id);
                 if let Err(e) = crate::commands::commit_for_user(
                     &state.transactor,
@@ -3487,8 +3469,16 @@ async fn api_eval_inner(
                     let es = exoms
                         .get_mut(&exom)
                         .ok_or_else(|| anyhow::anyhow!("unknown exom '{}'", exom))?;
-                    es.brain
-                        .retract_fact_exact(&branch_id, &fact_id, &pred, &value, &ctx)?;
+                    match &tuple {
+                        Some((pred, value)) => es.brain.retract_fact_exact(
+                            &branch_id,
+                            &fact_id,
+                            pred,
+                            value.as_str(),
+                            &ctx,
+                        )?,
+                        None => es.brain.retract_fact(&branch_id, &fact_id, &ctx)?,
+                    };
                     es.datoms = storage::build_datoms_table(&es.brain, &branch_id)?;
                     state
                         .engine
@@ -3740,7 +3730,7 @@ async fn api_fact_detail(
     State(state): State<Arc<AppState>>,
     maybe_user: MaybeUser,
     AxumPath(id): AxumPath<String>,
-    Query(q): Query<ExomQuery>,
+    Query(q): Query<BranchExomQuery>,
 ) -> impl IntoResponse {
     let exom_raw = q.exom.as_deref().unwrap_or(DEFAULT_EXOM);
     let exom_path: crate::path::TreePath = match exom_raw.parse() {
@@ -3759,16 +3749,12 @@ async fn api_fact_detail(
         Err(e) => return ApiError::new("unknown_exom", e.to_string()).into_response(),
     };
     let brain = &es.brain;
-    let history = brain.fact_history(&id);
+    let branch = q.branch.as_deref().unwrap_or(brain::MAIN_BRANCH);
     let tx_index: std::collections::HashMap<crate::brain::TxId, &crate::brain::Tx> =
         brain.transactions().iter().map(|t| (t.tx_id, t)).collect();
-    match history.last() {
-        Some(f) => {
-            let status = if f.revoked_by_tx.is_some() {
-                "retracted"
-            } else {
-                "active"
-            };
+    match brain.fact_head(branch, &id) {
+        Some((f, active)) => {
+            let status = if active { "active" } else { "retracted" };
             let touch_history: Vec<_> = brain
                 .explain(&id)
                 .iter()

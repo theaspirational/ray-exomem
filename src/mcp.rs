@@ -879,7 +879,7 @@ fn run_query_body(
         Ok(raw) => {
             let output =
                 if unsafe { crate::ffi::ray_obj_type(raw.as_ptr()) } == crate::ffi::RAY_TABLE {
-                    match crate::storage::decode_query_table(&raw, &expanded.normalized_query) {
+                    match crate::storage::decode_query_table(&raw, &expanded.expanded_query) {
                         Ok(d) => {
                             let formatted = crate::storage::format_decoded_query_table(&d);
                             if let Some(obj) = d.as_object() {

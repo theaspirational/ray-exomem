@@ -305,35 +305,6 @@ export interface ClusterDetail {
 }
 
 // ---------------------------------------------------------------------------
-// Fact detail (from /api/facts/:id)
-// ---------------------------------------------------------------------------
-
-export interface FactDetail {
-	fact: {
-		id: string;
-		predicate: string;
-		tuple: unknown[];
-		interval?: { start: string; end: string } | null;
-		status: string;
-		cluster_ids: string[];
-	};
-	metadata?: {
-		predicate: string;
-		value: string;
-		confidence: number;
-		provenance: string;
-		created_at: string;
-		valid_from: string;
-		valid_to?: string | null;
-		created_by: string;
-		superseded_by?: string | null;
-		revoked_by?: string | null;
-	};
-	provenance: { type: 'base' | 'derived' };
-	touch_history: Array<{ event_id: string; event_type: string }>;
-}
-
-// ---------------------------------------------------------------------------
 // Search result types
 // ---------------------------------------------------------------------------
 

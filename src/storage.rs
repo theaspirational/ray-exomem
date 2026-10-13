@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 use crate::brain::{Belief, BeliefStatus, Brain, Branch, Fact, Observation, Tx, TxAction};
 use crate::datom;
 use crate::ffi;
-use crate::rayfall_parser::{self, DatomRole};
 use crate::system_schema;
 
 // ---------------------------------------------------------------------------
@@ -374,20 +373,14 @@ pub fn encode_fact_value_i64_datom(value: &crate::fact_value::FactValue) -> Opti
     }
 }
 
-pub fn decode_datom_to_string(encoded: i64) -> Result<String> {
-    let kind = datom::kind(encoded);
-    if kind == datom::KIND_I64 {
-        return Ok(encoded.to_string());
-    }
-    let payload = datom::payload(encoded);
-    sym_lookup(payload)
-}
-
-pub fn decode_query_table(table: &RayObj, query_source: &str) -> Result<Value> {
+/// Decode a query result table. `expanded_query` is the query the engine
+/// ran, rules included: it decides which I64 columns are interned ids (see
+/// `rayfall_ast::find_columns_are_ids`).
+pub fn decode_query_table(table: &RayObj, expanded_query: &str) -> Result<Value> {
     let tbl = table.as_ptr();
     let ncols = unsafe { ffi::ray_table_ncols(tbl) };
     let nrows = unsafe { ffi::ray_table_nrows(tbl) };
-    let roles = rayfall_parser::datom_query_projection_roles(query_source).unwrap_or_default();
+    let id_cols = crate::rayfall_ast::find_columns_are_ids(expanded_query)?;
 
     let mut columns = Vec::with_capacity(ncols as usize);
     let mut raw_types = Vec::with_capacity(ncols as usize);
@@ -417,9 +410,9 @@ pub fn decode_query_table(table: &RayObj, query_source: &str) -> Result<Value> {
                 row.push(Value::Null);
                 continue;
             }
-            let role = roles.get(c as usize).copied().flatten();
+            let is_id = id_cols.get(c as usize).copied().unwrap_or(false);
             let typ = unsafe { ffi::ray_obj_type(col) };
-            row.push(decode_query_cell(col, typ, r, role)?);
+            row.push(decode_query_cell(col, typ, r, is_id)?);
         }
         rows.push(Value::Array(row));
     }
@@ -587,12 +580,7 @@ fn format_table_row(cells: &[String], widths: &[usize]) -> String {
     line
 }
 
-fn decode_query_cell(
-    col: *mut ffi::ray_t,
-    typ: i8,
-    row: i64,
-    role: Option<DatomRole>,
-) -> Result<Value> {
+fn decode_query_cell(col: *mut ffi::ray_t, typ: i8, row: i64, is_id: bool) -> Result<Value> {
     match typ {
         ffi::RAY_STR => {
             let mut len = 0usize;
@@ -611,6 +599,10 @@ fn decode_query_cell(
             let value = unsafe { ffi::ray_vec_get_f64(col, row) };
             Ok(json!(value))
         }
+        ffi::RAY_I64 if is_id => {
+            let id = unsafe { ffi::ray_vec_get_i64(col, row) };
+            Ok(json!(sym_lookup(id)?))
+        }
         ffi::RAY_BOOL
         | ffi::RAY_U8
         | ffi::RAY_I16
@@ -620,25 +612,9 @@ fn decode_query_cell(
         | ffi::RAY_TIME
         | ffi::RAY_TIMESTAMP => {
             let value = unsafe { ffi::ray_vec_get_i64(col, row) };
-            decode_i64_query_cell(value, role)
+            Ok(json!(value))
         }
         _ => Ok(json!(format!("<{}>", type_name(typ)))),
-    }
-}
-
-fn decode_i64_query_cell(value: i64, role: Option<DatomRole>) -> Result<Value> {
-    match role {
-        Some(DatomRole::Entity) | Some(DatomRole::Value) => {
-            Ok(json!(decode_datom_to_string(value)?))
-        }
-        Some(DatomRole::Attribute) => Ok(json!(sym_lookup(value)?)),
-        None => {
-            if datom::kind(value) != datom::KIND_I64 {
-                Ok(json!(decode_datom_to_string(value)?))
-            } else {
-                Ok(json!(value))
-            }
-        }
     }
 }
 

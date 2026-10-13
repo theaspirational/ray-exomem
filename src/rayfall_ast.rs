@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::{anyhow, bail, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,11 +77,21 @@ pub struct CanonicalFactMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalFactRetract {
+    pub exom: String,
+    pub fact_id: String,
+    /// `(predicate, value)` the fact must currently hold. `None` retracts
+    /// whatever it holds — the only way to retract a typed (number or symbol)
+    /// value, which a Rayfall string literal cannot name.
+    pub tuple: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalForm {
     Query(CanonicalQuery),
     Rule(CanonicalRule),
     AssertFact(CanonicalFactMutation),
-    RetractFact(CanonicalFactMutation),
+    RetractFact(CanonicalFactRetract),
 }
 
 impl CanonicalQuery {
@@ -270,6 +282,21 @@ impl CanonicalFactMutation {
     }
 }
 
+impl CanonicalFactRetract {
+    fn to_expr(&self) -> Expr {
+        let mut items = vec![
+            Expr::symbol("retract-fact"),
+            Expr::symbol(self.exom.clone()),
+            Expr::string(self.fact_id.clone()),
+        ];
+        if let Some((predicate, value)) = &self.tuple {
+            items.push(Expr::Quote(Box::new(Expr::symbol(predicate.clone()))));
+            items.push(Expr::string(value.clone()));
+        }
+        Expr::list(items)
+    }
+}
+
 impl CanonicalForm {
     pub fn emit(&self) -> String {
         self.to_expr().emit()
@@ -280,7 +307,7 @@ impl CanonicalForm {
             Self::Query(query) => query.to_expr(),
             Self::Rule(rule) => rule.to_expr(),
             Self::AssertFact(mutation) => mutation.to_expr_with_head("assert-fact"),
-            Self::RetractFact(mutation) => mutation.to_expr_with_head("retract-fact"),
+            Self::RetractFact(retract) => retract.to_expr(),
         }
     }
 }
@@ -369,10 +396,8 @@ fn lower_with_env(
             items,
             env_exom,
         )?)]),
-        "retract-fact" => Ok(vec![CanonicalForm::RetractFact(lower_fact_mutation(
-            "retract-fact",
-            items,
-            env_exom,
+        "retract-fact" => Ok(vec![CanonicalForm::RetractFact(lower_fact_retract(
+            items, env_exom,
         )?)]),
         other if env_exom.is_some() => bail!("unsupported nested form inside in-exom: {other}"),
         other => bail!("unsupported exom-aware form: {other}"),
@@ -476,6 +501,37 @@ fn lower_fact_mutation(
     })
 }
 
+/// `(retract-fact [exom] "id")` retracts by id; `(retract-fact [exom] "id"
+/// 'pred "value")` also requires the fact to hold that tuple.
+fn lower_fact_retract(items: &[Expr], env_exom: Option<&str>) -> Result<CanonicalFactRetract> {
+    let head = "retract-fact";
+    let args = &items[1..];
+    if args.len() > 2 {
+        let mutation = lower_fact_mutation(head, items, env_exom)?;
+        return Ok(CanonicalFactRetract {
+            exom: mutation.exom,
+            fact_id: mutation.fact_id,
+            tuple: Some((mutation.predicate, mutation.value)),
+        });
+    }
+    let (explicit_exom, id) = match args {
+        [id] => (None, id),
+        [exom, id] => (Some(expect_symbol(exom, "retract-fact exom name")?), id),
+        _ => bail!("{head} requires a fact id"),
+    };
+    Ok(CanonicalFactRetract {
+        exom: resolve_exom(
+            head,
+            explicit_exom,
+            env_exom,
+            None,
+            "retract-fact missing exom name",
+        )?,
+        fact_id: expect_string(id, "fact id")?.to_string(),
+        tuple: None,
+    })
+}
+
 fn maybe_explicit_exom(args: &[Expr]) -> (Option<&str>, usize) {
     match args.first().and_then(Expr::as_symbol) {
         Some(exom) => (Some(exom), 1),
@@ -490,23 +546,26 @@ fn resolve_exom(
     default_exom: Option<&str>,
     missing_message: &str,
 ) -> Result<String> {
-    if let Some(env_name) = env_exom {
+    // Exoms are keyed by slash path; `a::b::main` is the same exom spelled
+    // the CLI way.
+    let slash = |name: &str| name.replace("::", "/");
+    let explicit_exom = explicit_exom.map(slash);
+    if let Some(env_name) = env_exom.map(slash) {
         return match explicit_exom {
             Some(explicit) if explicit != env_name => bail!(
                 "conflicting explicit exom '{}' inside in-exom '{}'",
                 explicit,
                 env_name
             ),
-            Some(explicit) => Ok(explicit.to_string()),
-            None => Ok(env_name.to_string()),
+            _ => Ok(env_name),
         };
     }
 
     if let Some(explicit) = explicit_exom {
-        return Ok(explicit.to_string());
+        return Ok(explicit);
     }
     if let Some(default) = default_exom {
-        return Ok(default.to_string());
+        return Ok(slash(default));
     }
 
     bail!("{missing_message}");
@@ -547,6 +606,155 @@ fn escape_string(value: &str) -> String {
         }
     }
     out
+}
+
+/// Body-position operators that aren't relation references. Logical
+/// compounds descend into their children; comparison and `between` are
+/// terminal (their args are values, not predicate names).
+pub fn is_logical_body_op(name: &str) -> bool {
+    matches!(name, "and" | "or" | "not")
+}
+
+pub fn is_cmp_body_op(name: &str) -> bool {
+    matches!(name, "<" | "<=" | ">" | ">=" | "=" | "!=" | "between")
+}
+
+/// Aggregate forms: `(sum ?v pred [col] [by ?k key_col ...])`. The
+/// second argument is the source relation and gets validated; everything
+/// else is a var or column index.
+pub fn is_aggregate_body_op(name: &str) -> bool {
+    matches!(name, "count" | "sum" | "min" | "max" | "avg")
+}
+
+/// Which `(find ...)` columns of an expanded query hold interned ids.
+///
+/// Rayforce strips the datom tag from every I64 result column, so a cell no
+/// longer says whether it is an interned string/symbol id or a plain number —
+/// only the query does. A variable is an id when a positive body atom binds
+/// it in an id slot: any slot of a triple pattern, any slot of an EDB except
+/// the `facts_i64` value, or a rule argument that is itself an id. The rest
+/// (the `facts_i64` value, `count`/`sum`/`avg`, find expressions) are numbers.
+// ponytail: a variable bound only through `(= ?x ?y)` reads as a number even
+// when ?y is an id; follow equalities if a query ever needs that.
+pub fn find_columns_are_ids(expanded_query: &str) -> Result<Vec<bool>> {
+    let expr = parse_one(expanded_query)?;
+    let clause = |name: &str| -> &[Expr] {
+        expr.as_list()
+            .into_iter()
+            .flatten()
+            .filter_map(Expr::as_list)
+            .find(|c| c.first().and_then(Expr::as_symbol) == Some(name))
+            .map_or(&[], |c| &c[1..])
+    };
+
+    // Each rule is `((head arg...) body...)`. Head columns only ever flip from
+    // number to id, so iterating to a fixpoint settles recursive rules.
+    let rules: Vec<(&str, &[Expr], &[Expr])> = clause("rules")
+        .iter()
+        .filter_map(|rule| {
+            let (head, body) = rule.as_list()?.split_first()?;
+            let (name, args) = head.as_list()?.split_first()?;
+            Some((name.as_symbol()?, args, body))
+        })
+        .collect();
+    let mut rule_cols: HashMap<&str, Vec<bool>> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for (name, args, body) in &rules {
+            let ids = id_vars(body, &rule_cols);
+            let cols = rule_cols.entry(name).or_default();
+            if cols.len() < args.len() {
+                cols.resize(args.len(), false);
+            }
+            for (i, arg) in args.iter().enumerate() {
+                if !cols[i] && term_is_id(arg, &ids) {
+                    cols[i] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let ids = id_vars(clause("where"), &rule_cols);
+    Ok(clause("find")
+        .iter()
+        .map(|term| term_is_id(term, &ids))
+        .collect())
+}
+
+fn term_is_id(term: &Expr, id_vars: &HashSet<&str>) -> bool {
+    match term {
+        Expr::Symbol(s) if s.starts_with('?') => id_vars.contains(s.as_str()),
+        Expr::Symbol(s) => s.parse::<f64>().is_err(),
+        Expr::String(_) | Expr::Quote(_) => true,
+        Expr::List(_) => false,
+    }
+}
+
+fn id_vars<'a>(body: &'a [Expr], rule_cols: &HashMap<&str, Vec<bool>>) -> HashSet<&'a str> {
+    let mut out = HashSet::new();
+    for atom in body {
+        collect_id_vars(atom, rule_cols, &mut out);
+    }
+    out
+}
+
+fn collect_id_vars<'a>(
+    atom: &'a Expr,
+    rule_cols: &HashMap<&str, Vec<bool>>,
+    out: &mut HashSet<&'a str>,
+) {
+    let Some((head, args)) = atom.as_list().and_then(|items| items.split_first()) else {
+        return;
+    };
+    let var = |e: &'a Expr| e.as_symbol().filter(|s| s.starts_with('?'));
+    let col_is_id = |rel: &str, col: usize| match rule_cols.get(rel) {
+        Some(cols) => cols.get(col).copied().unwrap_or(false),
+        None => !(rel == "facts_i64" && col == 2),
+    };
+    match head.as_symbol() {
+        // A negated atom binds nothing.
+        Some("not") => {}
+        Some(op) if is_logical_body_op(op) => {
+            for child in args {
+                collect_id_vars(child, rule_cols, out);
+            }
+        }
+        Some(op) if is_cmp_body_op(op) => {}
+        // `(agg ?out rel [col] [by ?key key_col ...])`
+        Some(op) if is_aggregate_body_op(op) => {
+            let Some(rel) = args.get(1).and_then(Expr::as_symbol) else {
+                return;
+            };
+            let id_col = |e: &Expr| {
+                e.as_symbol()
+                    .and_then(|s| s.parse().ok())
+                    .is_some_and(|col| col_is_id(rel, col))
+            };
+            let by = args.iter().position(|a| a.as_symbol() == Some("by"));
+            if matches!(op, "min" | "max") && by != Some(2) && args.get(2).is_some_and(id_col) {
+                out.extend(var(&args[0]));
+            }
+            for key in args[by.map_or(args.len(), |i| i + 1)..].chunks_exact(2) {
+                if id_col(&key[1]) {
+                    out.extend(var(&key[0]));
+                }
+            }
+        }
+        // `(rel ?a ?b ...)`: a rule or EDB call.
+        Some(rel) if !rel.starts_with('?') && rel != "_" && rel.parse::<f64>().is_err() => {
+            for (col, arg) in args.iter().enumerate() {
+                if col_is_id(rel, col) {
+                    out.extend(var(arg));
+                }
+            }
+        }
+        // `(?e 'attr ?v)`: every slot of a triple pattern is an interned id.
+        _ => out.extend(std::iter::once(head).chain(args).filter_map(var)),
+    }
 }
 
 struct Parser<'a> {
@@ -688,6 +896,71 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retract_fact_by_id_lowers_without_a_tuple() {
+        let lower = |src: &str| {
+            let options = LoweringOptions {
+                default_query_exom: None,
+                default_rule_exom: None,
+            };
+            lower_top_level(&parse_one(src).unwrap(), options).unwrap()
+        };
+        let by_id = CanonicalForm::RetractFact(CanonicalFactRetract {
+            exom: "main".into(),
+            fact_id: "f".into(),
+            tuple: None,
+        });
+        assert_eq!(lower("(retract-fact main \"f\")"), [by_id.clone()]);
+        assert_eq!(lower("(in-exom main (retract-fact \"f\"))"), [by_id.clone()]);
+        assert_eq!(by_id.emit(), "(retract-fact main \"f\")");
+        // `::` paths name the same exom as slash paths.
+        assert_eq!(
+            lower("(retract-fact work::main \"f\")")[0].emit(),
+            "(retract-fact work/main \"f\")"
+        );
+    }
+
+    #[test]
+    fn find_columns_are_ids_follows_rules_and_typed_edbs() {
+        let kinds = |q: &str| find_columns_are_ids(q).unwrap();
+        // Triple pattern, with either quote spelling for the attribute.
+        assert_eq!(
+            kinds("(query m (find ?e ?a ?v) (where (?e ?a ?v)))"),
+            [true, true, true]
+        );
+        assert_eq!(
+            kinds("(query m (find ?e ?v) (where (?e (quote fact/value) ?v)))"),
+            [true, true]
+        );
+        // Through a rule, including a constant head and a recursive rule.
+        assert_eq!(
+            kinds(
+                "(query m (find ?id ?band ?w ?n) (where (band ?id ?band ?w) (count ?n band)) \
+                 (rules ((band ?id \"small\" ?w) (facts_i64 ?id 'weight ?w) (< ?w 60)) \
+                        ((up ?a ?b) (?a 'parent ?b)) \
+                        ((up ?a ?c) (up ?a ?b) (?b 'parent ?c))))"
+            ),
+            [true, true, false, false]
+        );
+        assert_eq!(
+            kinds(
+                "(query m (find ?a ?c) (where (up ?a ?c)) \
+                 (rules ((up ?a ?c) (up ?a ?b) (?b 'parent ?c)) ((up ?a ?b) (?a 'parent ?b))))"
+            ),
+            [true, true]
+        );
+        // Aggregates: the result is a number, a group key takes its column's kind.
+        assert_eq!(
+            kinds("(query m (find ?attr ?avg ?v) (where (avg ?avg facts_i64 2 by ?attr 1 ?v 2)))"),
+            [true, false, false]
+        );
+        // A negated atom binds nothing.
+        assert_eq!(
+            kinds("(query m (find ?x) (where (not (?x 'a ?y))))"),
+            [false]
+        );
+    }
 
     fn lowering_options<'a>() -> LoweringOptions<'a> {
         LoweringOptions {

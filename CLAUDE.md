@@ -17,16 +17,15 @@ When adding or modifying any db/rayfall interactions test them against the runni
 
 ### Live-test loop (mandatory for db/rayfall/server changes)
 
-Unit tests (`cargo test`) are not a substitute for this — the bug classes that matter here (engine error surfacing, EDB auto-register, sym-table load, typed-fact binding) only show up against a live daemon. After making changes touching `src/server.rs`, `src/brain.rs`, `src/storage.rs`, `src/backend.rs`, `src/auth/**`, or rayforce FFI, always:
+Unit tests (`cargo test`) are not a substitute for this — the bug classes that matter here (engine error surfacing, EDB auto-register, sym-table load, typed-fact binding) only show up against a live daemon. After making changes touching `src/server.rs`, `src/brain.rs`, `src/storage.rs`, `src/backend.rs`, `src/auth/**`, or rayforce FFI, always exercise them on a **throwaway daemon**.
+
+> **Owner rule, 2026-10-13/14:** the real ray-exomem runs only on `myserv`. On the dev Mac the only daemon allowed is a throwaway test instance: temp data dir, no auth, not port 9780, killed right after. Never start one against `~/.ray-exomem`, never deploy to `~/.local/bin`, never leave one running.
 
 1. **Rebuild** — `cargo build --release --bin ray-exomem` (not just `cargo test`; `cargo test --lib --release` compiles a test binary, not the daemon binary).
-2. **Kill the old daemon** — `pgrep -lf "ray-exomem serve" | awk '{print $1}' | xargs -r kill`. Note: `ray-exomem stop` only finds daemons started via `ray-exomem daemon`; the dev-workflow `serve` invocation needs `kill` by PID.
-3. **Redeploy** — `ln -f target/release/ray-exomem ~/.local/bin/ray-exomem` (must be `ln -f`, not `cp` — see the macOS `com.apple.provenance` gotcha below).
-4. **Relaunch with env** — `set -a; source .env; set +a; nohup ~/.local/bin/ray-exomem serve --bind 127.0.0.1:9780 --auth-provider google --google-client-id "$GOOGLE_CLIENT_ID" --allowed-domains "$ALLOWED_DOMAINS" --database-url "$DATABASE_URL" > /tmp/ray-exomem.log 2>&1 &`.
-5. **Verify liveness** — `curl -s http://127.0.0.1:9780/auth/info` should return the auth provider config. `/auth/info` and `/auth/login` are the only routes that work without a session/bearer; everything under `/api`, `/mcp`, and `/events` 401s without auth.
-6. **Exercise the change** — for unauth-checked routes, `curl` is fine; for everything else, drive the change via the UI in a browser at your dev hostname or include `Authorization: Bearer <api-key>` in your curl. Logs tail at `/tmp/ray-exomem.log`.
-
-> **CLI / curl auth gap.** The `ray-exomem` CLI and the legacy `curl /api/status` probe both rely on unauthenticated access to `/api`. With `auth_store` configured (the default dev setup) the daemon now 401s those calls. Workarounds until CLI auth lands as a follow-up: (a) drive changes via the UI; (b) supply a bearer token from `/auth/api-keys`; or (c) run the daemon without `--auth-provider` for pure CLI/single-user work.
+2. **Start the throwaway daemon** — `D=$(mktemp -d); nohup target/release/ray-exomem serve --bind 127.0.0.1:9791 --data-dir "$D" > "$D/daemon.log" 2>&1 & echo $! > "$D/pid"`. No `--auth-provider`, no `--database-url`.
+3. **Verify liveness** — `curl -s http://127.0.0.1:9791/auth/info` returns `{"google_client_id":null,"provider":null}`.
+4. **Exercise the change** — with auth off, `/api` takes the actor from the request (`"actor":"me"` in JSON bodies, `&actor=me` on `/api/actions/eval`). Seed with `POST /api/actions/init {"path":"work"}`, then use `work::main`. Restart the daemon on the same `$D` when the change touches persistence. MCP tool writes need an authenticated user and fail here with `branch owned by …`; drive writes over HTTP or the CLI (`--addr 127.0.0.1:9791`).
+5. **Stop and clean up** — `kill "$(cat "$D/pid")"; rm -rf "$D"`. Kill by that PID only.
 
 The `server.build.identity` in `/api/status` is cached across rebuilds when `HEAD` hasn't moved; rely on binary mtime / size for "did the new code ship", not on the build-identity string.
 
@@ -51,6 +50,8 @@ ray-exomem stop
 Use `ray-exomem serve --bind 127.0.0.1:9780` for foreground debugging.
 
 ## Local dev with an HTTPS tunnel
+
+> Stale since 2026-10-13: the owner runs ray-exomem only on `myserv`, so do not follow this section on the dev Mac. It is kept as a description of how an authenticated instance is wired.
 
 Run the local daemon behind an HTTPS tunnel (Cloudflare Tunnel, ngrok, etc.) so Google OAuth's GSI id_token flow can call back to a real TLS hostname. Treat that hostname — not bare `localhost` — as the live test surface.
 
@@ -89,6 +90,10 @@ Gotchas:
 - JSONL auth replay must preserve `user.active` / `last_login` on repeated `user` entries. A naive replay that resets them on login makes deactivation appear to succeed in the UI while leaving the account effectively active.
 - The bootstrap health rules (`src/auth/routes.rs::health_bootstrap_rules`) use `<`/`>=`/`not` cmp bodies, constant-string rule heads (`(rule ... (health/water-band "small") ...)`), and body atoms against the typed `facts_i64` EDB. These rely on the eval-detail, runtime FFI, and DATOM typed-body fixes now merged in upstream `RayforceDB/rayforce`.
 - The runtime uses `ray_runtime_create_with_sym_err` so persisted user symbol IDs keep their slots across binary upgrades — builtins are appended afterwards, not interleaved. This is the correct design. **Caveat:** if a rayforce update changes the _shape_ of an existing builtin's interning (e.g. master commit `7db37e4` made `.sys.gc` a dotted sym backed by a `.sys` dict where it used to be a flat interned name), the old sym file's flat-interned `.sys.gc` slot will conflict with the new dotted registration path and queries fail with `RAY_ERROR code=domain` (empty msg). Startup runs a canonical health probe (`engine_health_probe` in `src/server.rs`) to surface this loudly instead of failing silently at first query time. **Do not wipe `~/.ray-exomem/sym` as a reflex** — that strands every persisted RAY_SYM column on disk (fact ids, predicates, etc.) because splay tables encode sym IDs by slot. The rewrite-on-startup migration (`src/sym_rewrite.rs`, design in `archive/2026-04-24_sym-rewrite-migration/design.md`) remaps legacy global-sym splays on boot; if the probe still fails after that, debug the rewrite, do not wipe.
+- A fact row belongs to the branch that wrote it. A write on one branch must never stamp `superseded_by_tx` / `revoked_by_tx` / `valid_to` on another branch's row — that leaks a what-if write into main's valid-time. A branch overrides an inherited fact with its own row (shadowing by depth in `Brain::newest_fact_rows`) and retracts one with a tombstone row (`created_by_tx == revoked_by_tx`, see `brain::tombstone`); the ancestor's row stays untouched. Reads that are "as of tx N" also ignore closes stamped by a later tx (`Brain::valid_to_as_of`).
+- `Vec::dedup_by` only drops *adjacent* duplicates. Sorting rows by `(branch depth, tx)` and then `dedup_by` on an id does not give one row per id. Use `Brain::newest_rows` (facts and beliefs both go through it).
+- Rayforce strips the datom tag from every I64 query result column (upstream `dl_untag_i64_col`, since Sept 2026). A result cell no longer says whether it is an interned string id or a number, so `storage::decode_query_table` asks the query instead: `rayfall_ast::find_columns_are_ids` infers each `(find ...)` column from the expanded query (triple-pattern and EDB slots are ids, the `facts_i64` value and aggregates are numbers). Always pass it the *expanded* query, rules included. `build.rs` tracks Rayforce `master`, so an upstream change like this lands silently on the next clean build — `tests/mcp_basic.rs::tool_query_pins_hyphenated_predicate_literal` is the canary.
+- Retract by id, not by tuple: `(retract-fact <exom> "<id>")`. The 3-arg form `(retract-fact <exom> "<id>" 'pred "value")` can only name string values, so it never matches a number or symbol fact. The CLI and UI use the by-id form.
 - Fact values are typed at the API/brain layer via `FactValue { I64 | Str | Sym }` (`src/fact_value.rs`). Splay emits parallel `facts_i64` / `facts_str` / `facts_sym` EDBs so Datalog rule bodies can run cmp/agg against numeric columns natively. Only typed asserts populate `facts_i64`. Bootstrap seeds numeric profile predicates (weight_kg, height_cm, age) as `FactValue::I64` — if a pre-typed-values exom still has them as `Str`, the derivation rules won't fire until those facts are re-asserted typed.
 
 ## Current agent-facing workflow
@@ -117,7 +122,7 @@ ray-exomem query --exom work::team::project::repo::main --json
 - `POST /api/query` — canonical read path for one Rayfall `(query ...)`
 - `POST /api/actions/assert-fact` — structured assert / replace by `fact_id`
 - `POST /api/actions/eval` — advanced mixed Rayfall execution
-- `GET /api/facts/<id>?exom=...` — fact detail + history
+- `GET /api/facts/<id>?exom=...&branch=...` — fact detail as seen from that branch (default `main`)
 - `GET /api/explain?exom=...&predicate=...` — explain by predicate or fact id
 - `GET /api/status` — health, stats, rules, current branch, `server.build.identity`
 

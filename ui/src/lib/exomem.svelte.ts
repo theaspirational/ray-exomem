@@ -4,7 +4,6 @@ import { toCli } from '$lib/path.svelte';
 
 import type {
 	ExomemClusterSummary,
-	FactDetail,
 	ExomemGraphResponse,
 	ExomemLoggedEvent,
 	ExomemSchemaResponse,
@@ -245,12 +244,6 @@ async function postText<T>(path: string, body: string): Promise<T> {
 
 export function fetchExomemStatus(exom = DEFAULT_EXOM): Promise<ExomemStatus> {
 	return readJson<ExomemStatus>(`api/status?exom=${encodeURIComponent(exom)}`);
-}
-
-export function fetchFactDetail(factId: string, exom = DEFAULT_EXOM): Promise<FactDetail> {
-	return readJson<FactDetail>(
-		`api/facts/${encodeURIComponent(factId)}?exom=${encodeURIComponent(exom)}`
-	);
 }
 
 export function fetchExomemSchema(
@@ -596,7 +589,12 @@ export function retractFact(
 	exom = DEFAULT_EXOM,
 	branch = 'main'
 ): Promise<{ ok: boolean; output?: string }> {
-	return retractFactById(factId, exom, branch);
+	// Retract by id: naming the tuple cannot express number or symbol values.
+	const ray = `(retract-fact ${exom} "${factId.replace(/"/g, '\\"')}")`;
+	return postText(
+		`api/actions/eval?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`,
+		ray
+	);
 }
 
 export function triggerEvaluate(exom = DEFAULT_EXOM): Promise<{
@@ -813,25 +811,6 @@ export async function updateFact(
 		},
 		exom,
 		branch
-	);
-}
-
-async function retractFactById(
-	factId: string,
-	exom = DEFAULT_EXOM,
-	branch = 'main'
-): Promise<{ ok: boolean; output?: string }> {
-	const detail = await fetchFactDetail(factId, exom);
-	const tuple = detail.fact?.tuple;
-	if (!Array.isArray(tuple) || tuple.length < 3) {
-		throw new Error(`Fact ${factId} does not have a retractable tuple shape`);
-	}
-	const predicate = String(tuple[1] ?? '');
-	const value = String(tuple[2] ?? '');
-	const ray = `(retract-fact ${exom} "${factId.replace(/"/g, '\\"')}" '${predicate.replace(/'/g, "\\'")} "${value.replace(/"/g, '\\"')}")`;
-	return postText(
-		`api/actions/eval?exom=${encodeURIComponent(exom)}&branch=${encodeURIComponent(branch)}`,
-		ray
 	);
 }
 
