@@ -578,20 +578,25 @@ impl Brain {
             ctx,
         )?;
         let new_valid_from = valid_from.unwrap_or(&tx_time).to_string();
-        // Close every prior open interval for this fact_id: stamp the closer's
-        // tx into superseded_by, and clamp valid_to to the earlier of the new
-        // valid_from or tx_time (so a backfilled supersede with valid_from in
-        // the past doesn't push valid_to backward past tx_time).
+        // Close every prior open interval for this fact_id written on this
+        // branch: stamp the closer's tx into superseded_by, and clamp valid_to
+        // to the earlier of the new valid_from or tx_time (so a backfilled
+        // supersede with valid_from in the past doesn't push valid_to backward
+        // past tx_time). Rows on other branches are never touched — an
+        // ancestor's row is shadowed by depth in `newest_fact_rows`, so a
+        // what-if write cannot move main's valid_to.
         let close_at = if new_valid_from.as_str() < tx_time.as_str() {
             new_valid_from.clone()
         } else {
             tx_time.clone()
         };
+        let tx_branch_index = &self.tx_branch_index;
         for f in self.facts.iter_mut() {
             if f.fact_id == fact_id
                 && f.revoked_by_tx.is_none()
                 && f.superseded_by_tx.is_none()
                 && f.valid_to.is_none()
+                && tx_branch_index.get(&f.created_by_tx).map(String::as_str) == Some(branch_id)
             {
                 f.superseded_by_tx = Some(tx_id);
                 f.valid_to = Some(close_at.clone());
@@ -621,13 +626,14 @@ impl Brain {
         fact_id: &str,
         ctx: &MutationContext,
     ) -> Result<TxId> {
-        if !self
+        let Some(head) = self
             .facts_on_branch(branch_id)
-            .iter()
-            .any(|f| f.fact_id == fact_id)
-        {
+            .into_iter()
+            .find(|f| f.fact_id == fact_id)
+            .cloned()
+        else {
             bail!("no active fact with id '{}'", fact_id);
-        }
+        };
         let (tx_id, tx_time) = self.alloc_tx(
             branch_id,
             TxAction::RetractFact,
@@ -635,15 +641,24 @@ impl Brain {
             "",
             ctx,
         )?;
-        // Retract closes the open head row for this fact_id: stamps revoked_by
-        // and overrides valid_to to the retract time. Even rows with an
-        // explicit future valid_to lose that projection — the assertion
-        // terminates now. Prior superseded rows keep their already-closed
-        // valid_to and are left untouched.
-        for f in self.facts.iter_mut() {
-            if f.fact_id == fact_id && f.revoked_by_tx.is_none() && f.superseded_by_tx.is_none() {
-                f.revoked_by_tx = Some(tx_id);
-                f.valid_to = Some(tx_time.clone());
+        if self.tx_branch(head.created_by_tx) != Some(branch_id) {
+            self.facts.push(tombstone(head, tx_id, &tx_time));
+        } else {
+            // Retract closes the open head row for this fact_id: stamps
+            // revoked_by and overrides valid_to to the retract time. Even rows
+            // with an explicit future valid_to lose that projection — the
+            // assertion terminates now. Prior superseded rows keep their
+            // already-closed valid_to and are left untouched.
+            let tx_branch_index = &self.tx_branch_index;
+            for f in self.facts.iter_mut() {
+                if f.fact_id == fact_id
+                    && f.revoked_by_tx.is_none()
+                    && f.superseded_by_tx.is_none()
+                    && tx_branch_index.get(&f.created_by_tx).map(String::as_str) == Some(branch_id)
+                {
+                    f.revoked_by_tx = Some(tx_id);
+                    f.valid_to = Some(tx_time.clone());
+                }
             }
         }
         self.rebuild_splay(DirtyTable::Fact)?;
@@ -659,39 +674,44 @@ impl Brain {
         ctx: &MutationContext,
     ) -> Result<TxId> {
         let value: FactValue = value.into();
-        let matching_ids: Vec<String> = self
+        let Some(head) = self
             .facts_on_branch(branch_id)
             .into_iter()
-            .filter(|f| f.fact_id == fact_id && f.predicate == predicate && f.value == value)
-            .map(|f| f.fact_id.clone())
-            .collect();
-
-        if matching_ids.is_empty() {
+            .find(|f| f.fact_id == fact_id && f.predicate == predicate && f.value == value)
+            .cloned()
+        else {
             bail!(
                 "no active fact matching ({}, {}, {})",
                 fact_id,
                 predicate,
                 value
             );
-        }
+        };
 
         let (tx_id, tx_time) = self.alloc_tx(
             branch_id,
             TxAction::RetractFact,
-            matching_ids.clone(),
+            vec![fact_id.into()],
             &format!("{} = {}", predicate, value),
             ctx,
         )?;
 
-        for fact in self.facts.iter_mut() {
-            if fact.revoked_by_tx.is_none()
-                && fact.fact_id == fact_id
-                && fact.predicate == predicate
-                && fact.value == value
-            {
-                fact.revoked_by_tx = Some(tx_id);
-                if fact.valid_to.is_none() {
-                    fact.valid_to = Some(tx_time.clone());
+        if self.tx_branch(head.created_by_tx) != Some(branch_id) {
+            self.facts.push(tombstone(head, tx_id, &tx_time));
+        } else {
+            let tx_branch_index = &self.tx_branch_index;
+            for fact in self.facts.iter_mut() {
+                if fact.revoked_by_tx.is_none()
+                    && fact.fact_id == fact_id
+                    && fact.predicate == predicate
+                    && fact.value == value
+                    && tx_branch_index.get(&fact.created_by_tx).map(String::as_str)
+                        == Some(branch_id)
+                {
+                    fact.revoked_by_tx = Some(tx_id);
+                    if fact.valid_to.is_none() {
+                        fact.valid_to = Some(tx_time.clone());
+                    }
                 }
             }
         }
@@ -884,42 +904,92 @@ impl Brain {
         }
     }
 
-    /// Whether `f` is visible on `branch_id` (branch-scoped retractions and creation branch).
-    fn fact_visible_on_branch(&self, f: &Fact, branch_id: &str) -> bool {
+    /// Whether `f` is retracted as seen from the `ancestors` chain at `as_of`.
+    fn fact_revoked_in_view(&self, f: &Fact, as_of: TxId, ancestors: &[String]) -> bool {
+        f.revoked_by_tx.is_some_and(|rev| {
+            rev <= as_of && self.branch_depth_of_tx(rev, ancestors) != usize::MAX
+        })
+    }
+
+    /// One row per id among the `rows` written on `ancestors` at or before
+    /// `as_of` that pass `keep`: closest branch wins, then newest tx. `key`
+    /// gives a row's id and creating tx.
+    fn newest_rows<'a, T>(
+        &self,
+        rows: &'a [T],
+        ancestors: &[String],
+        as_of: TxId,
+        key: impl Fn(&'a T) -> (&'a str, TxId),
+        keep: impl Fn(&T) -> bool,
+    ) -> Vec<&'a T> {
+        let depth = |r: &'a T| self.branch_depth_of_tx(key(r).1, ancestors);
+        let mut out: Vec<&'a T> = rows
+            .iter()
+            .filter(|r| key(r).1 <= as_of && depth(r) != usize::MAX && keep(r))
+            .collect();
+        out.sort_by_key(|r| (depth(r), Reverse(key(r).1)));
+        let mut seen = HashSet::new();
+        out.retain(|r| seen.insert(key(r).0));
+        out
+    }
+
+    fn newest_fact_rows(
+        &self,
+        ancestors: &[String],
+        as_of: TxId,
+        keep: impl Fn(&Fact) -> bool,
+    ) -> Vec<&Fact> {
+        self.newest_rows(
+            &self.facts,
+            ancestors,
+            as_of,
+            |f| (f.fact_id.as_str(), f.created_by_tx),
+            keep,
+        )
+    }
+
+    fn newest_belief_rows(
+        &self,
+        ancestors: &[String],
+        as_of: TxId,
+        keep: impl Fn(&Belief) -> bool,
+    ) -> Vec<&Belief> {
+        self.newest_rows(
+            &self.beliefs,
+            ancestors,
+            as_of,
+            |b| (b.belief_id.as_str(), b.created_by_tx),
+            keep,
+        )
+    }
+
+    /// Facts live on `branch_id` at `as_of`. The head row per `fact_id`
+    /// decides: a revoked head hides the fact even when an ancestor still
+    /// holds an open row, which is how a branch retracts an inherited fact
+    /// without touching the ancestor's row (see `tombstone`).
+    fn live_facts(&self, branch_id: &str, as_of: TxId) -> Vec<&Fact> {
         let ancestors = self.branch_ancestors(branch_id);
-        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
-        if !self.tx_on_branches(f.created_by_tx, &branch_set) {
-            return false;
-        }
-        if let Some(sup) = f.superseded_by_tx {
-            if self.tx_on_branches(sup, &branch_set) {
-                return false;
-            }
-        }
-        if let Some(rev) = f.revoked_by_tx {
-            if self.tx_on_branches(rev, &branch_set) {
-                return false;
-            }
-        }
-        true
+        let mut heads = self.newest_fact_rows(&ancestors, as_of, |_| true);
+        heads.retain(|f| !self.fact_revoked_in_view(f, as_of, &ancestors));
+        heads
+    }
+
+    /// The row that decides `fact_id` on `branch_id`, and whether the fact is
+    /// still active there (`false` = retracted in this view).
+    pub fn fact_head(&self, branch_id: &str, fact_id: &str) -> Option<(&Fact, bool)> {
+        let ancestors = self.branch_ancestors(branch_id);
+        let head = self
+            .newest_fact_rows(&ancestors, TxId::MAX, |f| f.fact_id == fact_id)
+            .pop()?;
+        Some((
+            head,
+            !self.fact_revoked_in_view(head, TxId::MAX, &ancestors),
+        ))
     }
 
     /// Active facts visible on a specific branch (ancestor inheritance + shadowing by `fact_id`).
     pub fn facts_on_branch(&self, branch_id: &str) -> Vec<&Fact> {
-        let ancestors = self.branch_ancestors(branch_id);
-        let mut visible: Vec<&Fact> = self
-            .facts
-            .iter()
-            .filter(|f| self.fact_visible_on_branch(f, branch_id))
-            .collect();
-        visible.sort_by_key(|f| {
-            (
-                self.branch_depth_of_tx(f.created_by_tx, &ancestors),
-                Reverse(f.created_by_tx),
-            )
-        });
-        visible.dedup_by(|a, b| a.fact_id == b.fact_id);
-        visible
+        self.live_facts(branch_id, TxId::MAX)
     }
 
     /// `"local"` | `"inherited"` | `"override"` for UI badges on the selected branch view.
@@ -1100,21 +1170,7 @@ impl Brain {
     /// `belief/status` triple for revoked / superseded beliefs (otherwise
     /// `belief-row` silently drops them after revoke).
     pub fn latest_belief_per_id_on_branch(&self, branch_id: &str) -> Vec<&Belief> {
-        let ancestors = self.branch_ancestors(branch_id);
-        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
-        let mut visible: Vec<&Belief> = self
-            .beliefs
-            .iter()
-            .filter(|b| self.tx_on_branches(b.created_by_tx, &branch_set))
-            .collect();
-        visible.sort_by_key(|b| {
-            (
-                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
-                Reverse(b.created_by_tx),
-            )
-        });
-        visible.dedup_by(|a, b| a.belief_id == b.belief_id);
-        visible
+        self.newest_belief_rows(&self.branch_ancestors(branch_id), TxId::MAX, |_| true)
     }
 
     /// Latest belief per `belief_id` on main.
@@ -1122,98 +1178,21 @@ impl Brain {
         self.latest_belief_per_id_on_branch(MAIN_BRANCH)
     }
 
-    fn fact_active_as_of_on_branch(&self, f: &Fact, tx_id: TxId, branch_id: &str) -> bool {
-        let ancestors = self.branch_ancestors(branch_id);
-        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
-        if f.created_by_tx > tx_id {
-            return false;
-        }
-        if !self.tx_on_branches(f.created_by_tx, &branch_set) {
-            return false;
-        }
-        if let Some(rev) = f.revoked_by_tx {
-            if rev <= tx_id && self.tx_on_branches(rev, &branch_set) {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Return facts as they were at a specific transaction (branch = that tx's branch).
     pub fn facts_as_of(&self, tx_id: TxId) -> Vec<&Fact> {
-        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
-        let ancestors = self.branch_ancestors(view_branch);
-        let mut visible: Vec<&Fact> = self
-            .facts
-            .iter()
-            .filter(|f| self.fact_active_as_of_on_branch(f, tx_id, view_branch))
-            .collect();
-        visible.sort_by_key(|f| {
-            (
-                self.branch_depth_of_tx(f.created_by_tx, &ancestors),
-                Reverse(f.created_by_tx),
-            )
-        });
-        visible.dedup_by(|a, b| a.fact_id == b.fact_id);
-        visible
+        self.live_facts(self.tx_branch(tx_id).unwrap_or("main"), tx_id)
     }
 
     /// Active beliefs on a branch (closest branch wins per `belief_id`, then `claim_text`).
     pub fn beliefs_on_branch(&self, branch_id: &str) -> Vec<&Belief> {
         let ancestors = self.branch_ancestors(branch_id);
-        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
-        let mut visible: Vec<&Belief> = self
-            .beliefs
-            .iter()
-            .filter(|b| self.tx_on_branches(b.created_by_tx, &branch_set))
-            .collect();
-        visible.sort_by_key(|b| {
-            (
-                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
-                Reverse(b.created_by_tx),
-            )
-        });
-        visible.dedup_by(|a, b| a.belief_id == b.belief_id);
-        visible.retain(|b| b.status == BeliefStatus::Active);
-        visible.dedup_by(|a, b| a.claim_text == b.claim_text);
-        visible
+        active_beliefs(self.newest_belief_rows(&ancestors, TxId::MAX, |_| true))
     }
 
     /// Return beliefs as they were known at a specific transaction (transaction-time travel).
     pub fn beliefs_as_of(&self, tx_id: TxId) -> Vec<&Belief> {
-        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
-        let ancestors = self.branch_ancestors(view_branch);
-        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
-        let mut latest_tx_by_claim: HashMap<&str, TxId> = HashMap::new();
-        for b in &self.beliefs {
-            if b.created_by_tx > tx_id {
-                continue;
-            }
-            if !self.tx_on_branches(b.created_by_tx, &branch_set) {
-                continue;
-            }
-            let entry = latest_tx_by_claim.entry(b.claim_text.as_str()).or_insert(0);
-            if b.created_by_tx > *entry {
-                *entry = b.created_by_tx;
-            }
-        }
-        let mut out: Vec<&Belief> = self
-            .beliefs
-            .iter()
-            .filter(|b| {
-                b.created_by_tx <= tx_id
-                    && self.tx_on_branches(b.created_by_tx, &branch_set)
-                    && latest_tx_by_claim.get(b.claim_text.as_str()) == Some(&b.created_by_tx)
-            })
-            .collect();
-        out.sort_by_key(|b| {
-            (
-                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
-                Reverse(b.created_by_tx),
-            )
-        });
-        out.dedup_by(|a, b| a.claim_text == b.claim_text);
-        out
+        let ancestors = self.branch_ancestors(self.tx_branch(tx_id).unwrap_or("main"));
+        active_beliefs(self.newest_belief_rows(&ancestors, tx_id, |_| true))
     }
 
     // -----------------------------------------------------------------------
@@ -1233,26 +1212,42 @@ impl Brain {
             .collect()
     }
 
+    /// `valid_to` as it was known at `as_of`: a close stamped by a later
+    /// supersede or retract had not happened yet, so the interval reads open.
+    // ponytail: an explicit valid_to that `retract_fact` later overwrote also
+    // reads open; keep the original end on the row if that ever matters.
+    fn valid_to_as_of<'a>(&self, f: &'a Fact, as_of: TxId) -> Option<&'a str> {
+        let valid_to = f.valid_to.as_deref();
+        let superseded_later = f.superseded_by_tx.is_some_and(|tx| tx > as_of);
+        let retract_stamped_later = f.revoked_by_tx.is_some_and(|rev| {
+            rev > as_of
+                && self
+                    .transactions
+                    .iter()
+                    .find(|tx| tx.tx_id == rev)
+                    .is_some_and(|tx| valid_to == Some(tx.tx_time.as_str()))
+        });
+        if superseded_later || retract_stamped_later {
+            None
+        } else {
+            valid_to
+        }
+    }
+
     /// Bitemporal: facts as known at tx_id that were valid at the given real-world timestamp.
     pub fn facts_bitemporal(&self, tx_id: TxId, timestamp: &str) -> Vec<&Fact> {
         let view_branch = self.tx_branch(tx_id).unwrap_or("main");
         let ancestors = self.branch_ancestors(view_branch);
-        let mut visible: Vec<&Fact> = self
-            .facts
+        let live: HashSet<&str> = self
+            .live_facts(view_branch, tx_id)
             .iter()
-            .filter(|f| {
-                self.fact_active_as_of_on_branch(f, tx_id, view_branch)
-                    && is_valid_at(&f.valid_from, f.valid_to.as_deref(), timestamp)
-            })
+            .map(|f| f.fact_id.as_str())
             .collect();
-        visible.sort_by_key(|f| {
-            (
-                self.branch_depth_of_tx(f.created_by_tx, &ancestors),
-                Reverse(f.created_by_tx),
-            )
-        });
-        visible.dedup_by(|a, b| a.fact_id == b.fact_id);
-        visible
+        self.newest_fact_rows(&ancestors, tx_id, |f| {
+            live.contains(f.fact_id.as_str())
+                && !self.fact_revoked_in_view(f, tx_id, &ancestors)
+                && is_valid_at(&f.valid_from, self.valid_to_as_of(f, tx_id), timestamp)
+        })
     }
 
     /// Return beliefs that were valid at a given real-world timestamp (current knowledge).
@@ -1269,43 +1264,15 @@ impl Brain {
     }
 
     /// Bitemporal: beliefs as known at tx_id that were valid at the given real-world timestamp.
+    /// Per `belief_id` the newest row already in effect at `timestamp` decides,
+    /// so an earlier claim shows until its revision takes effect and a revoke
+    /// row hides the belief.
     pub fn beliefs_bitemporal(&self, tx_id: TxId, timestamp: &str) -> Vec<&Belief> {
-        let view_branch = self.tx_branch(tx_id).unwrap_or("main");
-        let ancestors = self.branch_ancestors(view_branch);
-        let branch_set: HashSet<&str> = ancestors.iter().map(|s| s.as_str()).collect();
-        let mut latest_tx_by_claim: HashMap<&str, TxId> = HashMap::new();
-        for b in &self.beliefs {
-            if b.created_by_tx > tx_id {
-                continue;
-            }
-            if !self.tx_on_branches(b.created_by_tx, &branch_set) {
-                continue;
-            }
-            if !is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp) {
-                continue;
-            }
-            let entry = latest_tx_by_claim.entry(b.claim_text.as_str()).or_insert(0);
-            if b.created_by_tx > *entry {
-                *entry = b.created_by_tx;
-            }
-        }
-        let mut out: Vec<&Belief> = self
-            .beliefs
-            .iter()
-            .filter(|b| {
-                b.created_by_tx <= tx_id
-                    && self.tx_on_branches(b.created_by_tx, &branch_set)
-                    && latest_tx_by_claim.get(b.claim_text.as_str()) == Some(&b.created_by_tx)
-                    && is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp)
-            })
-            .collect();
-        out.sort_by_key(|b| {
-            (
-                self.branch_depth_of_tx(b.created_by_tx, &ancestors),
-                Reverse(b.created_by_tx),
-            )
-        });
-        out.dedup_by(|a, b| a.claim_text == b.claim_text);
+        let ancestors = self.branch_ancestors(self.tx_branch(tx_id).unwrap_or("main"));
+        let mut out = active_beliefs(
+            self.newest_belief_rows(&ancestors, tx_id, |b| b.valid_from.as_str() <= timestamp),
+        );
+        out.retain(|b| is_valid_at(&b.valid_from, b.valid_to.as_deref(), timestamp));
         out
     }
 
@@ -1569,6 +1536,28 @@ fn fmt_belief_history(beliefs: &[&Belief]) -> String {
         })
         .collect();
     items.join("; ")
+}
+
+/// Keep the active head rows, one per `claim_text` (first wins).
+fn active_beliefs(mut heads: Vec<&Belief>) -> Vec<&Belief> {
+    let mut seen = HashSet::new();
+    heads.retain(|b| b.status == BeliefStatus::Active && seen.insert(b.claim_text.as_str()));
+    heads
+}
+
+/// Branch-local retraction of an inherited fact: a copy of the ancestor's head
+/// row, created and revoked by the same tx. It becomes the retracting branch's
+/// head for that `fact_id`, hiding the fact there without touching the
+/// ancestor's row.
+fn tombstone(head: Fact, tx_id: TxId, tx_time: &str) -> Fact {
+    Fact {
+        created_at: tx_time.into(),
+        created_by_tx: tx_id,
+        superseded_by_tx: None,
+        revoked_by_tx: Some(tx_id),
+        valid_to: Some(tx_time.into()),
+        ..head
+    }
 }
 
 /// Check if a half-open interval [valid_from, valid_to) contains the given timestamp.
@@ -3275,6 +3264,131 @@ mod tests {
         assert_eq!(on_exp[0].value, "red");
     }
 
+    fn show(facts: Vec<&Fact>) -> Vec<String> {
+        let mut out: Vec<String> = facts
+            .iter()
+            .map(|f| format!("{}={}", f.fact_id, f.value))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn branch_writes_leave_ancestor_rows_untouched() {
+        let ctx = MutationContext::default();
+        let mut brain = Brain::new();
+        let put = |brain: &mut Brain, branch: &str, id: &str, value: &str| {
+            brain
+                .assert_fact(branch, id, id, value, 1.0, "t", None, None, &ctx)
+                .unwrap()
+        };
+        put(&mut brain, MAIN_BRANCH, "runtime", "ready");
+        put(&mut brain, MAIN_BRANCH, "fact-2", "stopped");
+        let tx3 = put(&mut brain, MAIN_BRANCH, "backup", "verified");
+        let main_rows = serde_json::to_value(&brain.facts).unwrap();
+
+        brain
+            .create_branch(MAIN_BRANCH, "what-if", "what-if", &ctx)
+            .unwrap();
+        let tx_override = put(&mut brain, "what-if", "fact-2", "running");
+        brain.retract_fact("what-if", "backup", &ctx).unwrap();
+
+        // Neither the override nor the retract may touch main's rows:
+        // value, valid_to, superseded_by and revoked_by all stay as written.
+        assert_eq!(serde_json::to_value(&brain.facts[..3]).unwrap(), main_rows);
+        assert_eq!(
+            show(brain.facts_on_branch(MAIN_BRANCH)),
+            ["backup=verified", "fact-2=stopped", "runtime=ready"]
+        );
+        assert_eq!(
+            show(brain.facts_on_branch("what-if")),
+            ["fact-2=running", "runtime=ready"]
+        );
+        // "What main knew at tx3", read at a timestamp after the branch writes.
+        assert_eq!(
+            show(brain.facts_bitemporal(tx3, "9999-01-01T00:00:00Z")),
+            ["backup=verified", "fact-2=stopped", "runtime=ready"]
+        );
+        // The branch's own past: the retract had not happened yet.
+        assert_eq!(
+            show(brain.facts_as_of(tx_override)),
+            ["backup=verified", "fact-2=running", "runtime=ready"]
+        );
+
+        // Main keeps working on the same fact ids, and does not clobber the
+        // branch's override in return.
+        put(&mut brain, MAIN_BRANCH, "fact-2", "draining");
+        brain.retract_fact(MAIN_BRANCH, "backup", &ctx).unwrap();
+        assert_eq!(
+            show(brain.facts_on_branch(MAIN_BRANCH)),
+            ["fact-2=draining", "runtime=ready"]
+        );
+        assert_eq!(
+            show(brain.facts_on_branch("what-if")),
+            ["fact-2=running", "runtime=ready"]
+        );
+    }
+
+    #[test]
+    fn as_of_ignores_closes_stamped_by_later_txs() {
+        let ctx = MutationContext::default();
+        let mut brain = Brain::new();
+        let mut put = |value: &str| {
+            brain
+                .assert_fact(MAIN_BRANCH, "f", "f", value, 1.0, "t", None, None, &ctx)
+                .unwrap()
+        };
+        let tx1 = put("v1");
+        let tx2 = put("v2");
+        let tx3 = brain.retract_fact(MAIN_BRANCH, "f", &ctx).unwrap();
+
+        let later = "9999-01-01T00:00:00Z";
+        assert_eq!(show(brain.facts_bitemporal(tx1, later)), ["f=v1"]);
+        assert_eq!(show(brain.facts_bitemporal(tx2, later)), ["f=v2"]);
+        assert!(brain.facts_bitemporal(tx3, later).is_empty());
+        // The retracted head must not let the superseded v1 resurface.
+        assert!(brain.facts_as_of(tx3).is_empty());
+    }
+
+    #[test]
+    fn revised_belief_shows_once_with_other_beliefs_between() {
+        let ctx = MutationContext::default();
+        let mut brain = Brain::new();
+        let mut put = |id: &str, claim: &str| {
+            brain
+                .revise_belief(MAIN_BRANCH, id, claim, 0.9, Some(vec![]), "r", None, None, &ctx)
+                .unwrap()
+        };
+        let tx1 = put("a", "x");
+        put("b", "other");
+        let tx3 = put("a", "y");
+        let show = |beliefs: Vec<&Belief>| {
+            let mut out: Vec<String> = beliefs
+                .iter()
+                .map(|b| format!("{}={}", b.belief_id, b.claim_text))
+                .collect();
+            out.sort();
+            out
+        };
+        let later = "9999-01-01T00:00:00Z";
+
+        assert_eq!(show(brain.beliefs_on_branch(MAIN_BRANCH)), ["a=y", "b=other"]);
+        assert_eq!(
+            show(brain.latest_belief_per_id_on_branch(MAIN_BRANCH)),
+            ["a=y", "b=other"]
+        );
+        assert_eq!(show(brain.beliefs_as_of(tx3)), ["a=y", "b=other"]);
+        assert_eq!(show(brain.beliefs_as_of(tx1)), ["a=x"]);
+        assert_eq!(show(brain.beliefs_bitemporal(tx3, later)), ["a=y", "b=other"]);
+
+        // A revoked belief is gone from every "now" view, not rolled back to
+        // its earlier claim.
+        let tx4 = brain.revoke_belief(MAIN_BRANCH, "a", &ctx).unwrap();
+        assert_eq!(show(brain.beliefs_as_of(tx4)), ["b=other"]);
+        assert_eq!(show(brain.beliefs_bitemporal(tx4, later)), ["b=other"]);
+        assert_eq!(show(brain.beliefs_bitemporal(tx3, later)), ["a=y", "b=other"]);
+    }
+
     #[test]
     fn revoke_belief_drops_from_current_keeps_history() {
         let mut brain = Brain::new();
@@ -3892,7 +4006,7 @@ mod tests {
         .unwrap();
 
         let raw = engine.eval_raw(&expanded).unwrap();
-        let decoded = crate::storage::decode_query_table(&raw, &query_source).unwrap();
+        let decoded = crate::storage::decode_query_table(&raw, &expanded).unwrap();
         let rows = decoded["rows"].as_array().cloned().unwrap_or_default();
         assert!(
             !rows.is_empty(),
